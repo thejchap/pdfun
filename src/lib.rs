@@ -4,6 +4,8 @@ use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 
+mod font_metrics;
+
 // ── Built-in PDF fonts ─────────────────────────────────────────
 
 const BUILTIN_FONTS: &[&str] = &[
