@@ -1,0 +1,37 @@
+[project]
+name = "pdfun"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Justin Chapman", email = "commonmodestudio@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "click>=8.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.8",
+    "tryke",
+    "ty>=0.0.26",
+]
+
+[project.scripts]
+pdfun = "pdfun:main"
+
+[tool.maturin]
+module-name = "pdfun._core"
+python-packages = ["pdfun"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[tool.uv.sources]
+tryke = { git = "https://github.com/thejchap/tryke", branch = "main" }
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
