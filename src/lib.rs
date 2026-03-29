@@ -40,6 +40,8 @@ struct PageContent {
     height: f64,
     operations: Vec<PdfOp>,
     fonts_used: Vec<String>,
+    current_font: Option<String>,
+    current_font_size: Option<f32>,
 }
 
 impl PageContent {
@@ -49,6 +51,8 @@ impl PageContent {
             height,
             operations: Vec::new(),
             fonts_used: Vec::new(),
+            current_font: None,
+            current_font_size: None,
         }
     }
 }
@@ -236,12 +240,27 @@ impl Page {
         if !page.fonts_used.contains(&name.to_string()) {
             page.fonts_used.push(name.to_string());
         }
+        page.current_font = Some(name.to_string());
+        page.current_font_size = Some(size as f32);
         page.operations.push(PdfOp::BeginText);
         page.operations.push(PdfOp::SetFont {
             name: name.to_string(),
             size: size as f32,
         });
         Ok(())
+    }
+
+    fn measure_text(&self, text: &str) -> PyResult<f64> {
+        let page = self.content.lock().unwrap();
+        let font_name = page
+            .current_font
+            .as_deref()
+            .ok_or_else(|| PyValueError::new_err("no font set; call set_font() first"))?;
+        let font_size = page.current_font_size.unwrap();
+        let metrics = font_metrics::get_builtin_metrics(font_name)
+            .ok_or_else(|| PyValueError::new_err(format!("no metrics for font: {font_name}")))?;
+        let width: u32 = text.bytes().map(|b| metrics.widths[b as usize] as u32).sum();
+        Ok(width as f64 * font_size as f64 / 1000.0)
     }
 
     fn draw_text(&mut self, x: f64, y: f64, text: &str) -> PyResult<()> {
@@ -305,6 +324,15 @@ impl FontId {
     }
 }
 
+/// measure text width without a page context.
+#[pyfunction]
+fn text_width(text: &str, font: &str, size: f64) -> PyResult<f64> {
+    let metrics = font_metrics::get_builtin_metrics(font)
+        .ok_or_else(|| PyValueError::new_err(format!("unknown font: {font}")))?;
+    let width: u32 = text.bytes().map(|b| metrics.widths[b as usize] as u32).sum();
+    Ok(width as f64 * size / 1000.0)
+}
+
 // ── Module ─────────────────────────────────────────────────────
 
 #[pymodule]
@@ -317,6 +345,7 @@ mod _core {
         m.add_class::<Page>()?;
         m.add_class::<FontDatabase>()?;
         m.add_class::<FontId>()?;
+        m.add_function(wrap_pyfunction!(text_width, m)?)?;
         Ok(())
     }
 }

@@ -5,7 +5,6 @@ from tryke import describe, expect, test
 
 from pdfun import FontDatabase, FontId, PdfDocument
 
-
 # ── API surface (cf. WeasyPrint test_api.py) ────────────────────
 
 with describe("PdfDocument API"):
@@ -232,6 +231,61 @@ with describe("Text - built-in fonts"):
         page.draw_text(72.0, 720.0, "Big")
         data = doc.to_bytes()
         expect(data).to_contain(b"24 Tf")
+
+
+with describe("Text measurement"):
+
+    @test
+    def measure_text_helvetica():
+        """measure_text() returns width in points for current font."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_font("Helvetica", 12.0)
+        # "Hello" in Helvetica: H=722 e=556 l=222 l=222 o=556 = 2278
+        # 2278 * 12 / 1000 = 27.336
+        width = page.measure_text("Hello")
+        expect(abs(width - 27.336) < 0.01).to_be_truthy()
+
+    @test
+    def measure_text_courier_monospace():
+        """Courier produces uniform character widths."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_font("Courier", 10.0)
+        # every char is 600 units, so 5 chars = 3000 * 10 / 1000 = 30.0
+        width = page.measure_text("Hello")
+        expect(abs(width - 30.0) < 0.01).to_be_truthy()
+
+    @test
+    def measure_text_empty_string():
+        """measure_text() returns 0.0 for empty string."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_font("Helvetica", 12.0)
+        width = page.measure_text("")
+        expect(width).to_equal(0.0)
+
+    @test
+    def measure_text_no_font_raises():
+        """measure_text() raises ValueError if no font is set."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        expect(lambda: page.measure_text("test")).to_raise(ValueError)
+
+    @test
+    def text_width_standalone():
+        """text_width() measures text without a page."""
+        from pdfun import text_width
+
+        width = text_width("Hello", "Helvetica", 12.0)
+        expect(abs(width - 27.336) < 0.01).to_be_truthy()
+
+    @test
+    def text_width_unknown_font_raises():
+        """text_width() raises ValueError for unknown font."""
+        from pdfun import text_width
+
+        expect(lambda: text_width("test", "FakeFont", 12.0)).to_raise(ValueError)
 
 
 # ── Font loading (cf. WeasyPrint test_fonts.py) ─────────────────
