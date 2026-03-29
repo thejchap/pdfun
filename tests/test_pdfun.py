@@ -287,6 +287,19 @@ with describe("Text measurement"):
 
         expect(lambda: text_width("test", "FakeFont", 12.0)).to_raise(ValueError)
 
+    @test
+    def measure_text_different_fonts_differ():
+        """Different fonts produce different widths."""
+        from pdfun import text_width
+
+        helv = text_width("Hello World", "Helvetica", 12.0)
+        times = text_width("Hello World", "Times-Roman", 12.0)
+        courier = text_width("Hello World", "Courier", 12.0)
+        # these should all be different (Courier is monospace)
+        expect(helv).not_.to_equal(times)
+        expect(helv).not_.to_equal(courier)
+        expect(times).not_.to_equal(courier)
+
 
 # ── Font loading (cf. WeasyPrint test_fonts.py) ─────────────────
 # These remain red (NotImplementedError) until Phase 2.
