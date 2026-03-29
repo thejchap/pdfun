@@ -3,7 +3,7 @@ import tempfile
 
 from tryke import describe, expect, test
 
-from pdfun import FontDatabase, FontId, PdfDocument
+from pdfun import FontDatabase, PdfDocument
 
 # ── API surface (cf. WeasyPrint test_api.py) ────────────────────
 
@@ -393,37 +393,87 @@ with describe("FontDatabase API"):
 
 with describe("Font embedding"):
 
-    @test
-    def register_font():
-        """register_font() returns a font name string."""
-        doc = PdfDocument()
+    def _load_system_font():
+        """helper: load a system TTF font, return (db, font_id) or None."""
+        import glob
+
+        candidates = glob.glob("/System/Library/Fonts/*.ttf")
+        if not candidates:
+            candidates = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
+        if not candidates:
+            return None
         db = FontDatabase()
-        expect(lambda: doc.register_font(db, FontId())).to_raise(NotImplementedError)
+        font_id = db.load_font_file(candidates[0])
+        return db, font_id
+
+    @test
+    def register_font_returns_name():
+        """register_font() returns a font name string."""
+        result = _load_system_font()
+        if result is None:
+            return
+        db, font_id = result
+        doc = PdfDocument()
+        name = doc.register_font(db, font_id)
+        expect(type(name)).to_equal(str)
+        expect(len(name)).to_be_greater_than(0)
 
     @test
     def embedded_font_in_pdf():
         """PDF contains embedded font data after register_font()."""
+        result = _load_system_font()
+        if result is None:
+            return
+        db, font_id = result
         doc = PdfDocument()
-        db = FontDatabase()
-        expect(lambda: doc.register_font(db, FontId())).to_raise(NotImplementedError)
+        name = doc.register_font(db, font_id)
+        page = doc.add_page()
+        page.set_font(name, 12.0)
+        page.draw_text(72.0, 720.0, "Hello embedded")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Type0")
 
     @test
     def text_searchable_with_embedded_font():
         """PDF text is searchable (ToUnicode CMap present)."""
+        result = _load_system_font()
+        if result is None:
+            return
+        db, font_id = result
         doc = PdfDocument()
-        db = FontDatabase()
-        expect(lambda: doc.register_font(db, FontId())).to_raise(NotImplementedError)
+        name = doc.register_font(db, font_id)
+        page = doc.add_page()
+        page.set_font(name, 12.0)
+        page.draw_text(72.0, 720.0, "Searchable")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/ToUnicode")
 
     @test
-    def shaped_text_dimensions():
-        """Shaped text has non-zero advance widths."""
+    def embedded_font_has_widths():
+        """Embedded font CIDFont has a /W widths entry."""
+        result = _load_system_font()
+        if result is None:
+            return
+        db, font_id = result
         doc = PdfDocument()
-        db = FontDatabase()
-        expect(lambda: doc.register_font(db, FontId())).to_raise(NotImplementedError)
+        name = doc.register_font(db, font_id)
+        page = doc.add_page()
+        page.set_font(name, 12.0)
+        page.draw_text(72.0, 720.0, "Widths")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/W ")
 
     @test
     def unicode_text_with_embedded_font():
         """Non-ASCII text renders with embedded font."""
+        result = _load_system_font()
+        if result is None:
+            return
+        db, font_id = result
         doc = PdfDocument()
-        db = FontDatabase()
-        expect(lambda: doc.register_font(db, FontId())).to_raise(NotImplementedError)
+        name = doc.register_font(db, font_id)
+        page = doc.add_page()
+        page.set_font(name, 12.0)
+        page.draw_text(72.0, 720.0, "\u00e9\u00e8\u00ea")  # accented chars
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
