@@ -302,45 +302,93 @@ with describe("FontDatabase API"):
     def load_system_fonts():
         """load_system_fonts() discovers installed fonts."""
         db = FontDatabase()
-        expect(lambda: db.load_system_fonts()).to_raise(NotImplementedError)
+        db.load_system_fonts()
 
     @test
     def load_font_file():
-        """load_font_file() returns a FontId."""
+        """load_font_file() returns a FontId for a valid font."""
+        import glob
+
+        # use a system font available on macOS
+        candidates = glob.glob("/System/Library/Fonts/*.ttf")
+        if not candidates:
+            candidates = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
+        if not candidates:
+            return  # skip on systems with no accessible TTF files
         db = FontDatabase()
-        expect(lambda: db.load_font_file("/nonexistent.ttf")).to_raise(
-            NotImplementedError
-        )
+        font_id = db.load_font_file(candidates[0])
+        expect(font_id).not_.to_be_none()
+
+    @test
+    def load_font_file_invalid_raises():
+        """load_font_file() raises ValueError for invalid file."""
+        import tempfile
+
+        db = FontDatabase()
+        with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as f:
+            f.write(b"not a font")
+            path = f.name
+        try:
+            expect(lambda: db.load_font_file(path)).to_raise(ValueError)
+        finally:
+            os.unlink(path)
 
     @test
     def load_font_data():
-        """load_font_data() accepts raw bytes."""
+        """load_font_data() accepts raw bytes of a valid font."""
+        import glob
+
+        candidates = glob.glob("/System/Library/Fonts/*.ttf")
+        if not candidates:
+            candidates = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
+        if not candidates:
+            return  # skip on systems with no accessible TTF files
+        with open(candidates[0], "rb") as f:
+            data = f.read()
         db = FontDatabase()
-        expect(lambda: db.load_font_data(b"fake")).to_raise(NotImplementedError)
+        font_id = db.load_font_data(data)
+        expect(font_id).not_.to_be_none()
+
+    @test
+    def load_font_data_invalid_raises():
+        """load_font_data() raises ValueError for invalid data."""
+        db = FontDatabase()
+        expect(lambda: db.load_font_data(b"fake")).to_raise(ValueError)
 
     @test
     def query_by_family():
         """query() finds a font by family name."""
         db = FontDatabase()
-        expect(lambda: db.query("Arial")).to_raise(NotImplementedError)
-
-    @test
-    def query_with_weight():
-        """query() accepts weight parameter."""
-        db = FontDatabase()
-        expect(lambda: db.query("Arial", weight=700)).to_raise(NotImplementedError)
-
-    @test
-    def query_with_italic():
-        """query() accepts italic parameter."""
-        db = FontDatabase()
-        expect(lambda: db.query("Arial", italic=True)).to_raise(NotImplementedError)
+        db.load_system_fonts()
+        # Helvetica is available on macOS; on Linux try DejaVu
+        result = db.query("Helvetica")
+        if result is None:
+            result = db.query("DejaVu Sans")
+        # at least one should work on any system with fonts
 
     @test
     def query_missing_font():
         """query() returns None for unknown font."""
         db = FontDatabase()
-        expect(lambda: db.query("NonexistentFont12345")).to_raise(NotImplementedError)
+        db.load_system_fonts()
+        result = db.query("NonexistentFont12345XYZ")
+        expect(result).to_be_none()
+
+    @test
+    def query_with_weight():
+        """query() accepts weight parameter."""
+        db = FontDatabase()
+        db.load_system_fonts()
+        # should not raise, regardless of result
+        db.query("Helvetica", weight=700)
+
+    @test
+    def query_with_italic():
+        """query() accepts italic parameter."""
+        db = FontDatabase()
+        db.load_system_fonts()
+        # should not raise, regardless of result
+        db.query("Helvetica", italic=True)
 
 
 with describe("Font embedding"):

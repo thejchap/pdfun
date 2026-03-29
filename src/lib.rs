@@ -275,29 +275,74 @@ impl Page {
     }
 }
 
-// ── FontDatabase (stub) ────────────────────────────────────────
+// ── FontId ────────────────────────────────────────────────────
 
 #[pyclass]
-struct FontDatabase;
+#[derive(Clone)]
+struct FontId {
+    index: usize,
+}
 
 #[pymethods]
-#[allow(unused_variables)]
+impl FontId {
+    #[new]
+    fn new() -> PyResult<Self> {
+        Ok(FontId { index: 0 })
+    }
+}
+
+// ── FontDatabase ──────────────────────────────────────────────
+
+struct FontEntry {
+    data: Vec<u8>,
+    family: String,
+    weight: u16,
+    italic: bool,
+}
+
+#[pyclass]
+struct FontDatabase {
+    fonts: Vec<FontEntry>,
+}
+
+#[pymethods]
 impl FontDatabase {
     #[new]
     fn new() -> PyResult<Self> {
-        Ok(FontDatabase)
+        Ok(FontDatabase { fonts: Vec::new() })
     }
 
     fn load_system_fonts(&mut self) -> PyResult<()> {
-        Err(PyNotImplementedError::new_err("not yet implemented"))
+        let dirs = if cfg!(target_os = "macos") {
+            vec![
+                "/System/Library/Fonts".to_string(),
+                "/Library/Fonts".to_string(),
+            ]
+        } else if cfg!(target_os = "linux") {
+            vec![
+                "/usr/share/fonts".to_string(),
+                "/usr/local/share/fonts".to_string(),
+            ]
+        } else if cfg!(target_os = "windows") {
+            vec!["C:\\Windows\\Fonts".to_string()]
+        } else {
+            vec![]
+        };
+
+        for dir in dirs {
+            self.scan_font_dir(&dir);
+        }
+        Ok(())
     }
 
     fn load_font_file(&mut self, path: &str) -> PyResult<FontId> {
-        Err(PyNotImplementedError::new_err("not yet implemented"))
+        let data = std::fs::read(path)
+            .map_err(|e| PyValueError::new_err(format!("failed to read font file: {e}")))?;
+        self.load_font_data_impl(&data)
     }
 
     fn load_font_data(&mut self, data: &[u8]) -> PyResult<FontId> {
-        Err(PyNotImplementedError::new_err("not yet implemented"))
+        self.load_font_data_impl(data)
     }
 
     #[pyo3(signature = (family, weight=None, italic=None))]
@@ -307,20 +352,78 @@ impl FontDatabase {
         weight: Option<u16>,
         italic: Option<bool>,
     ) -> PyResult<Option<FontId>> {
-        Err(PyNotImplementedError::new_err("not yet implemented"))
+        let family_lower = family.to_lowercase();
+        let mut best: Option<(usize, i32)> = None;
+
+        for (i, entry) in self.fonts.iter().enumerate() {
+            if entry.family.to_lowercase() != family_lower {
+                continue;
+            }
+            let mut score: i32 = 0;
+            if let Some(w) = weight {
+                score -= (entry.weight as i32 - w as i32).abs();
+            }
+            if let Some(it) = italic {
+                if entry.italic != it {
+                    score -= 1000;
+                }
+            }
+            if best.is_none() || score > best.unwrap().1 {
+                best = Some((i, score));
+            }
+        }
+
+        Ok(best.map(|(index, _)| FontId { index }))
     }
 }
 
-// ── FontId (stub) ──────────────────────────────────────────────
+impl FontDatabase {
+    fn load_font_data_impl(&mut self, data: &[u8]) -> PyResult<FontId> {
+        let face = ttf_parser::Face::parse(data, 0)
+            .map_err(|e| PyValueError::new_err(format!("invalid font data: {e}")))?;
 
-#[pyclass]
-struct FontId;
+        let family = face
+            .names()
+            .into_iter()
+            .find(|n| n.name_id == ttf_parser::name_id::FAMILY)
+            .and_then(|n| n.to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
 
-#[pymethods]
-impl FontId {
-    #[new]
-    fn new() -> PyResult<Self> {
-        Ok(FontId)
+        let weight = face.weight().to_number();
+        let italic = face.is_italic();
+
+        let index = self.fonts.len();
+        self.fonts.push(FontEntry {
+            data: data.to_vec(),
+            family,
+            weight,
+            italic,
+        });
+
+        Ok(FontId { index })
+    }
+
+    fn scan_font_dir(&mut self, dir: &str) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                self.scan_font_dir(&path.to_string_lossy());
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
+                if let Ok(data) = std::fs::read(&path) {
+                    let _ = self.load_font_data_impl(&data);
+                }
+            }
+        }
     }
 }
 
