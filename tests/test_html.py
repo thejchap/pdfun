@@ -432,3 +432,250 @@ with describe("HtmlDocument - lists"):
         doc = HtmlDocument(string="<li>Orphan</li>")
         data = doc.to_bytes()
         expect(data).to_contain(b"Orphan")
+
+
+# ── Malformed HTML ───────────────────────────────────────────
+
+with describe("HtmlDocument - malformed HTML"):
+
+    @test
+    def unclosed_tag():
+        """Unclosed <p> does not crash; text is still rendered."""
+        doc = HtmlDocument(string="<p>Hello")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hello")
+
+    @test
+    def unclosed_bold():
+        """Unclosed <b> does not crash; text is rendered."""
+        doc = HtmlDocument(string="<p><b>Bold text")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Bold text")
+
+    @test
+    def extra_closing_tags():
+        """Extra closing tags do not crash."""
+        doc = HtmlDocument(string="<p>Text</p></p></div>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Text")
+
+    @test
+    def nested_same_block():
+        """<p> inside <p> is auto-closed by html5ever."""
+        doc = HtmlDocument(string="<p>First<p>Second")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"First")
+        expect(data).to_contain(b"Second")
+
+    @test
+    def misnested_inline():
+        """Overlapping inline tags handled gracefully."""
+        doc = HtmlDocument(string="<p><b>bold <i>both</b> italic</i></p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"bold")
+        expect(data).to_contain(b"both")
+        expect(data).to_contain(b"italic")
+
+    @test
+    def no_root_element():
+        """Content without <html>/<body> still renders."""
+        doc = HtmlDocument(string="Just text, no tags at all")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Just text")
+
+    @test
+    def completely_empty():
+        """Empty string produces valid PDF."""
+        doc = HtmlDocument(string="")
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+
+# ── Unknown/void elements ────────────────────────────────────
+
+with describe("HtmlDocument - unknown and void elements"):
+
+    @test
+    def unknown_tag_renders_content():
+        """<custom-tag> content is still rendered."""
+        doc = HtmlDocument(string="<custom-tag>Inside</custom-tag>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Inside")
+
+    @test
+    def void_elements_no_crash():
+        """Void elements (img, hr, input) do not crash."""
+        html = "<p>Before</p><hr><img><input><p>After</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Before")
+        expect(data).to_contain(b"After")
+
+    @test
+    def self_closing_br():
+        """<br/> (self-closing) works the same as <br>."""
+        doc = HtmlDocument(string="<p>Line one<br/>Line two</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Line one")
+        expect(data).to_contain(b"Line two")
+
+    @test
+    def anchor_tag_preserves_text():
+        """<a> tag text is rendered (link target is ignored)."""
+        doc = HtmlDocument(string='<p>Click <a href="url">here</a></p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Click here")
+
+
+# ── Whitespace handling ──────────────────────────────────────
+
+with describe("HtmlDocument - whitespace"):
+
+    @test
+    def leading_trailing_whitespace():
+        """Leading/trailing whitespace in tags is collapsed."""
+        doc = HtmlDocument(string="<p>  Hello  </p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hello")
+
+    @test
+    def newlines_collapsed():
+        """Newlines within text are collapsed to spaces."""
+        doc = HtmlDocument(string="<p>Hello\nworld</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hello world")
+
+    @test
+    def tabs_collapsed():
+        """Tabs are collapsed to spaces."""
+        doc = HtmlDocument(string="<p>Hello\tworld</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hello world")
+
+    @test
+    def inter_element_whitespace():
+        """Whitespace between inline elements is preserved."""
+        doc = HtmlDocument(string="<p><b>Bold</b> <i>italic</i></p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Bold")
+        expect(data).to_contain(b"italic")
+
+    @test
+    def whitespace_only_paragraph():
+        """Paragraph with only whitespace produces valid PDF."""
+        doc = HtmlDocument(string="<p>   \n\t  </p>")
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def multiple_spaces_between_words():
+        """Multiple spaces between words collapse to one."""
+        doc = HtmlDocument(string="<p>Hello     world</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hello world")
+
+
+# ── Unicode and special characters ───────────────────────────
+
+with describe("HtmlDocument - unicode"):
+
+    @test
+    def unicode_text():
+        """Unicode characters pass through without crashing."""
+        doc = HtmlDocument(string="<p>Héllo wörld</p>")
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+        # Non-ASCII bytes are hex-encoded in PDF Type1 fonts
+        expect(data).to_contain("Héllo wörld".encode().hex().upper().encode())
+
+    @test
+    def numeric_entity():
+        """Numeric character reference &#169; is decoded."""
+        doc = HtmlDocument(string="<p>&#169; 2024</p>")
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+        # © is 0xC2A9 in UTF-8, hex-encoded in PDF
+        expect(data).to_contain(b"C2A9")
+
+    @test
+    def hex_entity():
+        """Hex character reference &#x2603; is decoded."""
+        doc = HtmlDocument(string="<p>&#x2603;</p>")
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+        # Snowman ☃ is 0xE29883 in UTF-8, hex-encoded in PDF
+        expect(data).to_contain(b"E29883")
+
+    @test
+    def multiple_named_entities():
+        """Multiple named entities decode correctly."""
+        doc = HtmlDocument(string="<p>&lt;tag&gt; &amp; &quot;quotes&quot;</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b'<tag> & "quotes"')
+
+
+# ── Deeply nested structures ─────────────────────────────────
+
+with describe("HtmlDocument - nesting"):
+
+    @test
+    def deeply_nested_divs():
+        """Deeply nested divs do not crash."""
+        html = "<div>" * 50 + "Content" + "</div>" * 50
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Content")
+
+    @test
+    def deeply_nested_lists():
+        """Deeply nested lists render without crash."""
+        html = ""
+        for i in range(10):
+            html += f"<ul><li>Level {i}"
+        html += "".join("</li></ul>" for _ in range(10))
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Level 0")
+        expect(data).to_contain(b"Level 9")
+
+    @test
+    def mixed_block_nesting():
+        """Block elements nested inside other block elements."""
+        html = "<div><p>Para in div</p><div><p>Nested deeper</p></div></div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Para in div")
+        expect(data).to_contain(b"Nested deeper")
+
+    @test
+    def inline_in_heading():
+        """Multiple inline styles in a heading."""
+        html = "<h2><b>Bold</b> and <i>italic</i> heading</h2>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Bold")
+        expect(data).to_contain(b"italic")
+        expect(data).to_contain(b"heading")
+
+
+# ── Large documents ──────────────────────────────────────────
+
+with describe("HtmlDocument - large documents"):
+
+    @test
+    def many_paragraphs():
+        """500 paragraphs render without crash, spanning multiple pages."""
+        paras = "".join(f"<p>Paragraph {i}</p>" for i in range(500))
+        doc = HtmlDocument(string=paras)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Paragraph 0")
+        expect(data).to_contain(b"Paragraph 499")
+
+    @test
+    def long_single_paragraph():
+        """Very long single paragraph wraps correctly."""
+        text = " ".join(f"word{i}" for i in range(500))
+        doc = HtmlDocument(string=f"<p>{text}</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"word0")
+        expect(data).to_contain(b"word499")

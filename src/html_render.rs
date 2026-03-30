@@ -2,7 +2,7 @@ use markup5ever_rcdom::{Handle, NodeData};
 
 use crate::layout::{BlockStyle, LayoutInner, Paragraph, TextRun};
 
-// ── Constants matching Python UA_STYLES ──────────────────────
+// ── Constants ────────────────────────────────────────────────
 
 const BLOCK_ELEMENTS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6", "p", "div"];
 const SKIP_ELEMENTS: &[&str] = &["head", "title", "style", "script", "meta", "link"];
@@ -12,6 +12,7 @@ const LIST_ELEMENTS: &[&str] = &["ul", "ol"];
 const UL_MARKERS: &[&str] = &["-", "o", "-"];
 const LIST_INDENT: f32 = 36.0;
 const LIST_ITEM_SPACING: f32 = 4.0;
+const MAX_NESTING_DEPTH: usize = 256;
 
 struct UaStyle {
     font: &'static str,
@@ -33,7 +34,7 @@ fn ua_style(tag: &str) -> UaStyle {
 
 // ── Font variant resolution ──────────────────────────────────
 
-fn resolve_font(base_font: &str, bold: bool, italic: bool) -> String {
+fn resolve_font(base_font: &'static str, bold: bool, italic: bool) -> &'static str {
     let eff_bold = bold || base_font.contains("Bold");
     let eff_italic = italic || base_font.contains("Italic") || base_font.contains("Oblique");
 
@@ -43,8 +44,7 @@ fn resolve_font(base_font: &str, bold: bool, italic: bool) -> String {
             (true, false) => "Helvetica-Bold",
             (false, true) => "Helvetica-Oblique",
             (true, true) => "Helvetica-BoldOblique",
-        }
-        .to_string();
+        };
     }
     if base_font.starts_with("Times") {
         return match (eff_bold, eff_italic) {
@@ -52,8 +52,7 @@ fn resolve_font(base_font: &str, bold: bool, italic: bool) -> String {
             (true, false) => "Times-Bold",
             (false, true) => "Times-Italic",
             (true, true) => "Times-BoldItalic",
-        }
-        .to_string();
+        };
     }
     if base_font.starts_with("Courier") {
         return match (eff_bold, eff_italic) {
@@ -61,16 +60,21 @@ fn resolve_font(base_font: &str, bold: bool, italic: bool) -> String {
             (true, false) => "Courier-Bold",
             (false, true) => "Courier-Oblique",
             (true, true) => "Courier-BoldOblique",
-        }
-        .to_string();
+        };
     }
-    base_font.to_string()
+    base_font
 }
 
 // ── List tracking ────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListType {
+    Ordered,
+    Unordered,
+}
+
 struct ListEntry {
-    list_type: String,
+    list_type: ListType,
     counter: usize,
 }
 
@@ -101,20 +105,23 @@ impl<'a> HtmlRenderer<'a> {
         }
     }
 
-    // ── Tree walk (generates start/end/data events like Python HTMLParser) ──
+    // ── Tree walk ───────────────────────────────────────────
 
-    fn walk_node(&mut self, handle: &Handle) {
+    fn walk_node(&mut self, handle: &Handle, depth: usize) {
+        if depth > MAX_NESTING_DEPTH {
+            return;
+        }
         match &handle.data {
             NodeData::Document => {
                 for child in handle.children.borrow().iter() {
-                    self.walk_node(child);
+                    self.walk_node(child, depth + 1);
                 }
             }
             NodeData::Element { name, .. } => {
                 let tag = name.local.as_ref();
                 self.handle_start_tag(tag);
                 for child in handle.children.borrow().iter() {
-                    self.walk_node(child);
+                    self.walk_node(child, depth + 1);
                 }
                 self.handle_end_tag(tag);
             }
@@ -126,15 +133,20 @@ impl<'a> HtmlRenderer<'a> {
         }
     }
 
-    // ── Event handlers (direct port of Python _BlockExtractor) ──
+    // ── Event handlers ──────────────────────────────────────
 
     fn handle_start_tag(&mut self, tag: &str) {
         if SKIP_ELEMENTS.contains(&tag) {
             self.skip_depth += 1;
         } else if LIST_ELEMENTS.contains(&tag) {
             self.flush();
+            let list_type = if tag == "ol" {
+                ListType::Ordered
+            } else {
+                ListType::Unordered
+            };
             self.list_stack.push(ListEntry {
-                list_type: tag.to_string(),
+                list_type,
                 counter: 0,
             });
         } else if tag == "li" {
@@ -182,7 +194,7 @@ impl<'a> HtmlRenderer<'a> {
         self.current_text.push_str(data);
     }
 
-    // ── Flush logic (same as Python _flush_run / _flush) ──
+    // ── Flush logic ─────────────────────────────────────────
 
     fn flush_run(&mut self) {
         let text = std::mem::take(&mut self.current_text);
@@ -198,7 +210,7 @@ impl<'a> HtmlRenderer<'a> {
 
         self.runs.push(TextRun {
             text,
-            font_name: resolved_font,
+            font_name: resolved_font.to_string(),
             font_size: style.font_size,
             color: None,
         });
@@ -214,35 +226,39 @@ impl<'a> HtmlRenderer<'a> {
         let tag = self.current_tag.as_deref();
 
         // List item: add marker and indentation
-        if tag == Some("li") && !self.list_stack.is_empty() {
-            let entry = self.list_stack.last().unwrap();
-            let depth = self.list_stack.len() - 1;
-            let padding_left = (depth as f32 + 1.0) * LIST_INDENT;
+        // Not collapsed: bare <li> outside a list falls through to plain paragraph
+        #[allow(clippy::collapsible_if)]
+        if tag == Some("li") {
+            if let Some(entry) = self.list_stack.last() {
+                let depth = self.list_stack.len() - 1;
+                let padding_left = (depth as f32 + 1.0) * LIST_INDENT;
 
-            let marker_text = if entry.list_type == "ol" {
-                format!("{}.", entry.counter)
-            } else {
-                UL_MARKERS[depth % UL_MARKERS.len()].to_string()
-            };
+                let marker_text = if entry.list_type == ListType::Ordered {
+                    format!("{}.", entry.counter)
+                } else {
+                    UL_MARKERS[depth % UL_MARKERS.len()].to_string()
+                };
 
-            let marker = TextRun {
-                text: marker_text,
-                font_name: "Helvetica".to_string(),
-                font_size: 12.0,
-                color: None,
-            };
+                let marker = TextRun {
+                    text: marker_text,
+                    font_name: "Helvetica".to_string(),
+                    font_size: 12.0,
+                    color: None,
+                };
 
-            self.layout.push_paragraph(Paragraph {
-                runs,
-                line_height: None,
-                spacing_after: LIST_ITEM_SPACING,
-                style: BlockStyle {
-                    padding_left,
-                    ..BlockStyle::default()
-                },
-                marker: Some(marker),
-            });
-            return;
+                self.layout.push_paragraph(Paragraph {
+                    runs,
+                    line_height: None,
+                    spacing_after: LIST_ITEM_SPACING,
+                    style: BlockStyle {
+                        padding_left,
+                        ..BlockStyle::default()
+                    },
+                    marker: Some(marker),
+                });
+                return;
+            }
+            // Bare <li> outside a list — fall through to plain paragraph
         }
 
         let style = ua_style(tag.unwrap_or(""));
@@ -259,6 +275,6 @@ impl<'a> HtmlRenderer<'a> {
 /// Walk an html5ever DOM and produce paragraphs into a `LayoutInner`.
 pub fn render_dom_to_layout(document: &Handle, layout: &mut LayoutInner) {
     let mut renderer = HtmlRenderer::new(layout);
-    renderer.walk_node(document);
+    renderer.walk_node(document, 0);
     renderer.flush();
 }
