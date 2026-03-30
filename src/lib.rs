@@ -1,3 +1,8 @@
+#![allow(clippy::cast_possible_truncation)] // f64->f32 at PyO3 boundary is intentional
+#![allow(clippy::cast_precision_loss)] // u32/usize->f32 precision loss is acceptable
+#![allow(clippy::cast_possible_wrap)] // usize->i32 for page count is fine
+#![allow(clippy::unnecessary_wraps)] // PyO3 #[pymethods] requires PyResult signatures
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -6,11 +11,14 @@ use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+mod dom;
 mod font_metrics;
+mod html_render;
+mod layout;
 
 // ── Built-in PDF fonts ─────────────────────────────────────────
 
-const BUILTIN_FONTS: &[&str] = &[
+pub(crate) const BUILTIN_FONTS: &[&str] = &[
     "Helvetica",
     "Helvetica-Bold",
     "Helvetica-Oblique",
@@ -29,23 +37,35 @@ const BUILTIN_FONTS: &[&str] = &[
 
 // ── Internal types ─────────────────────────────────────────────
 
-enum PdfOp {
+pub(crate) enum PdfOp {
     BeginText,
     EndText,
     SetFont { name: String, size: f32 },
     SetTextPosition { x: f32, y: f32 },
     ShowText(String),
-    /// glyph ids are resolved lazily in to_bytes(); stores (char,) pairs
+    /// glyph ids are resolved lazily in `to_bytes()`; stores (char,) pairs
     ShowGlyphs(Vec<char>),
+    // Graphics primitives
+    SetFillColor { r: f32, g: f32, b: f32 },
+    SetStrokeColor { r: f32, g: f32, b: f32 },
+    SetLineWidth(f32),
+    Rectangle { x: f32, y: f32, width: f32, height: f32 },
+    MoveTo { x: f32, y: f32 },
+    LineTo { x: f32, y: f32 },
+    Stroke,
+    Fill,
+    FillAndStroke,
+    SaveState,
+    RestoreState,
 }
 
-struct PageContent {
-    width: f64,
-    height: f64,
-    operations: Vec<PdfOp>,
-    fonts_used: Vec<String>,
-    current_font: Option<String>,
-    current_font_size: Option<f32>,
+pub(crate) struct PageContent {
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+    pub(crate) operations: Vec<PdfOp>,
+    pub(crate) fonts_used: Vec<String>,
+    pub(crate) current_font: Option<String>,
+    pub(crate) current_font_size: Option<f32>,
 }
 
 impl PageContent {
@@ -87,8 +107,8 @@ struct RegisteredFont {
 // ── PdfDocument ────────────────────────────────────────────────
 
 #[pyclass]
-struct PdfDocument {
-    pages: Vec<Arc<Mutex<PageContent>>>,
+pub(crate) struct PdfDocument {
+    pub(crate) pages: Vec<Arc<Mutex<PageContent>>>,
     registered_fonts: Vec<RegisteredFont>,
 }
 
@@ -109,6 +129,8 @@ impl PdfDocument {
         Ok(Page { content })
     }
 
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::items_after_statements)]
     fn to_bytes(&self) -> PyResult<Vec<u8>> {
         let mut pdf = Pdf::new();
         let mut next_id = 1;
@@ -205,16 +227,15 @@ impl PdfDocument {
         let mut custom_data: BTreeMap<String, CustomFontData> = BTreeMap::new();
 
         for rf in &self.registered_fonts {
-            let chars = match custom_font_chars.get(&rf.name) {
-                Some(c) => c,
-                None => continue,
+            let Some(chars) = custom_font_chars.get(&rf.name) else {
+                continue;
             };
 
             let face = ttf_parser::Face::parse(&rf.data, 0).map_err(|e| {
                 PyValueError::new_err(format!("failed to parse font for embedding: {e}"))
             })?;
 
-            let units_per_em = face.units_per_em() as f32;
+            let units_per_em = f32::from(face.units_per_em());
 
             // build glyph remapper
             let mut remapper = subsetter::GlyphRemapper::new();
@@ -239,25 +260,26 @@ impl PdfDocument {
             for (&ch, &old_gid) in &char_to_old_gid {
                 if let Some(new_gid) = remapper.get(old_gid) {
                     char_to_new_gid.insert(ch, new_gid);
-                    let width = face
-                        .glyph_hor_advance(ttf_parser::GlyphId(old_gid))
-                        .unwrap_or(0) as f32;
+                    let width = f32::from(
+                        face.glyph_hor_advance(ttf_parser::GlyphId(old_gid))
+                            .unwrap_or(0),
+                    );
                     // convert to 1000-unit scale
                     let scaled_width = width * 1000.0 / units_per_em;
                     gid_widths.insert(new_gid, scaled_width);
                 }
             }
 
-            let ascent = face.ascender() as f32 * 1000.0 / units_per_em;
-            let descent = face.descender() as f32 * 1000.0 / units_per_em;
-            let cap_height = face.capital_height().unwrap_or(face.ascender()) as f32 * 1000.0
+            let ascent = f32::from(face.ascender()) * 1000.0 / units_per_em;
+            let descent = f32::from(face.descender()) * 1000.0 / units_per_em;
+            let cap_height = f32::from(face.capital_height().unwrap_or(face.ascender())) * 1000.0
                 / units_per_em;
             let global_bbox = face.global_bounding_box();
             let bbox = Rect::new(
-                global_bbox.x_min as f32 * 1000.0 / units_per_em,
-                global_bbox.y_min as f32 * 1000.0 / units_per_em,
-                global_bbox.x_max as f32 * 1000.0 / units_per_em,
-                global_bbox.y_max as f32 * 1000.0 / units_per_em,
+                f32::from(global_bbox.x_min) * 1000.0 / units_per_em,
+                f32::from(global_bbox.y_min) * 1000.0 / units_per_em,
+                f32::from(global_bbox.x_max) * 1000.0 / units_per_em,
+                f32::from(global_bbox.y_max) * 1000.0 / units_per_em,
             );
 
             custom_data.insert(
@@ -319,17 +341,50 @@ impl PdfDocument {
                     }
                     PdfOp::ShowGlyphs(chars) => {
                         // resolve glyph ids using the custom font data
-                        if let Some(ref fname) = current_font_name {
-                            if let Some(cfd) = custom_data.get(fname) {
-                                let mut bytes = Vec::with_capacity(chars.len() * 2);
-                                for &ch in chars {
-                                    let gid = cfd.char_to_new_gid.get(&ch).copied().unwrap_or(0);
-                                    bytes.push((gid >> 8) as u8);
-                                    bytes.push((gid & 0xff) as u8);
-                                }
-                                content.show(Str(&bytes));
+                        if let Some(ref fname) = current_font_name
+                            && let Some(cfd) = custom_data.get(fname)
+                        {
+                            let mut bytes = Vec::with_capacity(chars.len() * 2);
+                            for &ch in chars {
+                                let gid = cfd.char_to_new_gid.get(&ch).copied().unwrap_or(0);
+                                bytes.push((gid >> 8) as u8);
+                                bytes.push((gid & 0xff) as u8);
                             }
+                            content.show(Str(&bytes));
                         }
+                    }
+                    PdfOp::SetFillColor { r, g, b } => {
+                        content.set_fill_rgb(*r, *g, *b);
+                    }
+                    PdfOp::SetStrokeColor { r, g, b } => {
+                        content.set_stroke_rgb(*r, *g, *b);
+                    }
+                    PdfOp::SetLineWidth(w) => {
+                        content.set_line_width(*w);
+                    }
+                    PdfOp::Rectangle { x, y, width, height } => {
+                        content.rect(*x, *y, *width, *height);
+                    }
+                    PdfOp::MoveTo { x, y } => {
+                        content.move_to(*x, *y);
+                    }
+                    PdfOp::LineTo { x, y } => {
+                        content.line_to(*x, *y);
+                    }
+                    PdfOp::Stroke => {
+                        content.stroke();
+                    }
+                    PdfOp::Fill => {
+                        content.fill_nonzero();
+                    }
+                    PdfOp::FillAndStroke => {
+                        content.fill_nonzero_and_stroke();
+                    }
+                    PdfOp::SaveState => {
+                        content.save_state();
+                    }
+                    PdfOp::RestoreState => {
+                        content.restore_state();
                     }
                 }
             }
@@ -503,10 +558,9 @@ impl Page {
             .as_deref()
             .ok_or_else(|| PyValueError::new_err("no font set; call set_font() first"))?;
         let font_size = page.current_font_size.unwrap();
-        let metrics = font_metrics::get_builtin_metrics(font_name)
+        let width = font_metrics::measure_str(text, font_name, font_size)
             .ok_or_else(|| PyValueError::new_err(format!("no metrics for font: {font_name}")))?;
-        let width: u32 = text.bytes().map(|b| metrics.widths[b as usize] as u32).sum();
-        Ok(width as f64 * font_size as f64 / 1000.0)
+        Ok(f64::from(width))
     }
 
     fn draw_text(&mut self, x: f64, y: f64, text: &str) -> PyResult<()> {
@@ -526,6 +580,97 @@ impl Page {
             page.operations.push(PdfOp::ShowText(text.to_string()));
         }
         page.operations.push(PdfOp::EndText);
+        Ok(())
+    }
+
+    fn set_fill_color(&mut self, r: f64, g: f64, b: f64) -> PyResult<()> {
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::SetFillColor {
+            r: r as f32,
+            g: g as f32,
+            b: b as f32,
+        });
+        Ok(())
+    }
+
+    fn set_stroke_color(&mut self, r: f64, g: f64, b: f64) -> PyResult<()> {
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::SetStrokeColor {
+            r: r as f32,
+            g: g as f32,
+            b: b as f32,
+        });
+        Ok(())
+    }
+
+    fn set_line_width(&mut self, width: f64) -> PyResult<()> {
+        if width < 0.0 {
+            return Err(PyValueError::new_err("line width must be non-negative"));
+        }
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::SetLineWidth(width as f32));
+        Ok(())
+    }
+
+    fn draw_rect(&mut self, x: f64, y: f64, width: f64, height: f64) -> PyResult<()> {
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::Rectangle {
+            x: x as f32,
+            y: y as f32,
+            width: width as f32,
+            height: height as f32,
+        });
+        page.operations.push(PdfOp::Fill);
+        Ok(())
+    }
+
+    fn stroke_rect(&mut self, x: f64, y: f64, width: f64, height: f64) -> PyResult<()> {
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::Rectangle {
+            x: x as f32,
+            y: y as f32,
+            width: width as f32,
+            height: height as f32,
+        });
+        page.operations.push(PdfOp::Stroke);
+        Ok(())
+    }
+
+    fn fill_and_stroke_rect(&mut self, x: f64, y: f64, width: f64, height: f64) -> PyResult<()> {
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::Rectangle {
+            x: x as f32,
+            y: y as f32,
+            width: width as f32,
+            height: height as f32,
+        });
+        page.operations.push(PdfOp::FillAndStroke);
+        Ok(())
+    }
+
+    fn draw_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) -> PyResult<()> {
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::MoveTo {
+            x: x1 as f32,
+            y: y1 as f32,
+        });
+        page.operations.push(PdfOp::LineTo {
+            x: x2 as f32,
+            y: y2 as f32,
+        });
+        page.operations.push(PdfOp::Stroke);
+        Ok(())
+    }
+
+    fn save_state(&mut self) -> PyResult<()> {
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::SaveState);
+        Ok(())
+    }
+
+    fn restore_state(&mut self) -> PyResult<()> {
+        let mut page = self.content.lock().unwrap();
+        page.operations.push(PdfOp::RestoreState);
         Ok(())
     }
 }
@@ -616,12 +761,12 @@ impl FontDatabase {
             }
             let mut score: i32 = 0;
             if let Some(w) = weight {
-                score -= (entry.weight as i32 - w as i32).abs();
+                score -= (i32::from(entry.weight) - i32::from(w)).abs();
             }
-            if let Some(it) = italic {
-                if entry.italic != it {
-                    score -= 1000;
-                }
+            if let Some(it) = italic
+                && entry.italic != it
+            {
+                score -= 1000;
             }
             if best.is_none() || score > best.unwrap().1 {
                 best = Some((i, score));
@@ -673,29 +818,70 @@ impl FontDatabase {
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
-                if let Ok(data) = std::fs::read(&path) {
-                    let _ = self.load_font_data_impl(&data);
-                }
+            if matches!(ext.as_str(), "ttf" | "otf" | "ttc")
+                && let Ok(data) = std::fs::read(&path)
+            {
+                let _ = self.load_font_data_impl(&data);
             }
         }
     }
 }
 
+/// Render HTML to a PDF document (called from Python `HtmlDocument`).
+#[pyfunction]
+#[pyo3(signature = (html, margin_top=72.0, margin_right=72.0, margin_bottom=72.0, margin_left=72.0, page_width=612.0, page_height=792.0))]
+#[allow(clippy::too_many_arguments)]
+fn html_to_pdf(
+    html: &str,
+    margin_top: f64,
+    margin_right: f64,
+    margin_bottom: f64,
+    margin_left: f64,
+    page_width: f64,
+    page_height: f64,
+) -> PyResult<PdfDocument> {
+    let parsed = dom::parse_html(html);
+    let mut doc = PdfDocument {
+        pages: Vec::new(),
+        registered_fonts: Vec::new(),
+    };
+    let mut inner = layout::LayoutInner::new(
+        margin_top as f32,
+        margin_right as f32,
+        margin_bottom as f32,
+        margin_left as f32,
+        page_width as f32,
+        page_height as f32,
+    );
+    html_render::render_dom_to_layout(&parsed.document, &mut inner);
+    inner.finish(&mut doc).map_err(PyValueError::new_err)?;
+    Ok(doc)
+}
+
 /// measure text width without a page context.
 #[pyfunction]
 fn text_width(text: &str, font: &str, size: f64) -> PyResult<f64> {
-    let metrics = font_metrics::get_builtin_metrics(font)
+    let width = font_metrics::measure_str(text, font, size as f32)
         .ok_or_else(|| PyValueError::new_err(format!("unknown font: {font}")))?;
-    let width: u32 = text.bytes().map(|b| metrics.widths[b as usize] as u32).sum();
-    Ok(width as f64 * size / 1000.0)
+    Ok(f64::from(width))
+}
+
+/// word-wrap text into lines that fit within `max_width` points.
+#[pyfunction]
+fn wrap_text(text: &str, max_width: f64, font: &str, font_size: f64) -> PyResult<Vec<String>> {
+    layout::wrap_text_impl(text, max_width as f32, font, font_size as f32)
+        .map_err(PyValueError::new_err)
 }
 
 // ── Module ─────────────────────────────────────────────────────
 
 #[pymodule]
 mod _core {
-    use super::*;
+    use pyo3::prelude::*;
+
+    use super::{
+        html_to_pdf, layout, text_width, wrap_text, FontDatabase, FontId, Page, PdfDocument,
+    };
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -703,7 +889,11 @@ mod _core {
         m.add_class::<Page>()?;
         m.add_class::<FontDatabase>()?;
         m.add_class::<FontId>()?;
+        m.add_class::<layout::Layout>()?;
+        m.add_class::<layout::TextRun>()?;
         m.add_function(wrap_pyfunction!(text_width, m)?)?;
+        m.add_function(wrap_pyfunction!(wrap_text, m)?)?;
+        m.add_function(wrap_pyfunction!(html_to_pdf, m)?)?;
         Ok(())
     }
 }

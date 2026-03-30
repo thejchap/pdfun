@@ -1,6 +1,7 @@
 /// glyph metrics for a built-in PDF font.
-/// widths are indexed by WinAnsi (Windows-1252) character code,
+/// widths are indexed by `WinAnsi` (Windows-1252) character code,
 /// measured in 1/1000ths of a text unit.
+#[allow(dead_code)]
 pub struct BuiltinFontMetrics {
     pub widths: [u16; 256],
     pub ascent: i16,
@@ -244,6 +245,65 @@ const ZAPF_DINGBATS_METRICS: BuiltinFontMetrics = BuiltinFontMetrics {
     cap_height: 705,
 };
 
+/// Resolve a built-in font variant given bold/italic flags.
+#[allow(dead_code)]
+///
+/// Merges flags from the base font name: e.g. `("Helvetica-Bold", false, true)`
+/// returns `"Helvetica-BoldOblique"` because the base is already bold.
+pub fn resolve_builtin_variant(base_font: &str, bold: bool, italic: bool) -> Option<&'static str> {
+    let (family, base_bold, base_italic) = if base_font.starts_with("Helvetica") {
+        (
+            "Helvetica",
+            base_font.contains("Bold"),
+            base_font.contains("Oblique"),
+        )
+    } else if base_font.starts_with("Times") {
+        (
+            "Times",
+            base_font.contains("Bold"),
+            base_font.contains("Italic"),
+        )
+    } else if base_font.starts_with("Courier") {
+        (
+            "Courier",
+            base_font.contains("Bold"),
+            base_font.contains("Oblique"),
+        )
+    } else if base_font == "Symbol" {
+        return Some("Symbol");
+    } else if base_font == "ZapfDingbats" {
+        return Some("ZapfDingbats");
+    } else {
+        return None;
+    };
+
+    let eff_bold = bold || base_bold;
+    let eff_italic = italic || base_italic;
+
+    match (family, eff_bold, eff_italic) {
+        ("Helvetica", false, false) => Some("Helvetica"),
+        ("Helvetica", true, false) => Some("Helvetica-Bold"),
+        ("Helvetica", false, true) => Some("Helvetica-Oblique"),
+        ("Helvetica", true, true) => Some("Helvetica-BoldOblique"),
+        ("Times", false, false) => Some("Times-Roman"),
+        ("Times", true, false) => Some("Times-Bold"),
+        ("Times", false, true) => Some("Times-Italic"),
+        ("Times", true, true) => Some("Times-BoldItalic"),
+        ("Courier", false, false) => Some("Courier"),
+        ("Courier", true, false) => Some("Courier-Bold"),
+        ("Courier", false, true) => Some("Courier-Oblique"),
+        ("Courier", true, true) => Some("Courier-BoldOblique"),
+        _ => None,
+    }
+}
+
+/// measure a string's width in points using a built-in font's metrics.
+pub fn measure_str(text: &str, font_name: &str, font_size: f32) -> Option<f32> {
+    let metrics = get_builtin_metrics(font_name)?;
+    let width: u32 = text.bytes().map(|b| u32::from(metrics.widths[b as usize])).sum();
+    Some(width as f32 * font_size / 1000.0)
+}
+
 /// look up metrics for a built-in PDF font.
 /// oblique/italic variants share widths with their upright counterpart.
 /// all courier variants share the same monospace widths.
@@ -261,5 +321,119 @@ pub fn get_builtin_metrics(font_name: &str) -> Option<&'static BuiltinFontMetric
         "Symbol" => Some(&SYMBOL_METRICS),
         "ZapfDingbats" => Some(&ZAPF_DINGBATS_METRICS),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_helvetica_bold() {
+        assert_eq!(
+            resolve_builtin_variant("Helvetica", true, false),
+            Some("Helvetica-Bold")
+        );
+    }
+
+    #[test]
+    fn resolve_helvetica_italic() {
+        assert_eq!(
+            resolve_builtin_variant("Helvetica", false, true),
+            Some("Helvetica-Oblique")
+        );
+    }
+
+    #[test]
+    fn resolve_helvetica_bold_italic() {
+        assert_eq!(
+            resolve_builtin_variant("Helvetica", true, true),
+            Some("Helvetica-BoldOblique")
+        );
+    }
+
+    #[test]
+    fn resolve_helvetica_plain() {
+        assert_eq!(
+            resolve_builtin_variant("Helvetica", false, false),
+            Some("Helvetica")
+        );
+    }
+
+    #[test]
+    fn resolve_times_variants() {
+        assert_eq!(
+            resolve_builtin_variant("Times-Roman", false, false),
+            Some("Times-Roman")
+        );
+        assert_eq!(
+            resolve_builtin_variant("Times-Roman", true, false),
+            Some("Times-Bold")
+        );
+        assert_eq!(
+            resolve_builtin_variant("Times-Roman", false, true),
+            Some("Times-Italic")
+        );
+        assert_eq!(
+            resolve_builtin_variant("Times-Roman", true, true),
+            Some("Times-BoldItalic")
+        );
+    }
+
+    #[test]
+    fn resolve_courier_variants() {
+        assert_eq!(
+            resolve_builtin_variant("Courier", false, false),
+            Some("Courier")
+        );
+        assert_eq!(
+            resolve_builtin_variant("Courier", true, false),
+            Some("Courier-Bold")
+        );
+        assert_eq!(
+            resolve_builtin_variant("Courier", false, true),
+            Some("Courier-Oblique")
+        );
+        assert_eq!(
+            resolve_builtin_variant("Courier", true, true),
+            Some("Courier-BoldOblique")
+        );
+    }
+
+    #[test]
+    fn resolve_already_bold_plus_italic() {
+        assert_eq!(
+            resolve_builtin_variant("Helvetica-Bold", false, true),
+            Some("Helvetica-BoldOblique")
+        );
+    }
+
+    #[test]
+    fn resolve_already_italic_plus_bold() {
+        assert_eq!(
+            resolve_builtin_variant("Times-Italic", true, false),
+            Some("Times-BoldItalic")
+        );
+    }
+
+    #[test]
+    fn resolve_symbol_unchanged() {
+        assert_eq!(
+            resolve_builtin_variant("Symbol", true, true),
+            Some("Symbol")
+        );
+    }
+
+    #[test]
+    fn resolve_zapfdingbats_unchanged() {
+        assert_eq!(
+            resolve_builtin_variant("ZapfDingbats", true, false),
+            Some("ZapfDingbats")
+        );
+    }
+
+    #[test]
+    fn resolve_unknown_font_returns_none() {
+        assert_eq!(resolve_builtin_variant("FakeFont", false, false), None);
     }
 }

@@ -8,6 +8,9 @@ name = "_core"
 # "cdylib" is necessary to produce a shared library for Python to import from.
 crate-type = ["cdylib"]
 
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
 [dependencies]
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
@@ -15,3 +18,5 @@ pyo3 = { version = "0.27.1", features = ["extension-module", "abi3-py39"] }
 pdf-writer = "0.14.0"
 ttf-parser = "0.25"
 subsetter = "0.2"
+markup5ever_rcdom = "0.38.0"
+html5ever = "0.38"

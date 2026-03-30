@@ -32,6 +32,11 @@ cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "C
 [tool.uv.sources]
 tryke = { git = "https://github.com/thejchap/tryke", branch = "main" }
 
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["FBT", "D203", "D213", "COM812"]
+per-file-ignores = { "tests/*" = ["D", "ANN201", "PLR2004", "PLC0415", "S101"], "src/pdfun/html.py" = ["N802"] }
+
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"

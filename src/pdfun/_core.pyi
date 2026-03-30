@@ -13,6 +13,21 @@ class Page:
     def set_font(self, name: str, size: float) -> None: ...
     def measure_text(self, text: str) -> float: ...
     def draw_text(self, x: float, y: float, text: str) -> None: ...
+    def set_fill_color(self, r: float, g: float, b: float) -> None: ...
+    def set_stroke_color(self, r: float, g: float, b: float) -> None: ...
+    def set_line_width(self, width: float) -> None: ...
+    def draw_rect(self, x: float, y: float, width: float, height: float) -> None: ...
+    def stroke_rect(self, x: float, y: float, width: float, height: float) -> None: ...
+    def fill_and_stroke_rect(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+    ) -> None: ...
+    def draw_line(self, x1: float, y1: float, x2: float, y2: float) -> None: ...
+    def save_state(self) -> None: ...
+    def restore_state(self) -> None: ...
 
 class FontDatabase:
     def __init__(self) -> None: ...
@@ -20,10 +35,81 @@ class FontDatabase:
     def load_font_file(self, path: str) -> FontId: ...
     def load_font_data(self, data: bytes) -> FontId: ...
     def query(
-        self, family: str, weight: int | None = None, italic: bool | None = None
+        self,
+        family: str,
+        weight: int | None = None,
+        italic: bool | None = None,
     ) -> FontId | None: ...
 
 class FontId:
     def __init__(self) -> None: ...
 
+class TextRun:
+    text: str
+    font_name: str
+    font_size: float
+    color: tuple[float, float, float] | None
+    def __init__(
+        self,
+        text: str,
+        font_name: str = "Helvetica",
+        font_size: float = 12.0,
+        color: tuple[float, float, float] | None = None,
+    ) -> None: ...
+
+class Layout:
+    def __init__(
+        self,
+        doc: PdfDocument,
+        margin_top: float = 72.0,
+        margin_right: float = 72.0,
+        margin_bottom: float = 72.0,
+        margin_left: float = 72.0,
+        page_width: float = 612.0,
+        page_height: float = 792.0,
+    ) -> None: ...
+    def add_text(
+        self,
+        text: str,
+        font: str = "Helvetica",
+        font_size: float = 12.0,
+        line_height: float | None = None,
+        spacing_after: float = 0.0,
+        color: tuple[float, float, float] | None = None,
+        background_color: tuple[float, float, float] | None = None,
+        padding: float | tuple[float, float, float, float] = 0.0,
+        border_width: float = 0.0,
+        border_color: tuple[float, float, float] | None = None,
+        text_align: str = "left",
+    ) -> None: ...
+    def add_paragraph(
+        self,
+        runs: list[TextRun],
+        line_height: float | None = None,
+        spacing_after: float = 0.0,
+        color: tuple[float, float, float] | None = None,
+        background_color: tuple[float, float, float] | None = None,
+        padding: float | tuple[float, float, float, float] = 0.0,
+        border_width: float = 0.0,
+        border_color: tuple[float, float, float] | None = None,
+        text_align: str = "left",
+        marker: TextRun | None = None,
+    ) -> None: ...
+    def finish(self) -> None: ...
+
+def html_to_pdf(
+    html: str,
+    margin_top: float = 72.0,
+    margin_right: float = 72.0,
+    margin_bottom: float = 72.0,
+    margin_left: float = 72.0,
+    page_width: float = 612.0,
+    page_height: float = 792.0,
+) -> PdfDocument: ...
 def text_width(text: str, font: str, size: float) -> float: ...
+def wrap_text(
+    text: str,
+    max_width: float,
+    font: str,
+    font_size: float,
+) -> list[str]: ...

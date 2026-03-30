@@ -1,9 +1,9 @@
-import os
 import tempfile
+from pathlib import Path
 
 from tryke import describe, expect, test
 
-from pdfun import FontDatabase, PdfDocument
+from pdfun import FontDatabase, FontId, Layout, PdfDocument, text_width, wrap_text
 
 # ── API surface (cf. WeasyPrint test_api.py) ────────────────────
 
@@ -46,11 +46,12 @@ with describe("PdfDocument API"):
         doc.add_page()
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             path = f.name
+        path = Path(path)
         try:
-            doc.save(path)
-            expect(os.path.getsize(path)).to_be_greater_than(50)
+            doc.save(str(path))
+            expect(path.stat().st_size).to_be_greater_than(50)
         finally:
-            os.unlink(path)
+            path.unlink()
 
     @test
     def multi_page_document():
@@ -275,23 +276,17 @@ with describe("Text measurement"):
     @test
     def text_width_standalone():
         """text_width() measures text without a page."""
-        from pdfun import text_width
-
         width = text_width("Hello", "Helvetica", 12.0)
         expect(abs(width - 27.336) < 0.01).to_be_truthy()
 
     @test
     def text_width_unknown_font_raises():
         """text_width() raises ValueError for unknown font."""
-        from pdfun import text_width
-
         expect(lambda: text_width("test", "FakeFont", 12.0)).to_raise(ValueError)
 
     @test
     def measure_text_different_fonts_differ():
         """Different fonts produce different widths."""
-        from pdfun import text_width
-
         helv = text_width("Hello World", "Helvetica", 12.0)
         times = text_width("Hello World", "Times-Roman", 12.0)
         courier = text_width("Hello World", "Courier", 12.0)
@@ -320,44 +315,36 @@ with describe("FontDatabase API"):
     @test
     def load_font_file():
         """load_font_file() returns a FontId for a valid font."""
-        import glob
-
-        # use a system font available on macOS
-        candidates = glob.glob("/System/Library/Fonts/*.ttf")
+        candidates = list(Path("/System/Library/Fonts").glob("*.ttf"))
         if not candidates:
-            candidates = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
+            candidates = list(Path("/usr/share/fonts").rglob("*.ttf"))
         if not candidates:
             return  # skip on systems with no accessible TTF files
         db = FontDatabase()
-        font_id = db.load_font_file(candidates[0])
+        font_id = db.load_font_file(str(candidates[0]))
         expect(font_id).not_.to_be_none()
 
     @test
     def load_font_file_invalid_raises():
         """load_font_file() raises ValueError for invalid file."""
-        import tempfile
-
         db = FontDatabase()
         with tempfile.NamedTemporaryFile(suffix=".ttf", delete=False) as f:
             f.write(b"not a font")
-            path = f.name
+            path = Path(f.name)
         try:
-            expect(lambda: db.load_font_file(path)).to_raise(ValueError)
+            expect(lambda: db.load_font_file(str(path))).to_raise(ValueError)
         finally:
-            os.unlink(path)
+            path.unlink()
 
     @test
     def load_font_data():
         """load_font_data() accepts raw bytes of a valid font."""
-        import glob
-
-        candidates = glob.glob("/System/Library/Fonts/*.ttf")
+        candidates = list(Path("/System/Library/Fonts").glob("*.ttf"))
         if not candidates:
-            candidates = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
+            candidates = list(Path("/usr/share/fonts").rglob("*.ttf"))
         if not candidates:
             return  # skip on systems with no accessible TTF files
-        with open(candidates[0], "rb") as f:
-            data = f.read()
+        data = candidates[0].read_bytes()
         db = FontDatabase()
         font_id = db.load_font_data(data)
         expect(font_id).not_.to_be_none()
@@ -406,17 +393,15 @@ with describe("FontDatabase API"):
 
 with describe("Font embedding"):
 
-    def _load_system_font():
-        """helper: load a system TTF font, return (db, font_id) or None."""
-        import glob
-
-        candidates = glob.glob("/System/Library/Fonts/*.ttf")
+    def _load_system_font() -> tuple[FontDatabase, FontId] | None:
+        """Load a system TTF font, return (db, font_id) or None."""
+        candidates = list(Path("/System/Library/Fonts").glob("*.ttf"))
         if not candidates:
-            candidates = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
+            candidates = list(Path("/usr/share/fonts").rglob("*.ttf"))
         if not candidates:
             return None
         db = FontDatabase()
-        font_id = db.load_font_file(candidates[0])
+        font_id = db.load_font_file(str(candidates[0]))
         return db, font_id
 
     @test
@@ -490,3 +475,683 @@ with describe("Font embedding"):
         page.draw_text(72.0, 720.0, "\u00e9\u00e8\u00ea")  # accented chars
         data = doc.to_bytes()
         expect(data[:5]).to_equal(b"%PDF-")
+
+
+# ── Graphics primitives (cf. WeasyPrint test_draw.py) ──────────
+
+with describe("Graphics - rectangles"):
+
+    @test
+    def draw_filled_rect():
+        """draw_rect() produces re and f operators in content stream."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.draw_rect(100.0, 200.0, 50.0, 30.0)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"100 200 50 30 re")
+        expect(data).to_contain(b"\nf\n")
+
+    @test
+    def stroke_rect():
+        """stroke_rect() produces re and S operators."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.stroke_rect(10.0, 20.0, 100.0, 50.0)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"10 20 100 50 re")
+        expect(data).to_contain(b"\nS\n")
+
+    @test
+    def fill_and_stroke_rect():
+        """fill_and_stroke_rect() produces re and B operators."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.fill_and_stroke_rect(10.0, 20.0, 100.0, 50.0)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"10 20 100 50 re")
+        expect(data).to_contain(b"\nB\n")
+
+
+with describe("Graphics - colors"):
+
+    @test
+    def set_fill_color_rgb():
+        """set_fill_color() produces rg operator."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_fill_color(1.0, 0.0, 0.0)
+        page.draw_rect(10.0, 10.0, 50.0, 50.0)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def set_stroke_color_rgb():
+        """set_stroke_color() produces RG operator."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_stroke_color(0.0, 0.0, 1.0)
+        page.stroke_rect(10.0, 10.0, 50.0, 50.0)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 RG")
+
+    @test
+    def fill_color_then_text():
+        """Color changes affect subsequent text (colored text)."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_fill_color(1.0, 0.0, 0.0)
+        page.set_font("Helvetica", 12.0)
+        page.draw_text(72.0, 720.0, "Red text")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+        expect(data).to_contain(b"Red text")
+
+
+with describe("Graphics - lines"):
+
+    @test
+    def draw_line():
+        """draw_line() produces m, l, S operators."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.draw_line(0.0, 0.0, 100.0, 100.0)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 m")
+        expect(data).to_contain(b"100 100 l")
+        expect(data).to_contain(b"\nS\n")
+
+    @test
+    def set_line_width():
+        """set_line_width() produces w operator."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_line_width(2.5)
+        page.draw_line(0.0, 0.0, 100.0, 0.0)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"2.5 w")
+
+    @test
+    def line_width_negative_raises():
+        """set_line_width() raises ValueError for negative width."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        expect(lambda: page.set_line_width(-1.0)).to_raise(ValueError)
+
+
+with describe("Graphics - state management"):
+
+    @test
+    def save_restore_state():
+        """save_state()/restore_state() produce q/Q operators."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.save_state()
+        page.set_fill_color(1.0, 0.0, 0.0)
+        page.draw_rect(10.0, 10.0, 50.0, 50.0)
+        page.restore_state()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"q\n")
+        expect(data).to_contain(b"Q\n")
+
+    @test
+    def state_isolates_color():
+        """Colors set within save/restore do not leak."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.save_state()
+        page.set_fill_color(1.0, 0.0, 0.0)
+        page.draw_rect(10.0, 10.0, 50.0, 50.0)
+        page.restore_state()
+        page.draw_rect(100.0, 100.0, 50.0, 50.0)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+
+with describe("Graphics - combined text and shapes"):
+
+    @test
+    def text_and_rect_on_same_page():
+        """Text and rectangles coexist on a single page."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_fill_color(0.9, 0.9, 0.9)
+        page.draw_rect(70.0, 710.0, 200.0, 20.0)
+        page.set_fill_color(0.0, 0.0, 0.0)
+        page.set_font("Helvetica", 12.0)
+        page.draw_text(72.0, 715.0, "Hello on background")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"re")
+        expect(data).to_contain(b"Hello on background")
+
+
+# ── Text wrapping ──────────────────────────────────────────────
+
+with describe("Text wrapping"):
+    # Courier: every char is 600/1000 units, so at 10pt each char = 6.0pt
+    # Space is also 6.0pt in Courier
+
+    @test
+    def wrap_single_word_fits():
+        """Single word shorter than max_width returns one line."""
+        lines = wrap_text("Hello", 100.0, "Courier", 10.0)
+        expect(lines).to_equal(["Hello"])
+
+    @test
+    def wrap_empty_string():
+        """Empty string returns empty list."""
+        lines = wrap_text("", 100.0, "Courier", 10.0)
+        expect(lines).to_equal([])
+
+    @test
+    def wrap_at_word_boundary():
+        """Text wraps at word boundaries when line exceeds max_width."""
+        # "AA" = 12pt, "AA BB" = 12+6+12 = 30pt > 20pt
+        lines = wrap_text("AA BB CC", 20.0, "Courier", 10.0)
+        expect(lines).to_equal(["AA", "BB", "CC"])
+
+    @test
+    def wrap_long_word_overflows():
+        """Word wider than max_width is placed alone, not split."""
+        lines = wrap_text("ABCDEFGHIJ", 20.0, "Courier", 10.0)
+        expect(lines).to_equal(["ABCDEFGHIJ"])
+
+    @test
+    def wrap_multiple_spaces_collapsed():
+        """Consecutive spaces are collapsed to single space."""
+        lines = wrap_text("A  B", 100.0, "Courier", 10.0)
+        expect(lines).to_equal(["A B"])
+
+    @test
+    def wrap_trailing_whitespace_ignored():
+        """Trailing whitespace does not produce empty trailing line."""
+        lines = wrap_text("Hello   ", 100.0, "Courier", 10.0)
+        expect(lines).to_equal(["Hello"])
+
+    @test
+    def wrap_proportional_font():
+        """Proportional font wraps differently based on character widths."""
+        # "i" is narrow (222 units in Helvetica), "W" is wide (944 units)
+        # At 10pt: "i" = 2.22pt, "W" = 9.44pt
+        # "ii ii" = 2.22*2 + 2.78 + 2.22*2 = ~12.66pt (fits in 20pt)
+        # "WW WW" = 9.44*2 + 2.78 + 9.44*2 = ~40.54pt (does not fit in 20pt)
+        narrow = wrap_text("ii ii", 20.0, "Helvetica", 10.0)
+        wide = wrap_text("WW WW", 20.0, "Helvetica", 10.0)
+        expect(len(narrow)).to_equal(1)  # fits on one line
+        expect(len(wide)).to_equal(2)  # wraps to two lines
+
+    @test
+    def wrap_unknown_font_raises():
+        """Unknown font raises ValueError."""
+        expect(lambda: wrap_text("x", 100.0, "FakeFont", 10.0)).to_raise(ValueError)
+
+
+# ── Layout ─────────────────────────────────────────────────────
+
+with describe("Layout"):
+
+    @test
+    def layout_single_paragraph():
+        """Single paragraph renders text in PDF."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Hello")
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hello")
+
+    @test
+    def layout_respects_margins():
+        """Default margins position text at (72, page_height - 72 - font_size)."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Margin test", font_size=12.0)
+        layout.finish()
+        data = doc.to_bytes()
+        # text baseline should be at y = 792 - 72 - 12 = 708
+        expect(data).to_contain(b"72 708 Td")
+
+    @test
+    def layout_wraps_long_text():
+        """Long paragraph wraps within content area."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        # content width = 612 - 72 - 72 = 468pt
+        # repeat a word enough times to overflow one line
+        long_text = " ".join(["word"] * 50)
+        layout.add_text(long_text)
+        layout.finish()
+        data = doc.to_bytes()
+        # multiple Td operators means multiple lines were drawn
+        expect(data.count(b"Td")).to_be_greater_than(1)
+
+    @test
+    def layout_multiple_paragraphs():
+        """Two add_text calls produce two blocks of text."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("First paragraph")
+        layout.add_text("Second paragraph")
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"First paragraph")
+        expect(data).to_contain(b"Second paragraph")
+
+    @test
+    def layout_page_break():
+        """Enough text creates multiple pages."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        # fill up more than one page with paragraphs
+        for _ in range(100):
+            layout.add_text("Paragraph that takes space.", spacing_after=12.0)
+        layout.finish()
+        data = doc.to_bytes()
+        # should have at least 2 pages
+        expect(data).not_.to_contain(b"/Count 1")
+
+    @test
+    def layout_custom_margins():
+        """Non-default margins shift text position."""
+        doc = PdfDocument()
+        layout = Layout(doc, margin_left=100.0, margin_top=100.0)
+        layout.add_text("Custom margins", font_size=12.0)
+        layout.finish()
+        data = doc.to_bytes()
+        # text should be at x=100, y=792-100-12=680
+        expect(data).to_contain(b"100 680 Td")
+
+    @test
+    def layout_custom_line_height():
+        """Custom line_height affects vertical spacing between lines."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        long_text = " ".join(["word"] * 50)
+        layout.add_text(long_text, line_height=20.0)
+        layout.finish()
+        data = doc.to_bytes()
+        # with line_height=20, second line should be 20pt below first
+        # first line at y=792-72-12=708, second at y=708-20=688
+        expect(data).to_contain(b"72 688 Td")
+
+    @test
+    def layout_spacing_after():
+        """spacing_after adds gap between paragraphs."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Para one", font_size=12.0, spacing_after=24.0)
+        layout.add_text("Para two", font_size=12.0)
+        layout.finish()
+        data = doc.to_bytes()
+        # para one at y=708, default line_height=14.4 (12*1.2)
+        # para two at y=708 - 14.4 - 24.0 = 669.6
+        expect(data).to_contain(b"Para one")
+        expect(data).to_contain(b"Para two")
+
+    @test
+    def layout_different_fonts():
+        """Paragraphs with different fonts render correctly."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Helvetica text", font="Helvetica", font_size=12.0)
+        layout.add_text("Times text", font="Times-Roman", font_size=14.0)
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Helvetica text")
+        expect(data).to_contain(b"Times text")
+
+    @test
+    def layout_empty_text():
+        """add_text with empty string is a no-op."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("")
+        layout.add_text("Actual text")
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Actual text")
+
+    @test
+    def layout_finish_no_blocks():
+        """finish() with no blocks produces valid PDF."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+
+# ── Layout - text color ───────────────────────────────────────
+
+with describe("Layout - text color"):
+
+    @test
+    def layout_text_color():
+        """add_text with color renders text in specified color."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Red text", color=(1.0, 0.0, 0.0))
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+        expect(data).to_contain(b"Red text")
+
+    @test
+    def layout_text_color_isolation():
+        """Color from one block does not leak to the next."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Red", color=(1.0, 0.0, 0.0))
+        layout.add_text("Default")
+        layout.finish()
+        data = doc.to_bytes()
+        # save/restore state should isolate the color
+        expect(data).to_contain(b"q\n")
+        expect(data).to_contain(b"Q\n")
+
+
+# ── Layout - background color ─────────────────────────────────
+
+with describe("Layout - background color"):
+
+    @test
+    def layout_background_color():
+        """add_text with background_color draws filled rect behind text."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Highlighted", background_color=(1.0, 1.0, 0.0))
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 1 0 rg")
+        expect(data).to_contain(b"re")
+        expect(data).to_contain(b"Highlighted")
+
+    @test
+    def layout_background_behind_text():
+        """Background rect appears before text in content stream."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Over bg", background_color=(0.9, 0.9, 0.9))
+        layout.finish()
+        data = doc.to_bytes()
+        # the fill (f) for the rect must come before BT for the text
+        fill_pos = data.find(b"\nf\n")
+        bt_pos = data.find(b"BT")
+        expect(fill_pos).to_be_less_than(bt_pos)
+
+    @test
+    def layout_no_background_by_default():
+        """add_text without background_color does not draw rectangles."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Plain text")
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).not_.to_contain(b" re\n")
+
+
+# ── Layout - padding ──────────────────────────────────────────
+
+with describe("Layout - padding"):
+
+    @test
+    def layout_padding_uniform():
+        """Uniform padding insets text from block edges."""
+        doc = PdfDocument()
+        layout = Layout(doc, margin_left=72.0, margin_top=72.0)
+        layout.add_text(
+            "Padded",
+            font_size=12.0,
+            padding=10.0,
+            background_color=(0.9, 0.9, 0.9),
+        )
+        layout.finish()
+        data = doc.to_bytes()
+        # text x = margin_left + pad_left = 72 + 10 = 82
+        # text y = page_height - margin_top - pad_top - font_size
+        # = 792 - 72 - 10 - 12 = 698
+        expect(data).to_contain(b"82 698 Td")
+
+    @test
+    def layout_padding_four_sides():
+        """Tuple padding (top, right, bottom, left) works."""
+        doc = PdfDocument()
+        layout = Layout(doc, margin_left=72.0, margin_top=72.0)
+        layout.add_text(
+            "Padded",
+            font_size=12.0,
+            padding=(20.0, 10.0, 20.0, 30.0),
+            background_color=(0.9, 0.9, 0.9),
+        )
+        layout.finish()
+        data = doc.to_bytes()
+        # text x = 72 + 30 = 102
+        # text y = 792 - 72 - 20 - 12 = 688
+        expect(data).to_contain(b"102 688 Td")
+
+    @test
+    def layout_padding_narrows_wrap_width():
+        """Padding reduces available width for text wrapping."""
+        doc = PdfDocument()
+        # content_width = 200 - 10 - 10 = 180
+        layout = Layout(doc, margin_left=10.0, margin_right=10.0, page_width=200.0)
+        long_text = " ".join(["word"] * 20)
+        # with padding=50, text_width = 180 - 50 - 50 = 80
+        layout.add_text(long_text, padding=50.0)
+        layout.finish()
+        data = doc.to_bytes()
+        # should have more lines than without padding
+        no_pad_doc = PdfDocument()
+        no_pad_layout = Layout(
+            no_pad_doc,
+            margin_left=10.0,
+            margin_right=10.0,
+            page_width=200.0,
+        )
+        no_pad_layout.add_text(long_text)
+        no_pad_layout.finish()
+        no_pad_data = no_pad_doc.to_bytes()
+        expect(data.count(b"Td")).to_be_greater_than(no_pad_data.count(b"Td"))
+
+    @test
+    def layout_padding_zero_default():
+        """Default padding=0 behaves like no padding."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("No padding", font_size=12.0)
+        layout.finish()
+        data = doc.to_bytes()
+        # same position as current behavior: x=72, y=708
+        expect(data).to_contain(b"72 708 Td")
+
+
+# ── Layout - borders ──────────────────────────────────────────
+
+with describe("Layout - borders"):
+
+    @test
+    def layout_border():
+        """add_text with border_width draws stroked rect around block."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Bordered", border_width=1.0)
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 w")
+        expect(data).to_contain(b"re")
+        expect(data).to_contain(b"\nS\n")
+
+    @test
+    def layout_border_color():
+        """border_color controls stroke color of border."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Red border", border_width=2.0, border_color=(1.0, 0.0, 0.0))
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 RG")
+        expect(data).to_contain(b"2 w")
+
+    @test
+    def layout_border_default_color_black():
+        """Border without border_color defaults to black."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Default border", border_width=1.0)
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 0 RG")
+
+    @test
+    def layout_no_border_by_default():
+        """No border drawn when border_width is 0."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("No border")
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).not_.to_contain(b"RG")
+
+    @test
+    def layout_border_with_background():
+        """Border and background can coexist; fill appears before stroke."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text(
+            "Both",
+            background_color=(0.9, 0.9, 0.9),
+            border_width=1.0,
+            border_color=(0.0, 0.0, 0.0),
+        )
+        layout.finish()
+        data = doc.to_bytes()
+        fill_pos = data.find(b"\nf\n")
+        stroke_pos = data.find(b"\nS\n")
+        expect(fill_pos).to_be_less_than(stroke_pos)
+
+
+# ── Layout - text alignment ───────────────────────────────────
+
+with describe("Layout - text alignment"):
+    # Using Courier 10pt for exact math: each char = 6.0pt
+
+    @test
+    def layout_align_left_default():
+        """Default alignment is left (text at margin_left)."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text("Left aligned", font_size=12.0)
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"72 708 Td")
+
+    @test
+    def layout_align_center():
+        """center alignment centers each line within content area."""
+        doc = PdfDocument()
+        layout = Layout(doc, margin_left=72.0, margin_right=72.0)
+        # content_width = 612 - 72 - 72 = 468
+        # "Hi" in Courier 10pt: 2 chars * 6pt = 12pt
+        # center x = 72 + (468 - 12) / 2 = 72 + 228 = 300
+        layout.add_text("Hi", font="Courier", font_size=10.0, text_align="center")
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"300 710 Td")
+
+    @test
+    def layout_align_right():
+        """right alignment right-aligns each line within content area."""
+        doc = PdfDocument()
+        layout = Layout(doc, margin_left=72.0, margin_right=72.0)
+        # "Hi" in Courier 10pt = 12pt
+        # right x = 72 + 468 - 12 = 528
+        layout.add_text("Hi", font="Courier", font_size=10.0, text_align="right")
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"528 710 Td")
+
+    @test
+    def layout_align_invalid_raises():
+        """Invalid text_align value raises ValueError."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        expect(lambda: layout.add_text("x", text_align="justify")).to_raise(ValueError)
+
+    @test
+    def layout_align_center_with_padding():
+        """center alignment accounts for padding."""
+        doc = PdfDocument()
+        layout = Layout(doc, margin_left=72.0, margin_right=72.0)
+        # content_width = 468, text_area = 468 - 20 - 20 = 428
+        # "Hi" in Courier 10pt = 12pt
+        # center x = 72 + 20 + (428 - 12) / 2 = 72 + 20 + 208 = 300
+        layout.add_text(
+            "Hi",
+            font="Courier",
+            font_size=10.0,
+            text_align="center",
+            padding=(0.0, 20.0, 0.0, 20.0),
+        )
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"300 710 Td")
+
+
+# ── Layout - combined styling ─────────────────────────────────
+
+with describe("Layout - combined styling"):
+
+    @test
+    def layout_full_box_model():
+        """Block with all styling properties produces correct PDF ops."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text(
+            "Styled block",
+            font_size=12.0,
+            color=(1.0, 1.0, 1.0),
+            background_color=(0.0, 0.0, 0.5),
+            padding=10.0,
+            border_width=1.0,
+            border_color=(0.0, 0.0, 0.0),
+            text_align="center",
+        )
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Styled block")
+        expect(data).to_contain(b"q\n")
+        expect(data).to_contain(b"Q\n")
+        expect(data).to_contain(b"re")
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def layout_styled_blocks_page_break():
+        """Padded blocks correctly trigger page breaks."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        for _ in range(20):
+            layout.add_text(
+                "Block with padding",
+                font_size=12.0,
+                padding=20.0,
+                spacing_after=10.0,
+                background_color=(0.95, 0.95, 0.95),
+            )
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).not_.to_contain(b"/Count 1")
+
+    @test
+    def layout_styled_then_unstyled():
+        """Styled block followed by unstyled block does not leak styling."""
+        doc = PdfDocument()
+        layout = Layout(doc)
+        layout.add_text(
+            "Styled",
+            color=(1.0, 0.0, 0.0),
+            background_color=(1.0, 1.0, 0.0),
+        )
+        layout.add_text("Plain")
+        layout.finish()
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Styled")
+        expect(data).to_contain(b"Plain")
