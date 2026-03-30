@@ -49,7 +49,7 @@ pub fn wrap_text_impl(
 
 // ── TextAlign ─────────────────────────────────────────────────
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum TextAlign {
     #[default]
     Left,
@@ -121,6 +121,8 @@ pub struct Paragraph {
     pub spacing_after: f32,
     pub style: BlockStyle,
     pub marker: Option<TextRun>,
+    pub is_hr: bool,
+    pub preserve_whitespace: bool,
 }
 
 // ── Wrapping internals ──────────────────────────────────────
@@ -147,7 +149,15 @@ struct WrappedLine {
 }
 
 /// Wrap a sequence of `TextRun`s into lines that fit within `max_width`.
-fn wrap_runs_impl(runs: &[TextRun], max_width: f32) -> Result<Vec<WrappedLine>, String> {
+fn wrap_runs_impl(
+    runs: &[TextRun],
+    max_width: f32,
+    preserve_whitespace: bool,
+) -> Result<Vec<WrappedLine>, String> {
+    if preserve_whitespace {
+        return wrap_runs_preformatted(runs);
+    }
+
     // Phase 1: flatten runs into styled words
     let mut words: Vec<StyledWord> = Vec::new();
     for run in runs {
@@ -249,6 +259,41 @@ fn wrap_runs_impl(runs: &[TextRun], max_width: f32) -> Result<Vec<WrappedLine>, 
     Ok(result)
 }
 
+/// Wrap preformatted text: preserve whitespace, split on newlines only.
+fn wrap_runs_preformatted(runs: &[TextRun]) -> Result<Vec<WrappedLine>, String> {
+    let mut full_text = String::new();
+    let mut font_name = String::new();
+    let mut font_size = 12.0_f32;
+    let mut color = None;
+
+    for run in runs {
+        full_text.push_str(&run.text);
+        font_name.clone_from(&run.font_name);
+        font_size = run.font_size;
+        color = run.color;
+    }
+
+    let mut result: Vec<WrappedLine> = Vec::new();
+    for line in full_text.split('\n') {
+        let width = font_metrics::measure_str(line, &font_name, font_size)
+            .ok_or_else(|| format!("unknown font: {font_name}"))?;
+        let segment = LineSegment {
+            text: line.to_string(),
+            font_name: font_name.clone(),
+            font_size,
+            color,
+            width,
+        };
+        result.push(WrappedLine {
+            segments: vec![segment],
+            total_width: width,
+            max_font_size: font_size,
+        });
+    }
+
+    Ok(result)
+}
+
 fn rgb_to_f32(c: (f64, f64, f64)) -> (f32, f32, f32) {
     (c.0 as f32, c.1 as f32, c.2 as f32)
 }
@@ -321,11 +366,25 @@ impl LayoutInner {
     }
 
     pub fn push_paragraph(&mut self, para: Paragraph) {
-        let has_content = para.runs.iter().any(|r| !r.text.trim().is_empty());
-        if !has_content {
-            return;
+        if !para.preserve_whitespace {
+            let has_content = para.runs.iter().any(|r| !r.text.trim().is_empty());
+            if !has_content {
+                return;
+            }
         }
         self.blocks.push(para);
+    }
+
+    pub fn push_hr(&mut self) {
+        self.blocks.push(Paragraph {
+            runs: vec![],
+            line_height: None,
+            spacing_after: 12.0,
+            style: BlockStyle::default(),
+            marker: None,
+            is_hr: true,
+            preserve_whitespace: false,
+        });
     }
 
     #[allow(clippy::too_many_lines)]
@@ -343,10 +402,36 @@ impl LayoutInner {
         let mut cursor_y = content_top;
 
         for block in &blocks {
+            if block.is_hr {
+                if cursor_y - 12.0 < self.margin_bottom && cursor_y < content_top {
+                    current_page = new_page(doc, self.page_width, self.page_height);
+                    cursor_y = content_top;
+                }
+                let mut page = current_page.lock().unwrap();
+                page.operations.push(PdfOp::SaveState);
+                page.operations
+                    .push(PdfOp::SetStrokeColor { r: 0.75, g: 0.75, b: 0.75 });
+                page.operations.push(PdfOp::SetLineWidth(0.5));
+                page.operations.push(PdfOp::MoveTo {
+                    x: self.margin_left,
+                    y: cursor_y,
+                });
+                page.operations.push(PdfOp::LineTo {
+                    x: self.margin_left + content_width,
+                    y: cursor_y,
+                });
+                page.operations.push(PdfOp::Stroke);
+                page.operations.push(PdfOp::RestoreState);
+                drop(page);
+                cursor_y -= block.spacing_after;
+                continue;
+            }
+
             let text_area_width =
                 content_width - block.style.padding_left - block.style.padding_right;
 
-            let wrapped_lines = wrap_runs_impl(&block.runs, text_area_width)?;
+            let wrapped_lines =
+                wrap_runs_impl(&block.runs, text_area_width, block.preserve_whitespace)?;
 
             let max_font_size = wrapped_lines
                 .iter()
@@ -575,6 +660,8 @@ impl Layout {
                 text_align: align,
             },
             marker: None,
+            is_hr: false,
+            preserve_whitespace: false,
         });
         Ok(())
     }
@@ -613,6 +700,8 @@ impl Layout {
                 text_align: align,
             },
             marker,
+            is_hr: false,
+            preserve_whitespace: false,
         });
         Ok(())
     }

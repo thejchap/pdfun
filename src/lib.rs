@@ -11,6 +11,7 @@ use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+mod css;
 mod dom;
 mod font_metrics;
 mod html_render;

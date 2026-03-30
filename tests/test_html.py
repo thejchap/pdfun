@@ -5,8 +5,6 @@ from tryke import describe, expect, test
 
 from pdfun import HtmlDocument
 
-# ── Constructor ────────────────────────────────────────────────
-
 with describe("HtmlDocument - constructor"):
 
     @test
@@ -28,8 +26,6 @@ with describe("HtmlDocument - constructor"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Just plain text")
 
-
-# ── Headings ───────────────────────────────────────────────────
 
 with describe("HtmlDocument - headings"):
 
@@ -71,8 +67,6 @@ with describe("HtmlDocument - headings"):
             expect(data).to_contain(f"H{i}".encode())
 
 
-# ── Paragraphs ─────────────────────────────────────────────────
-
 with describe("HtmlDocument - paragraphs"):
 
     @test
@@ -106,8 +100,6 @@ with describe("HtmlDocument - paragraphs"):
         expect(data.count(b"Td")).to_be_greater_than(1)
 
 
-# ── Div ────────────────────────────────────────────────────────
-
 with describe("HtmlDocument - div"):
 
     @test
@@ -117,8 +109,6 @@ with describe("HtmlDocument - div"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Div content")
 
-
-# ── Line breaks ───────────────────────────────────────────────
 
 with describe("HtmlDocument - br"):
 
@@ -130,8 +120,6 @@ with describe("HtmlDocument - br"):
         expect(data).to_contain(b"Line one")
         expect(data).to_contain(b"Line two")
 
-
-# ── Inline elements ───────────────────────────────────────────
 
 with describe("HtmlDocument - inline elements"):
 
@@ -157,8 +145,6 @@ with describe("HtmlDocument - inline elements"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Span text")
 
-
-# ── Inline styling ─────────────────────────────────────────────
 
 with describe("HtmlDocument - inline styling"):
 
@@ -220,8 +206,6 @@ with describe("HtmlDocument - inline styling"):
         expect(data).to_contain(b"/BaseFont /Helvetica\n")
 
 
-# ── Output ─────────────────────────────────────────────────────
-
 with describe("HtmlDocument - output"):
 
     @test
@@ -255,8 +239,6 @@ with describe("HtmlDocument - output"):
         expect(data).not_.to_contain(b"/Count 1")
 
 
-# ── Complex documents ─────────────────────────────────────────
-
 with describe("HtmlDocument - complex documents"):
 
     @test
@@ -277,8 +259,6 @@ with describe("HtmlDocument - complex documents"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Hello world")
 
-
-# ── Edge cases ─────────────────────────────────────────────────
 
 with describe("HtmlDocument - edge cases"):
 
@@ -314,8 +294,6 @@ with describe("HtmlDocument - edge cases"):
         expect(data).not_.to_contain(b"color")
 
 
-# ── Lists ─────────────────────────────────────────────────────
-
 with describe("HtmlDocument - lists"):
 
     @test
@@ -330,7 +308,7 @@ with describe("HtmlDocument - lists"):
         """<ul><li> has a dash bullet marker."""
         doc = HtmlDocument(string="<ul><li>Item</li></ul>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"(-)")  # PDF string encoding
+        expect(data).to_contain(b"(-)")
 
     @test
     def ul_multiple_items():
@@ -383,7 +361,6 @@ with describe("HtmlDocument - lists"):
         html = "<ul><li>Outer<ul><li>Inner</li></ul></li></ul>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        # Depth 0 uses "-", depth 1 uses "o"
         expect(data).to_contain(b"(-)")
         expect(data).to_contain(b"(o)")
 
@@ -433,8 +410,6 @@ with describe("HtmlDocument - lists"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Orphan")
 
-
-# ── Malformed HTML ───────────────────────────────────────────
 
 with describe("HtmlDocument - malformed HTML"):
 
@@ -491,8 +466,6 @@ with describe("HtmlDocument - malformed HTML"):
         expect(data[:5]).to_equal(b"%PDF-")
 
 
-# ── Unknown/void elements ────────────────────────────────────
-
 with describe("HtmlDocument - unknown and void elements"):
 
     @test
@@ -526,8 +499,6 @@ with describe("HtmlDocument - unknown and void elements"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Click here")
 
-
-# ── Whitespace handling ──────────────────────────────────────
 
 with describe("HtmlDocument - whitespace"):
 
@@ -575,8 +546,6 @@ with describe("HtmlDocument - whitespace"):
         expect(data).to_contain(b"Hello world")
 
 
-# ── Unicode and special characters ───────────────────────────
-
 with describe("HtmlDocument - unicode"):
 
     @test
@@ -585,7 +554,6 @@ with describe("HtmlDocument - unicode"):
         doc = HtmlDocument(string="<p>Héllo wörld</p>")
         data = doc.to_bytes()
         expect(data[:5]).to_equal(b"%PDF-")
-        # Non-ASCII bytes are hex-encoded in PDF Type1 fonts
         expect(data).to_contain("Héllo wörld".encode().hex().upper().encode())
 
     @test
@@ -594,7 +562,6 @@ with describe("HtmlDocument - unicode"):
         doc = HtmlDocument(string="<p>&#169; 2024</p>")
         data = doc.to_bytes()
         expect(data[:5]).to_equal(b"%PDF-")
-        # © is 0xC2A9 in UTF-8, hex-encoded in PDF
         expect(data).to_contain(b"C2A9")
 
     @test
@@ -603,7 +570,6 @@ with describe("HtmlDocument - unicode"):
         doc = HtmlDocument(string="<p>&#x2603;</p>")
         data = doc.to_bytes()
         expect(data[:5]).to_equal(b"%PDF-")
-        # Snowman ☃ is 0xE29883 in UTF-8, hex-encoded in PDF
         expect(data).to_contain(b"E29883")
 
     @test
@@ -613,8 +579,6 @@ with describe("HtmlDocument - unicode"):
         data = doc.to_bytes()
         expect(data).to_contain(b'<tag> & "quotes"')
 
-
-# ── Deeply nested structures ─────────────────────────────────
 
 with describe("HtmlDocument - nesting"):
 
@@ -658,8 +622,6 @@ with describe("HtmlDocument - nesting"):
         expect(data).to_contain(b"heading")
 
 
-# ── Large documents ──────────────────────────────────────────
-
 with describe("HtmlDocument - large documents"):
 
     @test
@@ -679,3 +641,718 @@ with describe("HtmlDocument - large documents"):
         data = doc.to_bytes()
         expect(data).to_contain(b"word0")
         expect(data).to_contain(b"word499")
+
+
+with describe("HtmlDocument - inline styles"):
+
+    @test
+    def inline_color_named():
+        """style='color: red' sets text color to red."""
+        doc = HtmlDocument(string='<p style="color: red">Red</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def inline_color_hex():
+        """style='color: #0000ff' sets text color to blue."""
+        doc = HtmlDocument(string='<p style="color: #0000ff">Blue</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+    @test
+    def inline_color_hex_short():
+        """style='color: #f00' sets text color to red."""
+        doc = HtmlDocument(string='<p style="color: #f00">Red</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def inline_color_rgb():
+        """style='color: rgb(0, 128, 0)' sets text color to green."""
+        doc = HtmlDocument(string='<p style="color: rgb(0, 128, 0)">Green</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Green")
+        expect(data).to_contain(b"0 0.50")
+
+    @test
+    def inline_font_size_pt():
+        """style='font-size: 18pt' uses 18pt font."""
+        doc = HtmlDocument(string='<p style="font-size: 18pt">Big</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def inline_font_size_px():
+        """style='font-size: 24px' converts to 18pt (24 * 0.75)."""
+        doc = HtmlDocument(string='<p style="font-size: 24px">Big</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def inline_font_weight_bold():
+        """style='font-weight: bold' applies bold font."""
+        doc = HtmlDocument(string='<p style="font-weight: bold">Bold</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Bold")
+
+    @test
+    def inline_font_weight_700():
+        """style='font-weight: 700' applies bold font."""
+        doc = HtmlDocument(string='<p style="font-weight: 700">Bold</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Bold")
+
+    @test
+    def inline_font_style_italic():
+        """style='font-style: italic' applies italic font."""
+        doc = HtmlDocument(string='<p style="font-style: italic">Italic</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Oblique")
+
+    @test
+    def inline_font_weight_and_style():
+        """style='font-weight: bold; font-style: italic' uses BoldOblique."""
+        doc = HtmlDocument(
+            string='<p style="font-weight: bold; font-style: italic">Both</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-BoldOblique")
+
+    @test
+    def inline_font_family_serif():
+        """style='font-family: serif' uses Times font."""
+        doc = HtmlDocument(string='<p style="font-family: serif">Serif</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Times-Roman")
+
+    @test
+    def inline_font_family_monospace():
+        """style='font-family: monospace' uses Courier font."""
+        doc = HtmlDocument(string='<p style="font-family: monospace">Mono</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+    @test
+    def inline_background_color():
+        """style='background-color: yellow' draws yellow background."""
+        doc = HtmlDocument(
+            string='<p style="background-color: #ffff00">Highlighted</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 1 0 rg")
+
+    @test
+    def inline_text_align_center():
+        """style='text-align: center' centers text."""
+        doc = HtmlDocument(string='<p style="text-align: center">Centered</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Centered")
+
+    @test
+    def inline_multiple_properties():
+        """Multiple properties in one style attribute."""
+        doc = HtmlDocument(string='<p style="color: blue; font-size: 24pt">Styled</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+        expect(data).to_contain(b"24 Tf")
+
+    @test
+    def inline_invalid_css_ignored():
+        """Invalid CSS values are silently ignored; valid ones still apply."""
+        doc = HtmlDocument(
+            string='<p style="color: notacolor; font-size: 18pt">Text</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def inline_style_on_heading():
+        """Inline style on heading overrides UA defaults."""
+        doc = HtmlDocument(string='<h1 style="font-size: 12pt">Small H1</h1>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"12 Tf")
+
+    @test
+    def inline_font_weight_normal_on_heading():
+        """font-weight: normal on h1 overrides implied bold."""
+        doc = HtmlDocument(string='<h1 style="font-weight: normal">Not Bold</h1>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica\n")
+
+    @test
+    def span_with_inline_style():
+        """<span style='color: red'> applies color to span text only."""
+        doc = HtmlDocument(
+            string='<p>Normal <span style="color: red">red</span> normal</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def span_without_style():
+        """<span> without style passes text through normally."""
+        doc = HtmlDocument(string="<p>Before <span>inside</span> after</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"inside")
+
+    @test
+    def inline_padding():
+        """style='padding: 10pt' adds padding to the block."""
+        doc = HtmlDocument(string='<p style="padding: 10pt">Padded</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Padded")
+
+    @test
+    def inline_border():
+        """style='border: 1px solid black' renders border."""
+        doc = HtmlDocument(string='<p style="border: 1px solid black">Bordered</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Bordered")
+
+    @test
+    def inline_margin_bottom():
+        """style='margin-bottom: 24pt' adjusts spacing after paragraph."""
+        doc = HtmlDocument(
+            string='<p style="margin-bottom: 24pt">Spaced</p><p>Next</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Spaced")
+        expect(data).to_contain(b"Next")
+
+
+with describe("HtmlDocument - inline style hardening"):
+
+    @test
+    def nested_spans_inner_wins():
+        """Inner span color overrides outer span color."""
+        html = (
+            '<p><span style="color: red">'
+            '<span style="color: blue">inner</span></span></p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+    @test
+    def span_inside_bold():
+        """<b><span style='color: red'>text</span></b> applies both bold and color."""
+        doc = HtmlDocument(string='<p><b><span style="color: red">text</span></b></p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Bold")
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def bold_with_color_style():
+        """<b style='color: red'>text</b> applies bold font AND red color."""
+        doc = HtmlDocument(string='<p><b style="color: red">text</b></p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Bold")
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def italic_with_font_size_style():
+        """<i style='font-size: 18pt'>text</i> applies italic font at 18pt."""
+        doc = HtmlDocument(string='<p><i style="font-size: 18pt">text</i></p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Oblique")
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def styled_bold_does_not_leak():
+        """Style on <b> does not leak to following text."""
+        doc = HtmlDocument(string='<p><b style="color: red">bold</b> normal</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+        expect(data).to_contain(b"normal")
+
+    @test
+    def span_style_inside_styled_bold():
+        """<b style='color: red'><span style='color: blue'>text</span></b> uses blue."""
+        html = '<p><b style="color: red"><span style="color: blue">text</span></b></p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+        expect(data).to_contain(b"/Helvetica-Bold")
+
+    @test
+    def serif_bold():
+        """font-family: serif + font-weight: bold produces Times-Bold."""
+        doc = HtmlDocument(
+            string='<p style="font-family: serif; font-weight: bold">Serif bold</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Times-Bold")
+
+    @test
+    def monospace_italic():
+        """font-family: monospace + font-style: italic produces Courier-Oblique."""
+        html = '<p style="font-family: monospace; font-style: italic">Mono italic</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier-Oblique")
+
+    @test
+    def li_with_color():
+        """<li style='color: red'> renders red text."""
+        doc = HtmlDocument(string='<ul><li style="color: red">Red item</li></ul>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+        expect(data).to_contain(b"Red item")
+
+    @test
+    def li_with_background():
+        """<li style='background-color: yellow'> renders background."""
+        doc = HtmlDocument(
+            string='<ul><li style="background-color: #ffff00">Highlighted</li></ul>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 1 0 rg")
+
+    @test
+    def h2_with_color():
+        """<h2 style='color: blue'> renders blue heading."""
+        doc = HtmlDocument(string='<h2 style="color: blue">Blue Title</h2>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+        expect(data).to_contain(b"Blue Title")
+
+    @test
+    def h3_with_font_weight_normal():
+        """<h3 style='font-weight: normal'> overrides bold."""
+        doc = HtmlDocument(string='<h3 style="font-weight: normal">Normal H3</h3>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica\n")
+
+    @test
+    def h1_with_background():
+        """<h1 style='background-color: yellow'> renders heading with background."""
+        doc = HtmlDocument(string='<h1 style="background-color: #ffff00">Title</h1>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 1 0 rg")
+        expect(data).to_contain(b"Title")
+
+    @test
+    def inline_text_align_right():
+        """style='text-align: right' right-aligns text."""
+        doc = HtmlDocument(string='<p style="text-align: right">Right</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Right")
+
+    @test
+    def inline_line_height():
+        """style='line-height: 24pt' sets line height."""
+        html = '<p style="line-height: 24pt">Some text here</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def inline_line_height_number():
+        """style='line-height: 2' uses multiplier."""
+        html = '<p style="line-height: 2">Double spaced</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def inline_padding_left():
+        """style='padding-left: 30pt' offsets text."""
+        doc = HtmlDocument(string='<p style="padding-left: 30pt">Indented</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Indented")
+
+    @test
+    def inline_border_width_only():
+        """style='border-width: 3px' draws border."""
+        doc = HtmlDocument(string='<p style="border-width: 3px">Bordered</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Bordered")
+
+    @test
+    def inline_border_color_only():
+        """style='border-color: red' with border-width draws colored border."""
+        doc = HtmlDocument(
+            string='<p style="border-width: 1px; border-color: red">Red border</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0")
+
+    @test
+    def important_not_breaking():
+        """!important does not break CSS parsing."""
+        doc = HtmlDocument(string='<p style="color: red !important">Important</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def negative_font_size_ignored():
+        """Negative font-size is silently ignored; default applies."""
+        doc = HtmlDocument(string='<p style="font-size: -12pt">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"12 Tf")
+
+    @test
+    def negative_padding_ignored():
+        """Negative padding is silently ignored."""
+        doc = HtmlDocument(string='<p style="padding: -10px; color: red">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def uppercase_property_name():
+        """Uppercase property name COLOR works."""
+        doc = HtmlDocument(string='<p style="COLOR: red">Red</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def extra_semicolons_handled():
+        """Extra semicolons in style attribute don't break parsing."""
+        doc = HtmlDocument(string='<p style=";;color: red;;;font-size: 18pt;">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def missing_value_handled():
+        """Missing value after colon doesn't crash."""
+        doc = HtmlDocument(string='<p style="color:; font-size: 18pt">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def malformed_rgb_too_few_args():
+        """rgb() with too few arguments is silently ignored."""
+        doc = HtmlDocument(
+            string='<p style="color: rgb(255, 0); font-size: 18pt">Text</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def span_without_style_near_styled_span():
+        """Unstyled span doesn't interfere with styled span."""
+        html = (
+            "<p><span>plain</span> "
+            '<span style="color: red">red</span> '
+            "<span>plain2</span></p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"plain")
+        expect(data).to_contain(b"red")
+        expect(data).to_contain(b"plain2")
+
+
+with describe("HtmlDocument - code element"):
+
+    @test
+    def code_uses_courier():
+        """<code> renders text with Courier font."""
+        doc = HtmlDocument(string="<p><code>x = 1</code></p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+        expect(data).to_contain(b"x = 1")
+
+    @test
+    def code_inside_bold():
+        """<b><code>text</code></b> uses Courier-Bold."""
+        doc = HtmlDocument(string="<p><b><code>bold code</code></b></p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier-Bold")
+
+    @test
+    def code_inside_italic():
+        """<i><code>text</code></i> uses Courier-Oblique."""
+        doc = HtmlDocument(string="<p><i><code>italic code</code></i></p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier-Oblique")
+
+    @test
+    def code_does_not_leak():
+        """<code> font does not leak to following text."""
+        doc = HtmlDocument(string="<p><code>code</code> normal</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+        expect(data).to_contain(b"/Helvetica\n")
+
+    @test
+    def code_with_css_font_override():
+        """CSS font-family on <code> overrides default Courier."""
+        doc = HtmlDocument(string='<p><code style="font-family: serif">code</code></p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Times-Roman")
+
+    @test
+    def kbd_uses_courier():
+        """<kbd> renders text with Courier font."""
+        doc = HtmlDocument(string="<p><kbd>Ctrl+C</kbd></p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+    @test
+    def samp_uses_courier():
+        """<samp> renders text with Courier font."""
+        doc = HtmlDocument(string="<p><samp>output</samp></p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+
+with describe("HtmlDocument - blockquote element"):
+
+    @test
+    def blockquote_renders():
+        """<blockquote> renders text."""
+        doc = HtmlDocument(string="<blockquote>Quoted text</blockquote>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Quoted text")
+
+    @test
+    def blockquote_with_style():
+        """<blockquote> with inline style applies CSS."""
+        doc = HtmlDocument(
+            string='<blockquote style="color: blue">Blue quote</blockquote>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+    @test
+    def blockquote_nested_in_div():
+        """<blockquote> inside <div> renders correctly."""
+        html = "<div><blockquote>Quoted</blockquote></div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Quoted")
+
+
+with describe("HtmlDocument - hr element"):
+
+    @test
+    def hr_renders():
+        """<hr> between paragraphs doesn't crash."""
+        doc = HtmlDocument(string="<p>Before</p><hr><p>After</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Before")
+        expect(data).to_contain(b"After")
+
+    @test
+    def hr_alone():
+        """<hr> alone produces valid PDF with stroke."""
+        doc = HtmlDocument(string="<hr>")
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+        expect(data).to_contain(b"S\n")
+
+    @test
+    def multiple_hr():
+        """Multiple <hr> elements don't crash."""
+        doc = HtmlDocument(string="<p>A</p><hr><p>B</p><hr><p>C</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"A")
+        expect(data).to_contain(b"B")
+        expect(data).to_contain(b"C")
+
+
+with describe("HtmlDocument - pre element"):
+
+    @test
+    def pre_preserves_spaces():
+        """<pre> preserves multiple spaces."""
+        doc = HtmlDocument(string="<pre>a  b  c</pre>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"a  b  c")
+
+    @test
+    def pre_preserves_newlines():
+        """<pre> preserves newlines as separate lines."""
+        doc = HtmlDocument(string="<pre>line1\nline2\nline3</pre>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"line1")
+        expect(data).to_contain(b"line2")
+        expect(data).to_contain(b"line3")
+
+    @test
+    def pre_uses_courier():
+        """<pre> uses monospace (Courier) font."""
+        doc = HtmlDocument(string="<pre>code here</pre>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+    @test
+    def pre_with_code():
+        """<pre><code> works (common pattern)."""
+        doc = HtmlDocument(string="<pre><code>x = 1\ny = 2</code></pre>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+        expect(data).to_contain(b"x = 1")
+        expect(data).to_contain(b"y = 2")
+
+    @test
+    def pre_followed_by_normal():
+        """Normal <p> after <pre> resumes word-wrapping."""
+        html = "<pre>  spaced  </pre><p>Normal paragraph</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Normal paragraph")
+
+
+with describe("HtmlDocument - style blocks"):
+
+    @test
+    def style_type_selector_color():
+        """<style>p { color: red }</style> applies red to paragraphs."""
+        html = "<style>p { color: red }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def style_type_selector_font_size():
+        """<style>p { font-size: 18pt }</style> sets font size."""
+        html = "<style>p { font-size: 18pt }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def style_class_selector():
+        """<style>.red { color: red }</style> matches class attribute."""
+        html = '<style>.red { color: red }</style><p class="red">Text</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def style_id_selector():
+        """<style>#title { font-size: 24pt }</style> matches id attribute."""
+        html = '<style>#title { font-size: 24pt }</style><p id="title">Text</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"24 Tf")
+
+    @test
+    def style_inline_wins_over_style_block():
+        """Inline style overrides <style> block rule."""
+        html = '<style>p { color: blue }</style><p style="color: red">Text</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def style_later_rule_wins():
+        """Later rule with same specificity wins."""
+        html = "<style>p { color: green } p { color: blue }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+    @test
+    def style_class_beats_type():
+        """Class selector beats type selector (higher specificity)."""
+        html = (
+            "<style>p { color: red } .blue { color: blue }</style>"
+            '<p class="blue">Text</p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+    @test
+    def style_id_beats_class():
+        """ID selector beats class selector (higher specificity)."""
+        html = (
+            "<style>.red { color: red } #blue { color: blue }</style>"
+            '<p class="red" id="blue">Text</p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+    @test
+    def style_multiple_selectors():
+        """Comma-separated selectors apply to all matches."""
+        html = "<style>h1, h2 { color: red }</style><h1>A</h1><h2>B</h2>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def style_descendant_selector():
+        """Descendant selector 'div p' matches nested elements."""
+        html = "<style>div p { color: red }</style><div><p>Text</p></div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def style_descendant_no_match():
+        """Descendant selector does not match non-descendant."""
+        html = "<style>div p { color: red }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(b"1 0 0 rg" not in data).to_equal(True)
+
+    @test
+    def style_child_selector():
+        """Child selector 'div > p' matches direct children."""
+        html = "<style>div > p { color: red }</style><div><p>Text</p></div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def style_child_no_match_grandchild():
+        """Child selector does not match grandchildren."""
+        html = (
+            "<style>div > p { color: red }</style>"
+            "<div><blockquote><p>Text</p></blockquote></div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(b"1 0 0 rg" not in data).to_equal(True)
+
+    @test
+    def style_compound_selector():
+        """Compound selector 'p.note' matches element with class."""
+        html = (
+            "<style>p.note { color: red }</style>"
+            '<p class="note">Match</p><p>No match</p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def style_no_style_block():
+        """Document without <style> block still works."""
+        doc = HtmlDocument(string="<p>Text</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Text")
+
+    @test
+    def style_multiple_style_blocks():
+        """Multiple <style> blocks are concatenated."""
+        html = (
+            "<style>p { color: red }</style>"
+            "<style>p { font-size: 18pt }</style>"
+            "<p>Text</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"18 Tf")
+
+    @test
+    def style_font_weight():
+        """<style> block can set font-weight: bold."""
+        html = "<style>p { font-weight: bold }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Bold")
+
+    @test
+    def style_background_color():
+        """<style> block can set background-color."""
+        html = "<style>p { background-color: yellow }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 1 0 rg")

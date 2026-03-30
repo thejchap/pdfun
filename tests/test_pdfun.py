@@ -5,8 +5,6 @@ from tryke import describe, expect, test
 
 from pdfun import FontDatabase, FontId, Layout, PdfDocument, text_width, wrap_text
 
-# ── API surface (cf. WeasyPrint test_api.py) ────────────────────
-
 with describe("PdfDocument API"):
 
     @test
@@ -93,8 +91,6 @@ with describe("Page API"):
         expect(data).to_contain(b"Hello")
 
 
-# ── PDF structure (cf. WeasyPrint test_pdf.py) ──────────────────
-
 with describe("PDF output format"):
 
     @test
@@ -142,8 +138,6 @@ with describe("PDF output format"):
         expect(data).to_contain(b"BT")
         expect(data).to_contain(b"ET")
 
-
-# ── Text rendering (cf. WeasyPrint test_text.py) ────────────────
 
 with describe("Text - built-in fonts"):
 
@@ -242,8 +236,6 @@ with describe("Text measurement"):
         doc = PdfDocument()
         page = doc.add_page()
         page.set_font("Helvetica", 12.0)
-        # "Hello" in Helvetica: H=722 e=556 l=222 l=222 o=556 = 2278
-        # 2278 * 12 / 1000 = 27.336
         width = page.measure_text("Hello")
         expect(abs(width - 27.336) < 0.01).to_be_truthy()
 
@@ -253,7 +245,6 @@ with describe("Text measurement"):
         doc = PdfDocument()
         page = doc.add_page()
         page.set_font("Courier", 10.0)
-        # every char is 600 units, so 5 chars = 3000 * 10 / 1000 = 30.0
         width = page.measure_text("Hello")
         expect(abs(width - 30.0) < 0.01).to_be_truthy()
 
@@ -290,14 +281,10 @@ with describe("Text measurement"):
         helv = text_width("Hello World", "Helvetica", 12.0)
         times = text_width("Hello World", "Times-Roman", 12.0)
         courier = text_width("Hello World", "Courier", 12.0)
-        # these should all be different (Courier is monospace)
         expect(helv).not_.to_equal(times)
         expect(helv).not_.to_equal(courier)
         expect(times).not_.to_equal(courier)
 
-
-# ── Font loading (cf. WeasyPrint test_fonts.py) ─────────────────
-# These remain red (NotImplementedError) until Phase 2.
 
 with describe("FontDatabase API"):
 
@@ -319,7 +306,7 @@ with describe("FontDatabase API"):
         if not candidates:
             candidates = list(Path("/usr/share/fonts").rglob("*.ttf"))
         if not candidates:
-            return  # skip on systems with no accessible TTF files
+            return
         db = FontDatabase()
         font_id = db.load_font_file(str(candidates[0]))
         expect(font_id).not_.to_be_none()
@@ -343,7 +330,7 @@ with describe("FontDatabase API"):
         if not candidates:
             candidates = list(Path("/usr/share/fonts").rglob("*.ttf"))
         if not candidates:
-            return  # skip on systems with no accessible TTF files
+            return
         data = candidates[0].read_bytes()
         db = FontDatabase()
         font_id = db.load_font_data(data)
@@ -360,11 +347,9 @@ with describe("FontDatabase API"):
         """query() finds a font by family name."""
         db = FontDatabase()
         db.load_system_fonts()
-        # Helvetica is available on macOS; on Linux try DejaVu
         result = db.query("Helvetica")
         if result is None:
             result = db.query("DejaVu Sans")
-        # at least one should work on any system with fonts
 
     @test
     def query_missing_font():
@@ -379,7 +364,6 @@ with describe("FontDatabase API"):
         """query() accepts weight parameter."""
         db = FontDatabase()
         db.load_system_fonts()
-        # should not raise, regardless of result
         db.query("Helvetica", weight=700)
 
     @test
@@ -387,7 +371,6 @@ with describe("FontDatabase API"):
         """query() accepts italic parameter."""
         db = FontDatabase()
         db.load_system_fonts()
-        # should not raise, regardless of result
         db.query("Helvetica", italic=True)
 
 
@@ -472,12 +455,10 @@ with describe("Font embedding"):
         name = doc.register_font(db, font_id)
         page = doc.add_page()
         page.set_font(name, 12.0)
-        page.draw_text(72.0, 720.0, "\u00e9\u00e8\u00ea")  # accented chars
+        page.draw_text(72.0, 720.0, "\u00e9\u00e8\u00ea")
         data = doc.to_bytes()
         expect(data[:5]).to_equal(b"%PDF-")
 
-
-# ── Graphics primitives (cf. WeasyPrint test_draw.py) ──────────
 
 with describe("Graphics - rectangles"):
 
@@ -624,11 +605,7 @@ with describe("Graphics - combined text and shapes"):
         expect(data).to_contain(b"Hello on background")
 
 
-# ── Text wrapping ──────────────────────────────────────────────
-
 with describe("Text wrapping"):
-    # Courier: every char is 600/1000 units, so at 10pt each char = 6.0pt
-    # Space is also 6.0pt in Courier
 
     @test
     def wrap_single_word_fits():
@@ -645,7 +622,6 @@ with describe("Text wrapping"):
     @test
     def wrap_at_word_boundary():
         """Text wraps at word boundaries when line exceeds max_width."""
-        # "AA" = 12pt, "AA BB" = 12+6+12 = 30pt > 20pt
         lines = wrap_text("AA BB CC", 20.0, "Courier", 10.0)
         expect(lines).to_equal(["AA", "BB", "CC"])
 
@@ -670,22 +646,16 @@ with describe("Text wrapping"):
     @test
     def wrap_proportional_font():
         """Proportional font wraps differently based on character widths."""
-        # "i" is narrow (222 units in Helvetica), "W" is wide (944 units)
-        # At 10pt: "i" = 2.22pt, "W" = 9.44pt
-        # "ii ii" = 2.22*2 + 2.78 + 2.22*2 = ~12.66pt (fits in 20pt)
-        # "WW WW" = 9.44*2 + 2.78 + 9.44*2 = ~40.54pt (does not fit in 20pt)
         narrow = wrap_text("ii ii", 20.0, "Helvetica", 10.0)
         wide = wrap_text("WW WW", 20.0, "Helvetica", 10.0)
-        expect(len(narrow)).to_equal(1)  # fits on one line
-        expect(len(wide)).to_equal(2)  # wraps to two lines
+        expect(len(narrow)).to_equal(1)
+        expect(len(wide)).to_equal(2)
 
     @test
     def wrap_unknown_font_raises():
         """Unknown font raises ValueError."""
         expect(lambda: wrap_text("x", 100.0, "FakeFont", 10.0)).to_raise(ValueError)
 
-
-# ── Layout ─────────────────────────────────────────────────────
 
 with describe("Layout"):
 
@@ -707,7 +677,6 @@ with describe("Layout"):
         layout.add_text("Margin test", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        # text baseline should be at y = 792 - 72 - 12 = 708
         expect(data).to_contain(b"72 708 Td")
 
     @test
@@ -715,13 +684,10 @@ with describe("Layout"):
         """Long paragraph wraps within content area."""
         doc = PdfDocument()
         layout = Layout(doc)
-        # content width = 612 - 72 - 72 = 468pt
-        # repeat a word enough times to overflow one line
         long_text = " ".join(["word"] * 50)
         layout.add_text(long_text)
         layout.finish()
         data = doc.to_bytes()
-        # multiple Td operators means multiple lines were drawn
         expect(data.count(b"Td")).to_be_greater_than(1)
 
     @test
@@ -741,12 +707,10 @@ with describe("Layout"):
         """Enough text creates multiple pages."""
         doc = PdfDocument()
         layout = Layout(doc)
-        # fill up more than one page with paragraphs
         for _ in range(100):
             layout.add_text("Paragraph that takes space.", spacing_after=12.0)
         layout.finish()
         data = doc.to_bytes()
-        # should have at least 2 pages
         expect(data).not_.to_contain(b"/Count 1")
 
     @test
@@ -757,7 +721,6 @@ with describe("Layout"):
         layout.add_text("Custom margins", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        # text should be at x=100, y=792-100-12=680
         expect(data).to_contain(b"100 680 Td")
 
     @test
@@ -769,8 +732,6 @@ with describe("Layout"):
         layout.add_text(long_text, line_height=20.0)
         layout.finish()
         data = doc.to_bytes()
-        # with line_height=20, second line should be 20pt below first
-        # first line at y=792-72-12=708, second at y=708-20=688
         expect(data).to_contain(b"72 688 Td")
 
     @test
@@ -782,8 +743,6 @@ with describe("Layout"):
         layout.add_text("Para two", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        # para one at y=708, default line_height=14.4 (12*1.2)
-        # para two at y=708 - 14.4 - 24.0 = 669.6
         expect(data).to_contain(b"Para one")
         expect(data).to_contain(b"Para two")
 
@@ -820,8 +779,6 @@ with describe("Layout"):
         expect(data[:5]).to_equal(b"%PDF-")
 
 
-# ── Layout - text color ───────────────────────────────────────
-
 with describe("Layout - text color"):
 
     @test
@@ -844,12 +801,9 @@ with describe("Layout - text color"):
         layout.add_text("Default")
         layout.finish()
         data = doc.to_bytes()
-        # save/restore state should isolate the color
         expect(data).to_contain(b"q\n")
         expect(data).to_contain(b"Q\n")
 
-
-# ── Layout - background color ─────────────────────────────────
 
 with describe("Layout - background color"):
 
@@ -873,7 +827,6 @@ with describe("Layout - background color"):
         layout.add_text("Over bg", background_color=(0.9, 0.9, 0.9))
         layout.finish()
         data = doc.to_bytes()
-        # the fill (f) for the rect must come before BT for the text
         fill_pos = data.find(b"\nf\n")
         bt_pos = data.find(b"BT")
         expect(fill_pos).to_be_less_than(bt_pos)
@@ -888,8 +841,6 @@ with describe("Layout - background color"):
         data = doc.to_bytes()
         expect(data).not_.to_contain(b" re\n")
 
-
-# ── Layout - padding ──────────────────────────────────────────
 
 with describe("Layout - padding"):
 
@@ -906,9 +857,6 @@ with describe("Layout - padding"):
         )
         layout.finish()
         data = doc.to_bytes()
-        # text x = margin_left + pad_left = 72 + 10 = 82
-        # text y = page_height - margin_top - pad_top - font_size
-        # = 792 - 72 - 10 - 12 = 698
         expect(data).to_contain(b"82 698 Td")
 
     @test
@@ -924,22 +872,17 @@ with describe("Layout - padding"):
         )
         layout.finish()
         data = doc.to_bytes()
-        # text x = 72 + 30 = 102
-        # text y = 792 - 72 - 20 - 12 = 688
         expect(data).to_contain(b"102 688 Td")
 
     @test
     def layout_padding_narrows_wrap_width():
         """Padding reduces available width for text wrapping."""
         doc = PdfDocument()
-        # content_width = 200 - 10 - 10 = 180
         layout = Layout(doc, margin_left=10.0, margin_right=10.0, page_width=200.0)
         long_text = " ".join(["word"] * 20)
-        # with padding=50, text_width = 180 - 50 - 50 = 80
         layout.add_text(long_text, padding=50.0)
         layout.finish()
         data = doc.to_bytes()
-        # should have more lines than without padding
         no_pad_doc = PdfDocument()
         no_pad_layout = Layout(
             no_pad_doc,
@@ -960,11 +903,8 @@ with describe("Layout - padding"):
         layout.add_text("No padding", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        # same position as current behavior: x=72, y=708
         expect(data).to_contain(b"72 708 Td")
 
-
-# ── Layout - borders ──────────────────────────────────────────
 
 with describe("Layout - borders"):
 
@@ -1029,10 +969,7 @@ with describe("Layout - borders"):
         expect(fill_pos).to_be_less_than(stroke_pos)
 
 
-# ── Layout - text alignment ───────────────────────────────────
-
 with describe("Layout - text alignment"):
-    # Using Courier 10pt for exact math: each char = 6.0pt
 
     @test
     def layout_align_left_default():
@@ -1049,9 +986,6 @@ with describe("Layout - text alignment"):
         """center alignment centers each line within content area."""
         doc = PdfDocument()
         layout = Layout(doc, margin_left=72.0, margin_right=72.0)
-        # content_width = 612 - 72 - 72 = 468
-        # "Hi" in Courier 10pt: 2 chars * 6pt = 12pt
-        # center x = 72 + (468 - 12) / 2 = 72 + 228 = 300
         layout.add_text("Hi", font="Courier", font_size=10.0, text_align="center")
         layout.finish()
         data = doc.to_bytes()
@@ -1062,8 +996,6 @@ with describe("Layout - text alignment"):
         """right alignment right-aligns each line within content area."""
         doc = PdfDocument()
         layout = Layout(doc, margin_left=72.0, margin_right=72.0)
-        # "Hi" in Courier 10pt = 12pt
-        # right x = 72 + 468 - 12 = 528
         layout.add_text("Hi", font="Courier", font_size=10.0, text_align="right")
         layout.finish()
         data = doc.to_bytes()
@@ -1081,9 +1013,6 @@ with describe("Layout - text alignment"):
         """center alignment accounts for padding."""
         doc = PdfDocument()
         layout = Layout(doc, margin_left=72.0, margin_right=72.0)
-        # content_width = 468, text_area = 468 - 20 - 20 = 428
-        # "Hi" in Courier 10pt = 12pt
-        # center x = 72 + 20 + (428 - 12) / 2 = 72 + 20 + 208 = 300
         layout.add_text(
             "Hi",
             font="Courier",
@@ -1095,8 +1024,6 @@ with describe("Layout - text alignment"):
         data = doc.to_bytes()
         expect(data).to_contain(b"300 710 Td")
 
-
-# ── Layout - combined styling ─────────────────────────────────
 
 with describe("Layout - combined styling"):
 
