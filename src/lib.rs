@@ -854,7 +854,28 @@ fn html_to_pdf(
         page_width as f32,
         page_height as f32,
     );
-    html_render::render_dom_to_layout(&parsed.document, &mut inner);
+    let page_style = html_render::render_dom_to_layout(&parsed.document, &mut inner);
+
+    // Apply @page CSS overrides
+    if let Some(w) = page_style.width {
+        inner.page_width = w;
+    }
+    if let Some(h) = page_style.height {
+        inner.page_height = h;
+    }
+    if let Some(m) = page_style.margin_top {
+        inner.margin_top = m;
+    }
+    if let Some(m) = page_style.margin_right {
+        inner.margin_right = m;
+    }
+    if let Some(m) = page_style.margin_bottom {
+        inner.margin_bottom = m;
+    }
+    if let Some(m) = page_style.margin_left {
+        inner.margin_left = m;
+    }
+
     inner.finish(&mut doc).map_err(PyValueError::new_err)?;
     Ok(doc)
 }

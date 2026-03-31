@@ -1356,3 +1356,154 @@ with describe("HtmlDocument - style blocks"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         expect(data).to_contain(b"1 1 0 rg")
+
+
+with describe("body CSS inheritance"):
+
+    @test
+    def body_font_family_inherits():
+        """font-family on body inherits to child elements."""
+        html = "<style>body { font-family: monospace }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+    @test
+    def body_font_family_comma_list():
+        """Comma-separated font-family resolves through the list."""
+        html = (
+            "<style>body { font-family: 'Courier New', Courier,"
+            " monospace }</style><p>Text</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+    @test
+    def body_font_size_inherits():
+        """font-size on body inherits to child elements."""
+        html = "<style>body { font-size: 10pt }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"10 Tf")
+
+    @test
+    def body_line_height_inherits():
+        """line-height on body inherits to child elements without crash."""
+        html = "<style>body { line-height: 1.4 }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+
+with describe("@page rule"):
+
+    @test
+    def at_page_size_letter():
+        """@page { size: letter } sets page to 612x792."""
+        html = "<style>@page { size: letter }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/MediaBox [0 0 612 792]")
+
+    @test
+    def at_page_size_a4():
+        """@page { size: a4 } sets page to 595x842."""
+        html = "<style>@page { size: a4 }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/MediaBox [0 0 595 842]")
+
+    @test
+    def at_page_margin():
+        """@page { margin: 0.75in } parses without error."""
+        html = "<style>@page { margin: 0.75in }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def at_page_with_other_rules():
+        """@page rules coexist with regular CSS rules."""
+        html = "<style>@page { size: letter } p { color: red }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/MediaBox [0 0 612 792]")
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def inch_unit_in_margin():
+        """Inch units resolve correctly (0.75in = 54pt)."""
+        html = "<style>@page { size: letter; margin: 1in }</style><p>Text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+
+with describe("multi-column layout"):
+
+    @test
+    def column_count_renders():
+        """column-count: 2 produces a valid PDF with text wrapped narrower."""
+        html = """<style>body { column-count: 2 }</style>
+        <p>First paragraph with enough text to show wrapping.</p>
+        <p>Second paragraph also with some text content.</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+        expect(data).to_contain(b"First paragraph")
+
+    @test
+    def column_rule_renders():
+        """column-rule draws stroke operations in the PDF."""
+        html = """<style>
+        body { column-count: 2; column-rule: 1px solid #cccccc }
+        </style>
+        <p>Left column text.</p>
+        <p>More text for the layout.</p>
+        <p>Even more to push to second column.</p>
+        <p>And another paragraph.</p>
+        <p>Filling up the first column.</p>
+        <p>This should overflow.</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # Column rules produce stroke ops with the specified color
+        expect(data).to_contain(b"0.8 0.8 0.8 RG")
+
+    @test
+    def column_gap_respected():
+        """column-gap: 0.3in produces valid PDF."""
+        html = """<style>body { column-count: 2; column-gap: 0.3in }</style>
+        <p>Text in columns.</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def jc_news_full_css():
+        """The full jc-news CSS renders without error."""
+        html = """<style>
+        @page { size: letter; margin: 0.75in; }
+        body {
+            column-count: 2; column-gap: 0.3in;
+            column-rule: 1px solid #ccc;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 10pt; line-height: 1.4;
+            margin: 0; padding: 0;
+        }
+        h1 { font-size: 16pt; font-weight: bold; }
+        h2 { font-size: 13pt; font-weight: bold; }
+        </style>
+        <h1>Hacker News Summary</h1>
+        <h2>1. Test Post</h2>
+        <p>100 points by alice | 50 comments</p>
+        <p>A cool project that does interesting things.</p>
+        <hr>
+        <h2>2. Another Post</h2>
+        <p>200 points by bob | 120 comments</p>
+        <p>An article about something interesting.</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/MediaBox [0 0 612 792]")
+        expect(data).to_contain(b"/Courier")
+        expect(data).to_contain(b"Hacker News Summary")

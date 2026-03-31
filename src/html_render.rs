@@ -86,13 +86,16 @@ fn font_family_root(font: &'static str) -> &'static str {
 }
 
 fn map_css_font_family(family: &str) -> Option<&'static str> {
-    let lower = family.to_ascii_lowercase();
-    match lower.as_str() {
-        "serif" | "times" | "times new roman" | "times-roman" => Some("Times-Roman"),
-        "sans-serif" | "helvetica" | "arial" => Some("Helvetica"),
-        "monospace" | "courier" | "courier new" => Some("Courier"),
-        _ => None,
+    for name in family.split(',') {
+        let lower = name.trim().trim_matches(|c| c == '\'' || c == '"').to_ascii_lowercase();
+        match lower.as_str() {
+            "serif" | "times" | "times new roman" | "times-roman" => return Some("Times-Roman"),
+            "sans-serif" | "helvetica" | "arial" => return Some("Helvetica"),
+            "monospace" | "courier" | "courier new" => return Some("Courier"),
+            _ => continue,
+        }
     }
+    None
 }
 
 // ── List tracking ────────────────────────────────────────────
@@ -243,6 +246,8 @@ struct HtmlRenderer<'a> {
     italic_had_style: Vec<bool>,
     code_had_style: Vec<bool>,
     span_had_style: Vec<bool>,
+    /// Inherited CSS style from body/html (font-family, font-size, line-height).
+    inherited_style: Option<ComputedStyle>,
 }
 
 impl<'a> HtmlRenderer<'a> {
@@ -265,6 +270,7 @@ impl<'a> HtmlRenderer<'a> {
             italic_had_style: Vec::new(),
             code_had_style: Vec::new(),
             span_had_style: Vec::new(),
+            inherited_style: None,
         }
     }
 
@@ -360,6 +366,24 @@ impl<'a> HtmlRenderer<'a> {
             }
             self.current_tag = Some("li".to_string());
             self.block_style = inline_style;
+        } else if tag == "body" || tag == "html" {
+            if let Some(ref style) = inline_style {
+                if let Some(count) = style.column_count {
+                    self.layout.column_count = count;
+                }
+                if let Some(gap) = style.column_gap {
+                    self.layout.column_gap = gap.resolve(12.0);
+                }
+                if let Some(width) = style.column_rule_width {
+                    self.layout.column_rule_width = width.resolve(12.0);
+                }
+                if let Some(color) = style.column_rule_color {
+                    self.layout.column_rule_color = Some(color);
+                }
+            }
+            if let Some(style) = inline_style {
+                self.inherited_style = Some(style);
+            }
         } else if BLOCK_ELEMENTS.contains(&tag) {
             self.flush();
             self.current_tag = Some(tag.to_string());
@@ -464,9 +488,10 @@ impl<'a> HtmlRenderer<'a> {
         let ua = ua_style(tag);
         let effective = self.effective_style();
 
-        // Resolve font size: CSS override → UA default
+        // Resolve font size: CSS override → inherited → UA default
         let font_size = effective
             .and_then(|s| s.font_size)
+            .or_else(|| self.inherited_style.as_ref().and_then(|s| s.font_size))
             .map_or(ua.font_size, |len| len.resolve(ua.font_size));
 
         // Check if CSS explicitly sets font-weight or font-style
@@ -501,6 +526,12 @@ impl<'a> HtmlRenderer<'a> {
             .and_then(|s| s.font_family.as_deref())
             .and_then(map_css_font_family)
             .or(code_font)
+            .or_else(|| {
+                self.inherited_style
+                    .as_ref()
+                    .and_then(|s| s.font_family.as_deref())
+                    .and_then(map_css_font_family)
+            })
             .unwrap_or(ua_font);
 
         let resolved_font = resolve_font(base_font, bold, italic);
@@ -601,6 +632,7 @@ impl<'a> HtmlRenderer<'a> {
         self.block_style
             .as_ref()
             .and_then(|s| s.line_height)
+            .or_else(|| self.inherited_style.as_ref().and_then(|s| s.line_height))
             .map(|len| len.resolve(em))
     }
 
@@ -649,10 +681,13 @@ impl<'a> HtmlRenderer<'a> {
 }
 
 /// Walk an html5ever DOM and produce paragraphs into a `LayoutInner`.
-pub fn render_dom_to_layout(document: &Handle, layout: &mut LayoutInner) {
+/// Returns the `PageStyle` extracted from any `@page` CSS rule.
+pub fn render_dom_to_layout(document: &Handle, layout: &mut LayoutInner) -> css::PageStyle {
     let css_text = extract_style_blocks(document);
     let stylesheet = css::parse_stylesheet(&css_text);
+    let page_style = stylesheet.page_style.clone();
     let mut renderer = HtmlRenderer::new(layout, stylesheet);
     renderer.walk_node(document, 0);
     renderer.flush();
+    page_style
 }

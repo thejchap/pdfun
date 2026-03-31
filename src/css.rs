@@ -13,6 +13,7 @@ pub enum CssLength {
     Px(f32),
     Pt(f32),
     Em(f32),
+    In(f32),
 }
 
 impl CssLength {
@@ -22,6 +23,7 @@ impl CssLength {
             CssLength::Px(v) => v * 0.75, // 96 dpi CSS px → 72 dpi PDF pt
             CssLength::Pt(v) => v,
             CssLength::Em(v) => v * em_base,
+            CssLength::In(v) => v * 72.0, // 1 inch = 72 PDF points
         }
     }
 }
@@ -49,6 +51,18 @@ pub enum FontStyle {
     Italic,
 }
 
+// ── PageStyle (@page rule) ──────────────────────────────────
+
+#[derive(Clone, Debug, Default)]
+pub struct PageStyle {
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub margin_top: Option<f32>,
+    pub margin_right: Option<f32>,
+    pub margin_bottom: Option<f32>,
+    pub margin_left: Option<f32>,
+}
+
 // ── ComputedStyle ───────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -68,6 +82,10 @@ pub struct ComputedStyle {
     pub padding_left: Option<CssLength>,
     pub border_width: Option<CssLength>,
     pub border_color: Option<(f32, f32, f32)>,
+    pub column_count: Option<u32>,
+    pub column_gap: Option<CssLength>,
+    pub column_rule_width: Option<CssLength>,
+    pub column_rule_color: Option<(f32, f32, f32)>,
 }
 
 impl ComputedStyle {
@@ -88,6 +106,10 @@ impl ComputedStyle {
             || self.padding_left.is_some()
             || self.border_width.is_some()
             || self.border_color.is_some()
+            || self.column_count.is_some()
+            || self.column_gap.is_some()
+            || self.column_rule_width.is_some()
+            || self.column_rule_color.is_some()
     }
 }
 
@@ -144,6 +166,8 @@ fn parse_css_length<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseEr
                 Ok(CssLength::Pt(*value))
             } else if unit.eq_ignore_ascii_case("em") {
                 Ok(CssLength::Em(*value))
+            } else if unit.eq_ignore_ascii_case("in") {
+                Ok(CssLength::In(*value))
             } else {
                 Err(location.new_custom_error(()))
             }
@@ -160,7 +184,7 @@ fn parse_non_negative_length<'i>(
     let location = input.current_source_location();
     let len = parse_css_length(input)?;
     let value = match len {
-        CssLength::Px(v) | CssLength::Pt(v) | CssLength::Em(v) => v,
+        CssLength::Px(v) | CssLength::Pt(v) | CssLength::Em(v) | CssLength::In(v) => v,
     };
     if value < 0.0 {
         return Err(location.new_custom_error(()));
@@ -271,17 +295,24 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 }
             }
             "font-family" => {
-                let location = input.current_source_location();
-                let token = input.next()?.clone();
-                match &token {
-                    Token::Ident(ident) => {
-                        self.style.font_family = Some(ident.to_string());
+                let mut families = Vec::new();
+                loop {
+                    let Ok(token) = input.next().cloned() else {
+                        break;
+                    };
+                    match &token {
+                        Token::Ident(ident) => families.push(ident.to_string()),
+                        Token::QuotedString(s) => families.push(s.to_string()),
+                        _ => break,
                     }
-                    Token::QuotedString(s) => {
-                        self.style.font_family = Some(s.to_string());
+                    if input.try_parse(|i| i.expect_comma()).is_err() {
+                        break;
                     }
-                    _ => return Err(location.new_custom_error(())),
                 }
+                if families.is_empty() {
+                    return Err(input.current_source_location().new_custom_error(()));
+                }
+                self.style.font_family = Some(families.join(","));
             }
             "text-align" => {
                 let location = input.current_source_location();
@@ -365,6 +396,56 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                                     | "ridge"
                                     | "inset"
                                     | "outset"
+                            ) {
+                                Ok::<(), ParseError<'i, ()>>(())
+                            } else {
+                                Err(i.new_custom_error(()))
+                            }
+                        })
+                        .is_ok()
+                    {
+                        found = true;
+                    } else {
+                        break;
+                    }
+                }
+                if !found {
+                    return Err(input.new_custom_error(()));
+                }
+            }
+            "column-count" => {
+                let n = input.expect_integer()?;
+                if n >= 1 {
+                    self.style.column_count = Some(n as u32);
+                } else {
+                    return Err(input.new_custom_error(()));
+                }
+            }
+            "column-gap" => {
+                self.style.column_gap = Some(parse_non_negative_length(input)?);
+            }
+            "column-rule-width" => {
+                self.style.column_rule_width = Some(parse_non_negative_length(input)?);
+            }
+            "column-rule-color" => {
+                self.style.column_rule_color = Some(parse_css_color(input)?);
+            }
+            "column-rule" => {
+                // shorthand: <width> <style> <color> in any order
+                let mut found = false;
+                for _ in 0..3 {
+                    if let Ok(len) = input.try_parse(parse_non_negative_length) {
+                        self.style.column_rule_width = Some(len);
+                        found = true;
+                    } else if let Ok(color) = input.try_parse(parse_css_color) {
+                        self.style.column_rule_color = Some(color);
+                        found = true;
+                    } else if input
+                        .try_parse(|i: &mut Parser<'i, '_>| {
+                            let ident = i.expect_ident()?;
+                            if matches!(
+                                ident.to_ascii_lowercase().as_str(),
+                                "solid" | "dashed" | "dotted" | "none"
                             ) {
                                 Ok::<(), ParseError<'i, ()>>(())
                             } else {
@@ -495,6 +576,7 @@ pub struct CssRule {
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
     pub rules: Vec<CssRule>,
+    pub page_style: PageStyle,
 }
 
 // ── Selector parsing ──────────────────────────────────────
@@ -644,17 +726,83 @@ fn parse_compound_from_text(
     CompoundSelector { parts }
 }
 
+// ── @page rule parsing ───────────────────────────────────
+
+fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
+    let mut parser_input = ParserInput::new(declarations);
+    let mut parser = Parser::new(&mut parser_input);
+
+    while !parser.is_exhausted() {
+        let _ = parser.try_parse(|input| -> Result<(), ParseError<'_, ()>> {
+            let name = input.expect_ident()?.clone();
+            input.expect_colon()?;
+
+            match name.to_ascii_lowercase().as_str() {
+                "size" => {
+                    let ident = input.try_parse(|i| i.expect_ident().cloned());
+                    if let Ok(ref id) = ident {
+                        match id.to_ascii_lowercase().as_str() {
+                            "letter" => {
+                                page_style.width = Some(612.0);
+                                page_style.height = Some(792.0);
+                            }
+                            "a4" => {
+                                page_style.width = Some(595.0);
+                                page_style.height = Some(842.0);
+                            }
+                            _ => return Err(input.new_custom_error(())),
+                        }
+                    } else {
+                        let w = parse_non_negative_length(input)?;
+                        let h = input.try_parse(parse_non_negative_length).unwrap_or(w);
+                        page_style.width = Some(w.resolve(12.0));
+                        page_style.height = Some(h.resolve(12.0));
+                    }
+                }
+                "margin" => {
+                    let (top, right, bottom, left) = parse_non_negative_box_shorthand(input)?;
+                    let em = 12.0;
+                    page_style.margin_top = Some(top.resolve(em));
+                    page_style.margin_right = Some(right.resolve(em));
+                    page_style.margin_bottom = Some(bottom.resolve(em));
+                    page_style.margin_left = Some(left.resolve(em));
+                }
+                "margin-top" => {
+                    page_style.margin_top = Some(parse_non_negative_length(input)?.resolve(12.0));
+                }
+                "margin-right" => {
+                    page_style.margin_right =
+                        Some(parse_non_negative_length(input)?.resolve(12.0));
+                }
+                "margin-bottom" => {
+                    page_style.margin_bottom =
+                        Some(parse_non_negative_length(input)?.resolve(12.0));
+                }
+                "margin-left" => {
+                    page_style.margin_left =
+                        Some(parse_non_negative_length(input)?.resolve(12.0));
+                }
+                _ => return Err(input.new_custom_error(())),
+            }
+
+            let _ = input.try_parse(|i| i.expect_semicolon());
+            Ok(())
+        });
+    }
+}
+
 // ── Stylesheet parsing ────────────────────────────────────
 
 /// Parse a CSS stylesheet (from `<style>` blocks) into rules.
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
-    parse_stylesheet_manual(css, &mut rules);
-    Stylesheet { rules }
+    let mut page_style = PageStyle::default();
+    parse_stylesheet_manual(css, &mut rules, &mut page_style);
+    Stylesheet { rules, page_style }
 }
 
 /// Parse stylesheet by manually scanning for `{ }` blocks.
-fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>) {
+fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut PageStyle) {
     let mut remaining = css;
 
     while !remaining.trim().is_empty() {
@@ -673,6 +821,12 @@ fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>) {
         remaining = &after_open[brace_close + 1..];
 
         if selector_text.is_empty() {
+            continue;
+        }
+
+        // Handle @page rule
+        if selector_text.starts_with("@page") {
+            parse_page_declarations(declarations_text, page_style);
             continue;
         }
 
@@ -824,6 +978,18 @@ pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
     }
     if source.border_color.is_some() {
         target.border_color = source.border_color;
+    }
+    if source.column_count.is_some() {
+        target.column_count = source.column_count;
+    }
+    if source.column_gap.is_some() {
+        target.column_gap = source.column_gap;
+    }
+    if source.column_rule_width.is_some() {
+        target.column_rule_width = source.column_rule_width;
+    }
+    if source.column_rule_color.is_some() {
+        target.column_rule_color = source.column_rule_color;
     }
 }
 

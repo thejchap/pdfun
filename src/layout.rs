@@ -343,6 +343,10 @@ pub struct LayoutInner {
     pub page_width: f32,
     pub page_height: f32,
     blocks: Vec<Paragraph>,
+    pub column_count: u32,
+    pub column_gap: f32,
+    pub column_rule_width: f32,
+    pub column_rule_color: Option<(f32, f32, f32)>,
 }
 
 impl LayoutInner {
@@ -362,6 +366,10 @@ impl LayoutInner {
             page_width,
             page_height,
             blocks: Vec::new(),
+            column_count: 1,
+            column_gap: 0.0,
+            column_rule_width: 0.0,
+            column_rule_color: None,
         }
     }
 
@@ -393,6 +401,15 @@ impl LayoutInner {
         let content_top = self.page_height - self.margin_top;
         let blocks = std::mem::take(&mut self.blocks);
 
+        // Column calculations
+        let col_count = self.column_count.max(1);
+        let (col_width, col_gap) = if col_count > 1 {
+            let gap_total = (col_count - 1) as f32 * self.column_gap;
+            ((content_width - gap_total) / col_count as f32, self.column_gap)
+        } else {
+            (content_width, 0.0)
+        };
+
         if blocks.is_empty() {
             new_page(doc, self.page_width, self.page_height);
             return Ok(());
@@ -400,24 +417,38 @@ impl LayoutInner {
 
         let mut current_page = new_page(doc, self.page_width, self.page_height);
         let mut cursor_y = content_top;
+        let mut current_col: u32 = 0;
+
+        // Helper: x-offset for a given column
+        let col_x = |col: u32| -> f32 {
+            self.margin_left + col as f32 * (col_width + col_gap)
+        };
 
         for block in &blocks {
             if block.is_hr {
                 if cursor_y - 12.0 < self.margin_bottom && cursor_y < content_top {
-                    current_page = new_page(doc, self.page_width, self.page_height);
-                    cursor_y = content_top;
+                    if current_col < col_count - 1 {
+                        current_col += 1;
+                        cursor_y = content_top;
+                    } else {
+                        self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
+                        current_page = new_page(doc, self.page_width, self.page_height);
+                        cursor_y = content_top;
+                        current_col = 0;
+                    }
                 }
+                let cx = col_x(current_col);
                 let mut page = current_page.lock().unwrap();
                 page.operations.push(PdfOp::SaveState);
                 page.operations
                     .push(PdfOp::SetStrokeColor { r: 0.75, g: 0.75, b: 0.75 });
                 page.operations.push(PdfOp::SetLineWidth(0.5));
                 page.operations.push(PdfOp::MoveTo {
-                    x: self.margin_left,
+                    x: cx,
                     y: cursor_y,
                 });
                 page.operations.push(PdfOp::LineTo {
-                    x: self.margin_left + content_width,
+                    x: cx + col_width,
                     y: cursor_y,
                 });
                 page.operations.push(PdfOp::Stroke);
@@ -428,7 +459,7 @@ impl LayoutInner {
             }
 
             let text_area_width =
-                content_width - block.style.padding_left - block.style.padding_right;
+                col_width - block.style.padding_left - block.style.padding_right;
 
             let wrapped_lines =
                 wrap_runs_impl(&block.runs, text_area_width, block.preserve_whitespace)?;
@@ -444,9 +475,18 @@ impl LayoutInner {
                 block.style.padding_top + block_text_height + block.style.padding_bottom;
 
             if cursor_y - block_total_height < self.margin_bottom && cursor_y < content_top {
-                current_page = new_page(doc, self.page_width, self.page_height);
-                cursor_y = content_top;
+                if current_col < col_count - 1 {
+                    current_col += 1;
+                    cursor_y = content_top;
+                } else {
+                    self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
+                    current_page = new_page(doc, self.page_width, self.page_height);
+                    cursor_y = content_top;
+                    current_col = 0;
+                }
             }
+
+            let cx = col_x(current_col);
 
             let needs_state_wrap =
                 block.style.has_any_styling() || block.runs.iter().any(|r| r.color.is_some());
@@ -473,9 +513,9 @@ impl LayoutInner {
             if let Some((r, g, b)) = block.style.background_color {
                 page.operations.push(PdfOp::SetFillColor { r, g, b });
                 page.operations.push(PdfOp::Rectangle {
-                    x: self.margin_left,
+                    x: cx,
                     y: cursor_y - block_total_height,
-                    width: content_width,
+                    width: col_width,
                     height: block_total_height,
                 });
                 page.operations.push(PdfOp::Fill);
@@ -487,9 +527,9 @@ impl LayoutInner {
                 page.operations
                     .push(PdfOp::SetLineWidth(block.style.border_width));
                 page.operations.push(PdfOp::Rectangle {
-                    x: self.margin_left,
+                    x: cx,
                     y: cursor_y - block_total_height,
-                    width: content_width,
+                    width: col_width,
                     height: block_total_height,
                 });
                 page.operations.push(PdfOp::Stroke);
@@ -499,7 +539,7 @@ impl LayoutInner {
                 page.operations.push(PdfOp::SetFillColor { r, g, b });
             }
 
-            let text_x_base = self.margin_left + block.style.padding_left;
+            let text_x_base = cx + block.style.padding_left;
             let mut line_y = cursor_y - block.style.padding_top;
             let marker_gap = 6.0_f32;
 
@@ -572,7 +612,43 @@ impl LayoutInner {
             cursor_y -= block_total_height + block.spacing_after;
         }
 
+        // Draw column rules on the last page
+        self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
+
         Ok(())
+    }
+
+    fn draw_column_rules(
+        &self,
+        page: &Arc<Mutex<PageContent>>,
+        content_top: f32,
+        col_width: f32,
+        col_gap: f32,
+        col_count: u32,
+    ) {
+        if col_count <= 1 || self.column_rule_width <= 0.0 {
+            return;
+        }
+        let mut page = page.lock().unwrap();
+        page.operations.push(PdfOp::SaveState);
+        let (r, g, b) = self.column_rule_color.unwrap_or((0.75, 0.75, 0.75));
+        page.operations.push(PdfOp::SetStrokeColor { r, g, b });
+        page.operations
+            .push(PdfOp::SetLineWidth(self.column_rule_width));
+
+        for col in 0..(col_count - 1) {
+            let rule_x = self.margin_left
+                + (col + 1) as f32 * col_width
+                + col as f32 * col_gap
+                + col_gap / 2.0;
+            page.operations
+                .push(PdfOp::MoveTo { x: rule_x, y: content_top });
+            page.operations
+                .push(PdfOp::LineTo { x: rule_x, y: self.margin_bottom });
+            page.operations.push(PdfOp::Stroke);
+        }
+
+        page.operations.push(PdfOp::RestoreState);
     }
 }
 
