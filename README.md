@@ -107,7 +107,7 @@ A pure-Rust HTML/CSS to PDF renderer with Python bindings. An alternative to [We
 - [ ] Multi-column layout
 - [ ] Table layout
 - [ ] Inline-block
-- [ ] CSS style inheritance (parent to child)
+- [x] CSS style inheritance (parent to child)
 - [ ] Orphans/widows control
 
 ### Fonts

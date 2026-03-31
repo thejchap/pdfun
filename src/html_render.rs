@@ -246,8 +246,8 @@ struct HtmlRenderer<'a> {
     italic_had_style: Vec<bool>,
     code_had_style: Vec<bool>,
     span_had_style: Vec<bool>,
-    /// Inherited CSS style from body/html (font-family, font-size, line-height).
-    inherited_style: Option<ComputedStyle>,
+    /// Stack of inherited CSS styles, pushed/popped as we enter/leave DOM elements.
+    inherit_stack: Vec<ComputedStyle>,
 }
 
 impl<'a> HtmlRenderer<'a> {
@@ -270,7 +270,7 @@ impl<'a> HtmlRenderer<'a> {
             italic_had_style: Vec::new(),
             code_had_style: Vec::new(),
             span_had_style: Vec::new(),
-            inherited_style: None,
+            inherit_stack: Vec::new(),
         }
     }
 
@@ -329,11 +329,18 @@ impl<'a> HtmlRenderer<'a> {
                     }
                 };
 
+                // Push inherited style for this element's subtree
+                let parent = self.inherit_stack.last().cloned().unwrap_or_default();
+                let inherited = parent.inherit_into(&merged_style);
+                self.inherit_stack.push(inherited);
+
                 self.handle_start_tag(tag, merged_style);
                 for child in handle.children.borrow().iter() {
                     self.walk_node(child, depth + 1);
                 }
                 self.handle_end_tag(tag);
+
+                self.inherit_stack.pop();
             }
             NodeData::Text { contents } => {
                 let text = contents.borrow().to_string();
@@ -380,9 +387,6 @@ impl<'a> HtmlRenderer<'a> {
                 if let Some(color) = style.column_rule_color {
                     self.layout.column_rule_color = Some(color);
                 }
-            }
-            if let Some(style) = inline_style {
-                self.inherited_style = Some(style);
             }
         } else if BLOCK_ELEMENTS.contains(&tag) {
             self.flush();
@@ -488,34 +492,37 @@ impl<'a> HtmlRenderer<'a> {
         let ua = ua_style(tag);
         let effective = self.effective_style();
 
+        let inherited = self.inherit_stack.last();
+
         // Resolve font size: CSS override → inherited → UA default
         let font_size = effective
             .and_then(|s| s.font_size)
-            .or_else(|| self.inherited_style.as_ref().and_then(|s| s.font_size))
+            .or_else(|| inherited.and_then(|s| s.font_size))
             .map_or(ua.font_size, |len| len.resolve(ua.font_size));
 
-        // Check if CSS explicitly sets font-weight or font-style
-        let css_weight = effective.and_then(|s| s.font_weight);
-        let css_style = effective.and_then(|s| s.font_style);
+        // Resolve bold: CSS → inherited → tag/depth-implied bold
+        let css_weight = effective
+            .and_then(|s| s.font_weight)
+            .or_else(|| inherited.and_then(|s| s.font_weight));
+        // Resolve italic: CSS → inherited → tag/depth-implied italic
+        let css_style = effective
+            .and_then(|s| s.font_style)
+            .or_else(|| inherited.and_then(|s| s.font_style));
         let css_overrides_variant = css_weight.is_some() || css_style.is_some();
 
-        // Resolve bold: CSS font-weight overrides tag/depth-implied bold
         let bold = if let Some(fw) = css_weight {
             fw.is_bold()
         } else {
             self.bold_depth > 0
         };
 
-        // Resolve italic: CSS font-style overrides tag/depth-implied italic
         let italic = if let Some(fs) = css_style {
             matches!(fs, FontStyle::Italic)
         } else {
             self.italic_depth > 0
         };
 
-        // Resolve font family: CSS → code depth → map generic names → UA default
-        // When CSS overrides font-weight/style, strip variant from UA font
-        // so resolve_font builds the correct variant from scratch.
+        // Resolve font family: CSS → code depth → inherited → UA default
         let ua_font = if css_overrides_variant {
             font_family_root(ua.font)
         } else {
@@ -527,8 +534,7 @@ impl<'a> HtmlRenderer<'a> {
             .and_then(map_css_font_family)
             .or(code_font)
             .or_else(|| {
-                self.inherited_style
-                    .as_ref()
+                inherited
                     .and_then(|s| s.font_family.as_deref())
                     .and_then(map_css_font_family)
             })
@@ -536,8 +542,10 @@ impl<'a> HtmlRenderer<'a> {
 
         let resolved_font = resolve_font(base_font, bold, italic);
 
-        // Resolve text color from inline style (run-level)
-        let color = effective.and_then(|s| s.color);
+        // Resolve text color: CSS → inherited
+        let color = effective
+            .and_then(|s| s.color)
+            .or_else(|| inherited.and_then(|s| s.color));
 
         self.runs.push(TextRun {
             text,
@@ -632,7 +640,7 @@ impl<'a> HtmlRenderer<'a> {
         self.block_style
             .as_ref()
             .and_then(|s| s.line_height)
-            .or_else(|| self.inherited_style.as_ref().and_then(|s| s.line_height))
+            .or_else(|| self.inherit_stack.last().and_then(|s| s.line_height))
             .map(|len| len.resolve(em))
     }
 
@@ -645,37 +653,53 @@ impl<'a> HtmlRenderer<'a> {
     }
 
     fn apply_block_css(&self, block_style: &mut BlockStyle) {
-        let Some(style) = self.block_style.as_ref() else {
-            return;
-        };
+        let inherited = self.inherit_stack.last();
         let em = self.resolve_em_base();
 
-        if let Some(c) = style.color {
-            block_style.color = Some(c);
+        if let Some(style) = self.block_style.as_ref() {
+            if let Some(c) = style.color {
+                block_style.color = Some(c);
+            }
+            if let Some(c) = style.background_color {
+                block_style.background_color = Some(c);
+            }
+            if let Some(a) = &style.text_align {
+                block_style.text_align = a.clone();
+            }
+            if let Some(len) = style.padding_top {
+                block_style.padding_top = len.resolve(em);
+            }
+            if let Some(len) = style.padding_right {
+                block_style.padding_right = len.resolve(em);
+            }
+            if let Some(len) = style.padding_bottom {
+                block_style.padding_bottom = len.resolve(em);
+            }
+            if let Some(len) = style.padding_left {
+                block_style.padding_left = len.resolve(em);
+            }
+            if let Some(len) = style.border_width {
+                block_style.border_width = len.resolve(em);
+            }
+            if let Some(c) = style.border_color {
+                block_style.border_color = Some(c);
+            }
         }
-        if let Some(c) = style.background_color {
-            block_style.background_color = Some(c);
-        }
-        if let Some(a) = &style.text_align {
-            block_style.text_align = a.clone();
-        }
-        if let Some(len) = style.padding_top {
-            block_style.padding_top = len.resolve(em);
-        }
-        if let Some(len) = style.padding_right {
-            block_style.padding_right = len.resolve(em);
-        }
-        if let Some(len) = style.padding_bottom {
-            block_style.padding_bottom = len.resolve(em);
-        }
-        if let Some(len) = style.padding_left {
-            block_style.padding_left = len.resolve(em);
-        }
-        if let Some(len) = style.border_width {
-            block_style.border_width = len.resolve(em);
-        }
-        if let Some(c) = style.border_color {
-            block_style.border_color = Some(c);
+
+        // Inherit color and text-align from ancestor if not explicitly set
+        if let Some(inh) = inherited {
+            let block_has_color = self.block_style.as_ref().is_some_and(|s| s.color.is_some());
+            if !block_has_color && block_style.color.is_none() {
+                if let Some(c) = inh.color {
+                    block_style.color = Some(c);
+                }
+            }
+            let block_has_align = self.block_style.as_ref().is_some_and(|s| s.text_align.is_some());
+            if !block_has_align {
+                if let Some(a) = &inh.text_align {
+                    block_style.text_align = a.clone();
+                }
+            }
         }
     }
 }

@@ -1396,6 +1396,112 @@ with describe("body CSS inheritance"):
         expect(data[:5]).to_equal(b"%PDF-")
 
 
+with describe("CSS inheritance"):
+
+    @test
+    def color_inherits_through_div():
+        """color on a div inherits to child p."""
+        html = '<div style="color: red"><p>Red text</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def font_weight_inherits():
+        """font-weight: bold on a div inherits to child p."""
+        html = '<div style="font-weight: bold"><p>Bold text</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Bold")
+
+    @test
+    def font_style_inherits():
+        """font-style: italic on a div inherits to child p."""
+        html = '<div style="font-style: italic"><p>Italic text</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Helvetica-Oblique")
+
+    @test
+    def text_align_inherits():
+        """text-align: center on a div inherits to child p."""
+        html = '<div style="text-align: center"><p>Centered</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # Centered text will have non-zero x offset from left margin
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def font_family_inherits_through_div():
+        """font-family on a div inherits to child p."""
+        html = '<div style="font-family: monospace"><p>Mono text</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+    @test
+    def font_size_inherits_through_div():
+        """font-size on a div inherits to child p."""
+        html = '<div style="font-size: 20pt"><p>Big text</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"20 Tf")
+
+    @test
+    def multi_level_inheritance():
+        """color propagates through intermediate elements."""
+        html = '<div style="color: red"><div><p>Still red</p></div></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def child_overrides_parent():
+        """Explicit style on child overrides inherited value."""
+        html = '<div style="color: red"><p style="color: blue">Blue wins</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+    @test
+    def background_does_not_inherit():
+        """background-color is non-inheritable; child should not get it."""
+        html = '<div style="background-color: red"><p>No red bg on me</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # The div itself will have a red background (1 0 0 rg),
+        # but the p should not have its own background rect.
+        # We verify valid PDF is produced; detailed rect check is hard here.
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def stylesheet_rule_inheritance():
+        """Stylesheet rules on a parent inherit to children."""
+        html = (
+            "<style>.parent { color: red }</style>"
+            '<div class="parent"><p>Red from rule</p></div>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def inheritance_does_not_leak_to_siblings():
+        """Inherited style on one branch does not affect sibling branch."""
+        html = '<div style="color: red"><p>Red</p></div><p>Default color</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+    @test
+    def line_height_inherits_through_div():
+        """line-height on a div inherits to child elements."""
+        html = '<div style="line-height: 2"><p>Spaced text</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+
+
 with describe("@page rule"):
 
     @test

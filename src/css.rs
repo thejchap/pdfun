@@ -89,6 +89,33 @@ pub struct ComputedStyle {
 }
 
 impl ComputedStyle {
+    /// Build inherited style for a child element.
+    /// For each inheritable property (color, font-*, text-align, line-height):
+    /// use child's value if explicitly set, else parent's.
+    /// Non-inheritable properties (background, margin, padding, border, column)
+    /// are not carried forward.
+    pub fn inherit_into(&self, child: &Option<ComputedStyle>) -> ComputedStyle {
+        let mut result = ComputedStyle::default();
+        if let Some(c) = child {
+            result.color = c.color.or(self.color);
+            result.font_size = c.font_size.or(self.font_size);
+            result.font_weight = c.font_weight.or(self.font_weight);
+            result.font_style = c.font_style.or(self.font_style);
+            result.font_family = c.font_family.clone().or_else(|| self.font_family.clone());
+            result.text_align = c.text_align.clone().or_else(|| self.text_align.clone());
+            result.line_height = c.line_height.or(self.line_height);
+        } else {
+            result.color = self.color;
+            result.font_size = self.font_size;
+            result.font_weight = self.font_weight;
+            result.font_style = self.font_style;
+            result.font_family = self.font_family.clone();
+            result.text_align = self.text_align.clone();
+            result.line_height = self.line_height;
+        }
+        result
+    }
+
     /// Returns true if any property is set (non-None).
     pub fn has_any_property(&self) -> bool {
         self.color.is_some()
