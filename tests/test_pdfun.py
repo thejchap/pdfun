@@ -1006,7 +1006,7 @@ with describe("Layout - text alignment"):
         """Invalid text_align value raises ValueError."""
         doc = PdfDocument()
         layout = Layout(doc)
-        expect(lambda: layout.add_text("x", text_align="justify")).to_raise(ValueError)
+        expect(lambda: layout.add_text("x", text_align="bogus")).to_raise(ValueError)
 
     @test
     def layout_align_center_with_padding():

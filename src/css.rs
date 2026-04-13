@@ -72,6 +72,26 @@ pub enum BorderStyle {
     Dotted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PageBreak {
+    Auto,
+    Always,
+    Avoid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ListStyleType {
+    None,
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+    LowerAlpha,
+    UpperAlpha,
+    LowerRoman,
+    UpperRoman,
+}
+
 // ── PageStyle (@page rule) ──────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -113,6 +133,9 @@ pub struct ComputedStyle {
     pub column_rule_color: Option<(f32, f32, f32)>,
     pub display: Option<DisplayValue>,
     pub text_decoration: Option<TextDecoration>,
+    pub list_style_type: Option<ListStyleType>,
+    pub page_break_before: Option<PageBreak>,
+    pub page_break_after: Option<PageBreak>,
 }
 
 impl ComputedStyle {
@@ -132,6 +155,7 @@ impl ComputedStyle {
             result.text_align = c.text_align.clone().or_else(|| self.text_align.clone());
             result.line_height = c.line_height.or(self.line_height);
             result.text_decoration = c.text_decoration.or(self.text_decoration);
+            result.list_style_type = c.list_style_type.or(self.list_style_type);
         } else {
             result.color = self.color;
             result.font_size = self.font_size;
@@ -141,6 +165,7 @@ impl ComputedStyle {
             result.text_align = self.text_align.clone();
             result.line_height = self.line_height;
             result.text_decoration = self.text_decoration;
+            result.list_style_type = self.list_style_type;
         }
         result
     }
@@ -172,6 +197,9 @@ impl ComputedStyle {
             || self.column_rule_color.is_some()
             || self.display.is_some()
             || self.text_decoration.is_some()
+            || self.list_style_type.is_some()
+            || self.page_break_before.is_some()
+            || self.page_break_after.is_some()
     }
 }
 
@@ -385,6 +413,8 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     self.style.text_align = Some(TextAlign::Center);
                 } else if ident.eq_ignore_ascii_case("right") {
                     self.style.text_align = Some(TextAlign::Right);
+                } else if ident.eq_ignore_ascii_case("justify") {
+                    self.style.text_align = Some(TextAlign::Justify);
                 } else {
                     return Err(location.new_custom_error(()));
                 }
@@ -555,6 +585,68 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 }
                 self.style.text_decoration =
                     Some(TextDecoration { underline, line_through });
+            }
+            "page-break-before" | "break-before" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let pb = match ident.to_ascii_lowercase().as_str() {
+                    "auto" => PageBreak::Auto,
+                    "always" | "page" | "left" | "right" => PageBreak::Always,
+                    "avoid" | "avoid-page" => PageBreak::Avoid,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.page_break_before = Some(pb);
+            }
+            "page-break-after" | "break-after" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let pb = match ident.to_ascii_lowercase().as_str() {
+                    "auto" => PageBreak::Auto,
+                    "always" | "page" | "left" | "right" => PageBreak::Always,
+                    "avoid" | "avoid-page" => PageBreak::Avoid,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.page_break_after = Some(pb);
+            }
+            "list-style-type" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let lst = match ident.to_ascii_lowercase().as_str() {
+                    "none" => ListStyleType::None,
+                    "disc" => ListStyleType::Disc,
+                    "circle" => ListStyleType::Circle,
+                    "square" => ListStyleType::Square,
+                    "decimal" => ListStyleType::Decimal,
+                    "lower-alpha" | "lower-latin" => ListStyleType::LowerAlpha,
+                    "upper-alpha" | "upper-latin" => ListStyleType::UpperAlpha,
+                    "lower-roman" => ListStyleType::LowerRoman,
+                    "upper-roman" => ListStyleType::UpperRoman,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.list_style_type = Some(lst);
+            }
+            "list-style" => {
+                // Shorthand: only capture the list-style-type component.
+                // Attempt to parse an ident; if it matches a known type, use it.
+                if let Ok(lst) = input.try_parse(|i: &mut Parser<'i, '_>| {
+                    let ident = i.expect_ident()?.clone();
+                    match ident.to_ascii_lowercase().as_str() {
+                        "none" => Ok(ListStyleType::None),
+                        "disc" => Ok::<_, ParseError<'i, ()>>(ListStyleType::Disc),
+                        "circle" => Ok(ListStyleType::Circle),
+                        "square" => Ok(ListStyleType::Square),
+                        "decimal" => Ok(ListStyleType::Decimal),
+                        "lower-alpha" | "lower-latin" => Ok(ListStyleType::LowerAlpha),
+                        "upper-alpha" | "upper-latin" => Ok(ListStyleType::UpperAlpha),
+                        "lower-roman" => Ok(ListStyleType::LowerRoman),
+                        "upper-roman" => Ok(ListStyleType::UpperRoman),
+                        _ => Err(i.new_custom_error(())),
+                    }
+                }) {
+                    self.style.list_style_type = Some(lst);
+                }
+                // Consume and ignore remaining tokens (position, image)
+                while input.next().is_ok() {}
             }
             "display" => {
                 let location = input.current_source_location();
@@ -1111,6 +1203,15 @@ pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
     }
     if source.text_decoration.is_some() {
         target.text_decoration = source.text_decoration;
+    }
+    if source.list_style_type.is_some() {
+        target.list_style_type = source.list_style_type;
+    }
+    if source.page_break_before.is_some() {
+        target.page_break_before = source.page_break_before;
+    }
+    if source.page_break_after.is_some() {
+        target.page_break_after = source.page_break_after;
     }
 }
 

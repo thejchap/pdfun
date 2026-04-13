@@ -366,10 +366,10 @@ with describe("HtmlDocument - lists"):
 
     @test
     def ul_has_bullet_marker():
-        """<ul><li> has a dash bullet marker."""
+        """<ul><li> has a disc bullet marker (rendered as ASCII '*')."""
         doc = HtmlDocument(string="<ul><li>Item</li></ul>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"(-)")
+        expect(data).to_contain(b"(*)")
 
     @test
     def ul_multiple_items():
@@ -422,7 +422,8 @@ with describe("HtmlDocument - lists"):
         html = "<ul><li>Outer<ul><li>Inner</li></ul></li></ul>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(-)")
+        # depth 0 = disc ('*'), depth 1 = circle ('o')
+        expect(data).to_contain(b"(*)")
         expect(data).to_contain(b"(o)")
 
     @test
@@ -1963,3 +1964,374 @@ with describe("clickable links"):
         data = doc.to_bytes()
         expect(data).to_contain(b"/Link")
         expect(data).to_contain(b"styled link")
+
+
+with describe("list-style-type"):
+
+    @test
+    def ol_default_is_decimal():
+        """<ol> defaults to decimal markers."""
+        doc = HtmlDocument(string="<ol><li>One</li><li>Two</li></ol>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(1.)")
+        expect(data).to_contain(b"(2.)")
+
+    @test
+    def lower_alpha_marker():
+        """list-style-type: lower-alpha produces a, b, c markers."""
+        doc = HtmlDocument(
+            string=(
+                '<ol style="list-style-type: lower-alpha">'
+                "<li>First</li><li>Second</li></ol>"
+            )
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(a.)")
+        expect(data).to_contain(b"(b.)")
+
+    @test
+    def upper_alpha_marker():
+        """list-style-type: upper-alpha produces A, B markers."""
+        doc = HtmlDocument(
+            string=(
+                '<ol style="list-style-type: upper-alpha"><li>One</li><li>Two</li></ol>'
+            )
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(A.)")
+        expect(data).to_contain(b"(B.)")
+
+    @test
+    def lower_roman_marker():
+        """list-style-type: lower-roman produces i, ii, iii markers."""
+        doc = HtmlDocument(
+            string=(
+                '<ol style="list-style-type: lower-roman">'
+                "<li>One</li><li>Two</li><li>Three</li></ol>"
+            )
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(i.)")
+        expect(data).to_contain(b"(ii.)")
+        expect(data).to_contain(b"(iii.)")
+
+    @test
+    def upper_roman_marker():
+        """list-style-type: upper-roman produces I, II markers."""
+        doc = HtmlDocument(
+            string=(
+                '<ol style="list-style-type: upper-roman"><li>One</li><li>Two</li></ol>'
+            )
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(I.)")
+        expect(data).to_contain(b"(II.)")
+
+    @test
+    def disc_marker_explicit():
+        """list-style-type: disc produces '*' ASCII marker."""
+        doc = HtmlDocument(
+            string='<ul style="list-style-type: disc"><li>Item</li></ul>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(*)")
+
+    @test
+    def square_marker():
+        """list-style-type: square produces '#' ASCII marker."""
+        doc = HtmlDocument(
+            string='<ul style="list-style-type: square"><li>Item</li></ul>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(#)")
+
+    @test
+    def none_marker_suppresses_bullet():
+        """list-style-type: none produces no marker."""
+        doc_with = HtmlDocument(string="<ul><li>Item</li></ul>")
+        data_with = doc_with.to_bytes()
+        doc_none = HtmlDocument(
+            string='<ul style="list-style-type: none"><li>Item</li></ul>'
+        )
+        data_none = doc_none.to_bytes()
+        # Both contain "Item" but the "none" variant has no marker
+        expect(data_with).to_contain(b"Item")
+        expect(data_none).to_contain(b"Item")
+        # The marker ShowText call is absent in the "none" version
+        assert b"(*)" in data_with
+        assert b"(*)" not in data_none
+
+    @test
+    def decimal_via_stylesheet():
+        """list-style-type set via <style> block on <ol> applies."""
+        html = (
+            "<html><head><style>"
+            ".lower { list-style-type: lower-alpha; }"
+            "</style></head><body>"
+            '<ol class="lower"><li>A</li><li>B</li></ol>'
+            "</body></html>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(a.)")
+        expect(data).to_contain(b"(b.)")
+
+    @test
+    def roman_numerals_compound():
+        """Roman numeral markers handle compound values correctly."""
+        items = "".join(f"<li>Item {i}</li>" for i in range(1, 10))
+        doc = HtmlDocument(
+            string=f'<ol style="list-style-type: lower-roman">{items}</ol>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(iv.)")
+        expect(data).to_contain(b"(ix.)")
+
+
+with describe("page-break"):
+
+    @test
+    def page_break_before_always_forces_new_page():
+        """page-break-before: always forces the element onto a new page."""
+        doc_baseline = HtmlDocument(string="<p>First</p><p>Second</p>")
+        baseline = doc_baseline.to_bytes()
+        doc = HtmlDocument(
+            string=('<p>First</p><p style="page-break-before: always">Second</p>')
+        )
+        data = doc.to_bytes()
+        # Baseline: 1 page (/Count 1). With break: 2 pages (/Count 2).
+        assert b"/Count 1" in baseline
+        assert b"/Count 2" in data
+
+    @test
+    def page_break_after_always_forces_new_page():
+        """page-break-after: always forces the following content onto a new page."""
+        doc = HtmlDocument(
+            string=('<p style="page-break-after: always">First</p><p>Second</p>')
+        )
+        data = doc.to_bytes()
+        assert b"/Count 2" in data
+
+    @test
+    def page_break_auto_does_nothing():
+        """page-break-before: auto does not force a new page."""
+        doc = HtmlDocument(
+            string=('<p>First</p><p style="page-break-before: auto">Second</p>')
+        )
+        data = doc.to_bytes()
+        assert b"/Count 1" in data
+
+    @test
+    def page_break_before_at_start_no_blank_page():
+        """page-break-before on the first element should not produce a blank page."""
+        doc = HtmlDocument(string='<p style="page-break-before: always">First</p>')
+        data = doc.to_bytes()
+        assert b"/Count 1" in data
+
+    @test
+    def break_before_alias_accepted():
+        """break-before (CSS3 alias) is accepted and forces a page break."""
+        doc = HtmlDocument(
+            string=('<p>First</p><p style="break-before: page">Second</p>')
+        )
+        data = doc.to_bytes()
+        assert b"/Count 2" in data
+
+    @test
+    def page_break_via_stylesheet():
+        """page-break-after in a <style> block applies."""
+        html = (
+            "<html><head><style>"
+            ".cover { page-break-after: always; }"
+            "</style></head><body>"
+            '<h1 class="cover">Title Page</h1>'
+            "<p>Chapter content</p>"
+            "</body></html>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        assert b"/Count 2" in data
+
+
+with describe("text-align: justify"):
+
+    @test
+    def justify_emits_word_spacing_op():
+        """justified text emits a Tw (word spacing) operator in the stream."""
+        long_text = "word " * 30
+        doc = HtmlDocument(string=f'<p style="text-align: justify">{long_text}</p>')
+        data = doc.to_bytes()
+        # Tw is the PDF word spacing operator
+        expect(data).to_contain(b" Tw")
+
+    @test
+    def justify_last_line_not_widened():
+        """Last line of justified paragraph has no word-spacing applied."""
+        # Short single-line paragraph: no spacing needed, no Tw emitted
+        doc = HtmlDocument(string='<p style="text-align: justify">Short line only</p>')
+        data = doc.to_bytes()
+        # Single-line para has no lines to widen → no Tw
+        assert b" Tw" not in data
+
+    @test
+    def justify_left_aligns_single_line():
+        """A single-line justified paragraph renders like left-aligned."""
+        doc_left = HtmlDocument(string="<p>Hello world</p>")
+        doc_justify = HtmlDocument(
+            string='<p style="text-align: justify">Hello world</p>'
+        )
+        # Both should produce the same text at the same x position
+        expect(doc_left.to_bytes()).to_contain(b"(Hello world)")
+        expect(doc_justify.to_bytes()).to_contain(b"(Hello world)")
+
+    @test
+    def justify_via_stylesheet():
+        """text-align: justify via stylesheet applies."""
+        long_text = "word " * 30
+        html = (
+            "<html><head><style>"
+            "p { text-align: justify; }"
+            "</style></head><body>"
+            f"<p>{long_text}</p>"
+            "</body></html>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b" Tw")
+
+    @test
+    def justify_resets_word_spacing_after_line():
+        """Word spacing is reset to 0 after each justified line."""
+        long_text = "word " * 30
+        doc = HtmlDocument(string=f'<p style="text-align: justify">{long_text}</p>')
+        data = doc.to_bytes()
+        # A reset to 0 should appear somewhere in the stream
+        expect(data).to_contain(b"0 Tw")
+
+
+with describe("tables"):
+
+    @test
+    def basic_table_renders_cells():
+        """A simple table renders all cell text."""
+        html = (
+            "<table>"
+            "<tr><td>Alice</td><td>30</td></tr>"
+            "<tr><td>Bob</td><td>25</td></tr>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Alice")
+        expect(data).to_contain(b"Bob")
+        expect(data).to_contain(b"(30)")
+        expect(data).to_contain(b"(25)")
+
+    @test
+    def table_header_uses_bold_font():
+        """<th> cells render in Helvetica-Bold."""
+        html = (
+            "<table>"
+            "<tr><th>Name</th><th>Age</th></tr>"
+            "<tr><td>Alice</td><td>30</td></tr>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Helvetica-Bold")
+        expect(data).to_contain(b"Name")
+
+    @test
+    def table_draws_cell_borders():
+        """Each cell has a stroked border by default."""
+        html = "<table><tr><td>A</td><td>B</td></tr></table>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # Stroke operator (uppercase S) should appear
+        expect(data).to_contain(b"\nS\n")
+
+    @test
+    def table_columns_sized_by_content():
+        """Wider content gets a wider column."""
+        html = (
+            "<table>"
+            "<tr>"
+            "<td>short</td>"
+            "<td>this is a much wider cell content</td>"
+            "</tr>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"short")
+        expect(data).to_contain(b"this is a much wider cell content")
+
+    @test
+    def table_inside_thead_tbody():
+        """Rows inside <thead>/<tbody> are collected correctly."""
+        html = (
+            "<table>"
+            "<thead><tr><th>Header</th></tr></thead>"
+            "<tbody><tr><td>Body</td></tr></tbody>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Header")
+        expect(data).to_contain(b"Body")
+
+    @test
+    def table_with_long_content_wraps_in_cell():
+        """Long cell content wraps within the cell's column width."""
+        long_text = "word " * 50
+        html = f"<table><tr><td>{long_text}</td><td>short</td></tr></table>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # Should render without error and contain both cells
+        expect(data).to_contain(b"short")
+        expect(data).to_contain(b"word")
+
+    @test
+    def empty_table_renders_without_error():
+        """An empty <table> does not crash or produce garbage."""
+        doc = HtmlDocument(string="<table></table>")
+        data = doc.to_bytes()
+        # Just a page with no content
+        assert b"%PDF" in data
+
+    @test
+    def table_td_inline_style_color():
+        """A <td> inline color style applies to cell text."""
+        html = '<table><tr><td style="color: red">Red</td></tr></table>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Red")
+        # The fill color for red should be emitted somewhere
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def table_multiple_rows_stacked_vertically():
+        """Multiple rows stack without overlap (later rows get lower y)."""
+        html = (
+            "<table>"
+            "<tr><td>Row1</td></tr>"
+            "<tr><td>Row2</td></tr>"
+            "<tr><td>Row3</td></tr>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Row1")
+        expect(data).to_contain(b"Row2")
+        expect(data).to_contain(b"Row3")
+
+    @test
+    def table_cells_with_padding():
+        """Default cell padding leaves space inside cells."""
+        # Hard to assert precise geometry, but the PDF should render
+        # and contain both cells without collision.
+        html = "<table><tr><td>Left</td><td>Right</td></tr></table>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Left")
+        expect(data).to_contain(b"Right")

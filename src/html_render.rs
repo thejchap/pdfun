@@ -14,7 +14,6 @@ const INLINE_BOLD: &[&str] = &["b", "strong"];
 const INLINE_ITALIC: &[&str] = &["i", "em"];
 const INLINE_CODE: &[&str] = &["code", "kbd", "samp"];
 const LIST_ELEMENTS: &[&str] = &["ul", "ol"];
-const UL_MARKERS: &[&str] = &["-", "o", "-"];
 const LIST_INDENT: f32 = 36.0;
 const LIST_ITEM_SPACING: f32 = 4.0;
 const MAX_NESTING_DEPTH: usize = 256;
@@ -112,6 +111,7 @@ enum ListType {
 struct ListEntry {
     list_type: ListType,
     counter: usize,
+    style_override: Option<css::ListStyleType>,
 }
 
 // ── Style block extraction ──────────────────────────────────
@@ -225,6 +225,54 @@ fn extract_style_attr(handle: &Handle) -> Option<ComputedStyle> {
     } else {
         None
     }
+}
+
+/// Convert 1-based counter to alphabetic marker (a, b, ..., z, aa, ab, ...).
+fn to_alpha(n: usize, upper: bool) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    let base = if upper { b'A' } else { b'a' };
+    let mut n = n;
+    let mut buf = Vec::new();
+    while n > 0 {
+        n -= 1;
+        buf.push(base + (n % 26) as u8);
+        n /= 26;
+    }
+    buf.reverse();
+    String::from_utf8(buf).unwrap()
+}
+
+/// Convert 1-based counter to roman numeral.
+fn to_roman(n: usize, upper: bool) -> String {
+    if n == 0 || n > 3999 {
+        return n.to_string();
+    }
+    const PAIRS: &[(usize, &str, &str)] = &[
+        (1000, "M", "m"),
+        (900, "CM", "cm"),
+        (500, "D", "d"),
+        (400, "CD", "cd"),
+        (100, "C", "c"),
+        (90, "XC", "xc"),
+        (50, "L", "l"),
+        (40, "XL", "xl"),
+        (10, "X", "x"),
+        (9, "IX", "ix"),
+        (5, "V", "v"),
+        (4, "IV", "iv"),
+        (1, "I", "i"),
+    ];
+    let mut n = n;
+    let mut out = String::new();
+    for &(val, up, lo) in PAIRS {
+        while n >= val {
+            out.push_str(if upper { up } else { lo });
+            n -= val;
+        }
+    }
+    out
 }
 
 fn extract_href_attr(handle: &Handle) -> Option<String> {
@@ -369,6 +417,14 @@ impl<'a> HtmlRenderer<'a> {
                 let inherited = parent.inherit_into(&merged_style);
                 self.inherit_stack.push(inherited);
 
+                // Tables are processed as a self-contained subtree.
+                if tag == "table" {
+                    self.flush();
+                    self.build_and_push_table(handle, merged_style);
+                    self.inherit_stack.pop();
+                    return;
+                }
+
                 // Extract href for <a> tags before handling
                 if tag == "a" {
                     self.pending_href = extract_href_attr(handle);
@@ -402,9 +458,13 @@ impl<'a> HtmlRenderer<'a> {
             } else {
                 ListType::Unordered
             };
+            let style_override = inline_style
+                .as_ref()
+                .and_then(|s| s.list_style_type);
             self.list_stack.push(ListEntry {
                 list_type,
                 counter: 0,
+                style_override,
             });
         } else if tag == "li" {
             self.flush();
@@ -639,10 +699,43 @@ impl<'a> HtmlRenderer<'a> {
                 let depth = self.list_stack.len() - 1;
                 let padding_left = (depth as f32 + 1.0) * LIST_INDENT;
 
-                let marker_text = if entry.list_type == ListType::Ordered {
-                    format!("{}.", entry.counter)
-                } else {
-                    UL_MARKERS[depth % UL_MARKERS.len()].to_string()
+                // Resolve list-style-type: entry override → inherited → default
+                let inherited_lst = self
+                    .inherit_stack
+                    .last()
+                    .and_then(|s| s.list_style_type);
+                let resolved_lst = entry.style_override.or(inherited_lst).unwrap_or_else(|| {
+                    if entry.list_type == ListType::Ordered {
+                        css::ListStyleType::Decimal
+                    } else {
+                        match depth % 3 {
+                            0 => css::ListStyleType::Disc,
+                            1 => css::ListStyleType::Circle,
+                            _ => css::ListStyleType::Square,
+                        }
+                    }
+                });
+
+                // Built-in PDF fonts use WinAnsi encoding, which has limited
+                // Unicode support. Use ASCII-safe marker glyphs.
+                let marker_text = match resolved_lst {
+                    css::ListStyleType::None => String::new(),
+                    css::ListStyleType::Disc => "*".to_string(),
+                    css::ListStyleType::Circle => "o".to_string(),
+                    css::ListStyleType::Square => "#".to_string(),
+                    css::ListStyleType::Decimal => format!("{}.", entry.counter),
+                    css::ListStyleType::LowerAlpha => {
+                        format!("{}.", to_alpha(entry.counter, false))
+                    }
+                    css::ListStyleType::UpperAlpha => {
+                        format!("{}.", to_alpha(entry.counter, true))
+                    }
+                    css::ListStyleType::LowerRoman => {
+                        format!("{}.", to_roman(entry.counter, false))
+                    }
+                    css::ListStyleType::UpperRoman => {
+                        format!("{}.", to_roman(entry.counter, true))
+                    }
                 };
 
                 let marker = TextRun {
@@ -695,6 +788,63 @@ impl<'a> HtmlRenderer<'a> {
             is_hr: false,
             preserve_whitespace: self.pre_depth > 0,
         });
+    }
+
+    // ── Table building ──────────────────────────────────────
+
+    fn build_and_push_table(
+        &mut self,
+        table_handle: &Handle,
+        table_style: Option<ComputedStyle>,
+    ) {
+        use crate::layout::{Table, TableRow};
+
+        let em = 12.0_f32;
+        let inherited = self.inherit_stack.last().cloned().unwrap_or_default();
+        let inherited_with_table = inherited.inherit_into(&table_style);
+
+        let mut table_block_style = BlockStyle::default();
+        let spacing_after = 12.0_f32;
+
+        if let Some(style) = table_style.as_ref() {
+            if let Some(len) = style.margin_top {
+                table_block_style.margin_top = len.resolve(em);
+            }
+            if let Some(len) = style.margin_right {
+                table_block_style.margin_right = len.resolve(em);
+            }
+            if let Some(len) = style.margin_bottom {
+                table_block_style.margin_bottom = len.resolve(em);
+            }
+            if let Some(len) = style.margin_left {
+                table_block_style.margin_left = len.resolve(em);
+            }
+        }
+
+        let default_line_height = inherited_with_table
+            .line_height
+            .map(|len| len.resolve(em));
+
+        let mut rows: Vec<TableRow> = Vec::new();
+        collect_table_rows(
+            table_handle,
+            &inherited_with_table,
+            &mut rows,
+            &self.stylesheet,
+            &[],
+        );
+
+        if rows.is_empty() {
+            return;
+        }
+
+        let table = Table {
+            rows,
+            style: table_block_style,
+            spacing_after,
+            default_line_height,
+        };
+        self.layout.push_table(table);
     }
 
     // ── CSS application helpers ─────────────────────────────
@@ -768,6 +918,12 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(bs) = style.border_style {
                 block_style.border_style = Some(bs);
             }
+            if let Some(pb) = style.page_break_before {
+                block_style.page_break_before = Some(pb);
+            }
+            if let Some(pb) = style.page_break_after {
+                block_style.page_break_after = Some(pb);
+            }
         }
 
         // Inherit color and text-align from ancestor if not explicitly set
@@ -785,6 +941,190 @@ impl<'a> HtmlRenderer<'a> {
                 }
             }
         }
+    }
+}
+
+/// Recursively walk a `<table>` subtree and collect `TableRow`s from any
+/// `<tr>` descendants. Does not interpret `<thead>`/`<tbody>`/`<tfoot>`
+/// specially — their `<tr>` children are collected in document order.
+fn collect_table_rows(
+    handle: &Handle,
+    inherited: &ComputedStyle,
+    rows: &mut Vec<crate::layout::TableRow>,
+    _stylesheet: &Stylesheet,
+    _ancestors: &[()],
+) {
+    if let NodeData::Element { name, .. } = &handle.data {
+        let tag = name.local.as_ref();
+
+        if tag == "tr" {
+            let row_inherited = inherited.clone();
+            let mut cells: Vec<crate::layout::TableCell> = Vec::new();
+            for child in handle.children.borrow().iter() {
+                if let NodeData::Element { name: cname, .. } = &child.data {
+                    let ctag = cname.local.as_ref();
+                    if ctag == "td" || ctag == "th" {
+                        cells.push(build_table_cell(
+                            child,
+                            &row_inherited,
+                            ctag == "th",
+                        ));
+                    }
+                }
+            }
+            if !cells.is_empty() {
+                rows.push(crate::layout::TableRow { cells });
+            }
+            return;
+        }
+
+        // Descend into table/thead/tbody/tfoot/etc.
+        for child in handle.children.borrow().iter() {
+            collect_table_rows(child, inherited, rows, _stylesheet, &[]);
+        }
+    }
+}
+
+fn build_table_cell(
+    handle: &Handle,
+    inherited: &ComputedStyle,
+    is_header: bool,
+) -> crate::layout::TableCell {
+    use crate::layout::{TableCell, VerticalAlign};
+
+    // Cell's inline style only (no stylesheet matching for MVP)
+    let cell_style: Option<ComputedStyle> = extract_style_attr(handle);
+
+    let merged_inherited = inherited.inherit_into(&cell_style);
+    let em = 12.0_f32;
+
+    // Build BlockStyle for the cell
+    let mut block_style = BlockStyle {
+        // Default cell padding
+        padding_top: 4.0,
+        padding_right: 6.0,
+        padding_bottom: 4.0,
+        padding_left: 6.0,
+        // Default cell border so tables look like tables
+        border_width: 1.0,
+        border_color: Some((0.6, 0.6, 0.6)),
+        border_style: Some(css::BorderStyle::Solid),
+        text_align: if is_header {
+            crate::layout::TextAlign::Center
+        } else {
+            crate::layout::TextAlign::Left
+        },
+        ..BlockStyle::default()
+    };
+
+    if let Some(style) = cell_style.as_ref() {
+        if let Some(c) = style.color {
+            block_style.color = Some(c);
+        }
+        if let Some(c) = style.background_color {
+            block_style.background_color = Some(c);
+        }
+        if let Some(a) = &style.text_align {
+            block_style.text_align = a.clone();
+        }
+        if let Some(len) = style.padding_top {
+            block_style.padding_top = len.resolve(em);
+        }
+        if let Some(len) = style.padding_right {
+            block_style.padding_right = len.resolve(em);
+        }
+        if let Some(len) = style.padding_bottom {
+            block_style.padding_bottom = len.resolve(em);
+        }
+        if let Some(len) = style.padding_left {
+            block_style.padding_left = len.resolve(em);
+        }
+        if let Some(len) = style.border_width {
+            block_style.border_width = len.resolve(em);
+        }
+        if let Some(c) = style.border_color {
+            block_style.border_color = Some(c);
+        }
+        if let Some(bs) = style.border_style {
+            block_style.border_style = Some(bs);
+        }
+    }
+
+    // Collect text runs from cell content
+    let mut runs: Vec<TextRun> = Vec::new();
+    let font_size = merged_inherited
+        .font_size
+        .map_or(12.0, |len| len.resolve(12.0));
+    let color = merged_inherited.color;
+    let font_name = if is_header {
+        "Helvetica-Bold".to_string()
+    } else {
+        "Helvetica".to_string()
+    };
+    collect_cell_text(handle, &mut runs, &font_name, font_size, color);
+
+    TableCell {
+        runs,
+        line_height: merged_inherited.line_height.map(|len| len.resolve(em)),
+        style: block_style,
+        vertical_align: VerticalAlign::Top,
+    }
+}
+
+/// Recursively flatten inline text content from a cell into `TextRun`s,
+/// collapsing whitespace. Does not handle nested block elements.
+fn collect_cell_text(
+    handle: &Handle,
+    runs: &mut Vec<TextRun>,
+    font_name: &str,
+    font_size: f32,
+    color: Option<(f32, f32, f32)>,
+) {
+    match &handle.data {
+        NodeData::Text { contents } => {
+            let text = contents.borrow().to_string();
+            // Collapse internal whitespace
+            let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !collapsed.is_empty() {
+                // Add leading/trailing spaces if the original text had them
+                let mut out = String::new();
+                if text.starts_with(char::is_whitespace) && !runs.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&collapsed);
+                if text.ends_with(char::is_whitespace) {
+                    out.push(' ');
+                }
+                runs.push(TextRun {
+                    text: out,
+                    font_name: font_name.to_string(),
+                    font_size,
+                    color,
+                    text_decoration: None,
+                    link_url: None,
+                });
+            }
+        }
+        NodeData::Element { name, .. } => {
+            let tag = name.local.as_ref();
+            if tag == "br" {
+                runs.push(TextRun {
+                    text: "\n".to_string(),
+                    font_name: font_name.to_string(),
+                    font_size,
+                    color,
+                    text_decoration: None,
+                    link_url: None,
+                });
+                return;
+            }
+            // Inline formatting inside cells is not yet supported — children
+            // render in the cell's base font.
+            for child in handle.children.borrow().iter() {
+                collect_cell_text(child, runs, font_name, font_size, color);
+            }
+        }
+        _ => {}
     }
 }
 

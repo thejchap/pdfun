@@ -59,6 +59,7 @@ pub(crate) enum PdfOp {
     SaveState,
     RestoreState,
     SetDashPattern { array: Vec<f32>, phase: f32 },
+    SetWordSpacing(f32),
 }
 
 pub(crate) struct LinkAnnotation {
@@ -456,6 +457,9 @@ impl PdfDocument {
                     }
                     PdfOp::SetDashPattern { array, phase } => {
                         content.set_dash_pattern(array.iter().copied(), *phase);
+                    }
+                    PdfOp::SetWordSpacing(spacing) => {
+                        content.set_word_spacing(*spacing);
                     }
                 }
             }

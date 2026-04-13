@@ -56,6 +56,7 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+    Justify,
 }
 
 // ── BlockStyle ────────────────────────────────────────────────
@@ -76,6 +77,8 @@ pub struct BlockStyle {
     pub border_color: Option<(f32, f32, f32)>,
     pub border_style: Option<css::BorderStyle>,
     pub text_align: TextAlign,
+    pub page_break_before: Option<css::PageBreak>,
+    pub page_break_after: Option<css::PageBreak>,
 }
 
 impl BlockStyle {
@@ -140,6 +143,40 @@ pub struct Paragraph {
     pub marker: Option<TextRun>,
     pub is_hr: bool,
     pub preserve_whitespace: bool,
+}
+
+// ── Tables ───────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum VerticalAlign {
+    #[default]
+    Top,
+    Middle,
+    Bottom,
+}
+
+pub struct TableCell {
+    pub runs: Vec<TextRun>,
+    pub line_height: Option<f32>,
+    pub style: BlockStyle,
+    pub vertical_align: VerticalAlign,
+}
+
+pub struct TableRow {
+    pub cells: Vec<TableCell>,
+}
+
+pub struct Table {
+    pub rows: Vec<TableRow>,
+    pub style: BlockStyle,
+    pub spacing_after: f32,
+    /// Default line-height for cells (resolved from CSS).
+    pub default_line_height: Option<f32>,
+}
+
+pub enum Block {
+    Paragraph(Paragraph),
+    Table(Table),
 }
 
 // ── Wrapping internals ──────────────────────────────────────
@@ -327,6 +364,32 @@ fn wrap_runs_preformatted(runs: &[TextRun]) -> Result<Vec<WrappedLine>, String> 
     Ok(result)
 }
 
+/// Measure the intrinsic min and max content widths of a table cell.
+/// Min width = width of the widest single word. Max width = width of the
+/// content rendered on a single line.
+fn measure_cell_intrinsic(cell: &TableCell) -> Result<(f32, f32), String> {
+    let mut min_width: f32 = 0.0;
+    let mut max_width: f32 = 0.0;
+    for run in &cell.runs {
+        let mut first_word = true;
+        for word in run.text.split_whitespace() {
+            let w = font_metrics::measure_str(word, &run.font_name, run.font_size)
+                .ok_or_else(|| format!("unknown font: {}", run.font_name))?;
+            if w > min_width {
+                min_width = w;
+            }
+            if !first_word {
+                let space_w =
+                    font_metrics::measure_str(" ", &run.font_name, run.font_size).unwrap_or(0.0);
+                max_width += space_w;
+            }
+            max_width += w;
+            first_word = false;
+        }
+    }
+    Ok((min_width, max_width))
+}
+
 fn rgb_to_f32(c: (f64, f64, f64)) -> (f32, f32, f32) {
     (c.0 as f32, c.1 as f32, c.2 as f32)
 }
@@ -342,6 +405,7 @@ fn parse_text_align(text_align: &str) -> Result<TextAlign, PyErr> {
         "left" => Ok(TextAlign::Left),
         "center" => Ok(TextAlign::Center),
         "right" => Ok(TextAlign::Right),
+        "justify" => Ok(TextAlign::Justify),
         _ => Err(PyValueError::new_err(format!(
             "invalid text_align: {text_align} (expected left, center, or right)"
         ))),
@@ -375,7 +439,7 @@ pub struct LayoutInner {
     pub margin_left: f32,
     pub page_width: f32,
     pub page_height: f32,
-    blocks: Vec<Paragraph>,
+    blocks: Vec<Block>,
     pub column_count: u32,
     pub column_gap: f32,
     pub column_rule_width: f32,
@@ -413,11 +477,15 @@ impl LayoutInner {
                 return;
             }
         }
-        self.blocks.push(para);
+        self.blocks.push(Block::Paragraph(para));
+    }
+
+    pub fn push_table(&mut self, table: Table) {
+        self.blocks.push(Block::Table(table));
     }
 
     pub fn push_hr(&mut self) {
-        self.blocks.push(Paragraph {
+        self.blocks.push(Block::Paragraph(Paragraph {
             runs: vec![],
             line_height: None,
             spacing_after: 12.0,
@@ -425,7 +493,7 @@ impl LayoutInner {
             marker: None,
             is_hr: true,
             preserve_whitespace: false,
-        });
+        }));
     }
 
     #[allow(clippy::too_many_lines)]
@@ -453,11 +521,29 @@ impl LayoutInner {
         let mut current_col: u32 = 0;
 
         // Helper: x-offset for a given column
+        let margin_left = self.margin_left;
         let col_x = |col: u32| -> f32 {
-            self.margin_left + col as f32 * (col_width + col_gap)
+            margin_left + col as f32 * (col_width + col_gap)
         };
 
-        for block in &blocks {
+        for block_enum in &blocks {
+            let block = match block_enum {
+                Block::Paragraph(p) => p,
+                Block::Table(t) => {
+                    self.render_table(
+                        &mut current_page,
+                        doc,
+                        t,
+                        &mut cursor_y,
+                        &mut current_col,
+                        col_count,
+                        col_width,
+                        col_gap,
+                        content_top,
+                    )?;
+                    continue;
+                }
+            };
             if block.is_hr {
                 if cursor_y - 12.0 < self.margin_bottom && cursor_y < content_top {
                     if current_col < col_count - 1 {
@@ -489,6 +575,21 @@ impl LayoutInner {
                 drop(page);
                 cursor_y -= block.spacing_after;
                 continue;
+            }
+
+            // page-break-before: force advance before rendering (unless already at top)
+            if matches!(block.style.page_break_before, Some(css::PageBreak::Always))
+                && cursor_y < content_top
+            {
+                if current_col < col_count - 1 {
+                    current_col += 1;
+                    cursor_y = content_top;
+                } else {
+                    self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
+                    current_page = new_page(doc, self.page_width, self.page_height);
+                    cursor_y = content_top;
+                    current_col = 0;
+                }
             }
 
             // Available width after margins
@@ -639,11 +740,36 @@ impl LayoutInner {
                     page.operations.push(PdfOp::EndText);
                 }
 
+                // For justify: all but the last line get word-spacing widening
+                let is_justified_line = matches!(block.style.text_align, TextAlign::Justify)
+                    && line_idx + 1 < wrapped_lines.len();
+
+                let word_spacing = if is_justified_line {
+                    // Count spaces across all segments on this line
+                    let space_count: usize = line
+                        .segments
+                        .iter()
+                        .map(|s| s.text.matches(' ').count())
+                        .sum();
+                    if space_count > 0 {
+                        (text_area_width - line.total_width) / space_count as f32
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
                 let align_offset = match block.style.text_align {
-                    TextAlign::Left => 0.0,
+                    TextAlign::Left | TextAlign::Justify => 0.0,
                     TextAlign::Center => (text_area_width - line.total_width) / 2.0,
                     TextAlign::Right => text_area_width - line.total_width,
                 };
+
+                // Apply/reset word spacing for justified lines
+                if is_justified_line {
+                    page.operations.push(PdfOp::SetWordSpacing(word_spacing));
+                }
 
                 let mut x = text_x_base + align_offset;
 
@@ -723,7 +849,14 @@ impl LayoutInner {
                         }
                     }
 
-                    x += segment.width;
+                    // Advance x, including extra word-spacing (Tw) for justified lines
+                    let spaces_in_segment = segment.text.matches(' ').count() as f32;
+                    x += segment.width + spaces_in_segment * word_spacing;
+                }
+
+                // Reset word spacing after a justified line
+                if is_justified_line {
+                    page.operations.push(PdfOp::SetWordSpacing(0.0));
                 }
 
                 line_y -= line_height;
@@ -735,11 +868,268 @@ impl LayoutInner {
 
             drop(page);
             cursor_y -= box_height + block.style.margin_bottom + block.spacing_after;
+
+            // page-break-after: force advance after rendering
+            if matches!(block.style.page_break_after, Some(css::PageBreak::Always)) {
+                if current_col < col_count - 1 {
+                    current_col += 1;
+                    cursor_y = content_top;
+                } else {
+                    self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
+                    current_page = new_page(doc, self.page_width, self.page_height);
+                    cursor_y = content_top;
+                    current_col = 0;
+                }
+            }
         }
 
         // Draw column rules on the last page
         self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
 
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn render_table(
+        &mut self,
+        current_page: &mut Arc<Mutex<PageContent>>,
+        doc: &mut PdfDocument,
+        table: &Table,
+        cursor_y: &mut f32,
+        current_col: &mut u32,
+        col_count: u32,
+        col_width: f32,
+        col_gap: f32,
+        content_top: f32,
+    ) -> Result<(), String> {
+        if table.rows.is_empty() {
+            return Ok(());
+        }
+        let column_count = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
+        if column_count == 0 {
+            return Ok(());
+        }
+
+        // column_width helper (reused)
+        let col_x_for = |col: u32| -> f32 {
+            self.margin_left + col as f32 * (col_width + col_gap)
+        };
+
+        // Total available width for the table within the current column
+        let table_area_width =
+            col_width - table.style.margin_left - table.style.margin_right;
+
+        // Measure intrinsic min and max widths per column
+        let mut col_min = vec![0.0_f32; column_count];
+        let mut col_max = vec![0.0_f32; column_count];
+        for row in &table.rows {
+            for (idx, cell) in row.cells.iter().enumerate() {
+                if idx >= column_count {
+                    break;
+                }
+                let (cmin, cmax) = measure_cell_intrinsic(cell)?;
+                let h_pad = cell.style.padding_left + cell.style.padding_right;
+                if cmin + h_pad > col_min[idx] {
+                    col_min[idx] = cmin + h_pad;
+                }
+                if cmax + h_pad > col_max[idx] {
+                    col_max[idx] = cmax + h_pad;
+                }
+            }
+        }
+
+        // Distribute widths: use max if they fit; else scale proportionally down to min
+        let sum_max: f32 = col_max.iter().sum();
+        let sum_min: f32 = col_min.iter().sum();
+        let col_widths: Vec<f32> = if sum_max <= table_area_width {
+            // Space to spare: distribute the extra proportionally from max
+            let extra = table_area_width - sum_max;
+            if sum_max > 0.0 {
+                col_max
+                    .iter()
+                    .map(|&w| w + extra * (w / sum_max))
+                    .collect()
+            } else {
+                vec![table_area_width / column_count as f32; column_count]
+            }
+        } else if sum_min >= table_area_width {
+            col_min.clone()
+        } else {
+            // Interpolate between min and max
+            let slack = table_area_width - sum_min;
+            let range = sum_max - sum_min;
+            col_min
+                .iter()
+                .zip(col_max.iter())
+                .map(|(&lo, &hi)| lo + slack * ((hi - lo) / range))
+                .collect()
+        };
+
+        let table_actual_width: f32 = col_widths.iter().sum();
+        let _ = table_actual_width;
+
+        *cursor_y -= table.style.margin_top;
+
+        for row in &table.rows {
+            // Wrap each cell's content at its column width and compute text heights
+            let mut cell_text_heights: Vec<f32> = Vec::with_capacity(row.cells.len());
+            let mut wrapped_cells: Vec<Vec<WrappedLine>> = Vec::with_capacity(row.cells.len());
+            let mut cell_line_heights: Vec<f32> = Vec::with_capacity(row.cells.len());
+
+            for (idx, cell) in row.cells.iter().enumerate() {
+                if idx >= column_count {
+                    break;
+                }
+                let cwidth = col_widths[idx];
+                let text_w = (cwidth - cell.style.padding_left - cell.style.padding_right).max(1.0);
+                let wrapped = wrap_runs_impl(&cell.runs, text_w, false)?;
+                let max_fs = wrapped
+                    .iter()
+                    .map(|l| l.max_font_size)
+                    .fold(0.0_f32, f32::max);
+                let lh = cell
+                    .line_height
+                    .or(table.default_line_height)
+                    .unwrap_or(max_fs * 1.2);
+                let text_h = wrapped.len() as f32 * lh;
+                cell_text_heights.push(text_h);
+                cell_line_heights.push(lh);
+                wrapped_cells.push(wrapped);
+            }
+
+            // Row height = tallest cell's padded content
+            let row_height = row
+                .cells
+                .iter()
+                .zip(cell_text_heights.iter())
+                .map(|(cell, &th)| th + cell.style.padding_top + cell.style.padding_bottom)
+                .fold(0.0_f32, f32::max);
+
+            // Page-break check: move the entire row to next column/page if it doesn't fit
+            if *cursor_y - row_height < self.margin_bottom && *cursor_y < content_top {
+                if *current_col < col_count - 1 {
+                    *current_col += 1;
+                    *cursor_y = content_top;
+                } else {
+                    self.draw_column_rules(current_page, content_top, col_width, col_gap, col_count);
+                    *current_page = new_page(doc, self.page_width, self.page_height);
+                    *cursor_y = content_top;
+                    *current_col = 0;
+                }
+            }
+
+            // Draw cells in this row
+            let row_top = *cursor_y;
+            let row_bottom = row_top - row_height;
+            let mut cell_x = col_x_for(*current_col) + table.style.margin_left;
+            if table_actual_width < table_area_width {
+                // tables default to left-aligned at the margin; no centering
+            }
+
+            let mut page = current_page.lock().unwrap();
+            // Register fonts used by cells
+            for wrapped in &wrapped_cells {
+                for line in wrapped {
+                    for seg in &line.segments {
+                        if !page.fonts_used.contains(&seg.font_name) {
+                            page.fonts_used.push(seg.font_name.clone());
+                        }
+                    }
+                }
+            }
+
+            for (idx, cell) in row.cells.iter().enumerate() {
+                if idx >= column_count {
+                    break;
+                }
+                let cwidth = col_widths[idx];
+
+                // Cell background
+                if let Some((r, g, b)) = cell.style.background_color {
+                    page.operations.push(PdfOp::SetFillColor { r, g, b });
+                    page.operations.push(PdfOp::Rectangle {
+                        x: cell_x,
+                        y: row_bottom,
+                        width: cwidth,
+                        height: row_height,
+                    });
+                    page.operations.push(PdfOp::Fill);
+                }
+
+                // Cell border
+                if cell.style.border_width > 0.0
+                    && !matches!(cell.style.border_style, Some(css::BorderStyle::None))
+                {
+                    let (r, g, b) = cell.style.border_color.unwrap_or((0.0, 0.0, 0.0));
+                    page.operations.push(PdfOp::SetStrokeColor { r, g, b });
+                    page.operations
+                        .push(PdfOp::SetLineWidth(cell.style.border_width));
+                    page.operations.push(PdfOp::Rectangle {
+                        x: cell_x,
+                        y: row_bottom,
+                        width: cwidth,
+                        height: row_height,
+                    });
+                    page.operations.push(PdfOp::Stroke);
+                }
+
+                // Set text color
+                if let Some((r, g, b)) = cell.style.color {
+                    page.operations.push(PdfOp::SetFillColor { r, g, b });
+                } else {
+                    page.operations
+                        .push(PdfOp::SetFillColor { r: 0.0, g: 0.0, b: 0.0 });
+                }
+
+                // Determine text start y based on vertical_align
+                let text_height = cell_text_heights[idx];
+                let avail_text_h = row_height - cell.style.padding_top - cell.style.padding_bottom;
+                let v_offset = match cell.vertical_align {
+                    VerticalAlign::Top => 0.0,
+                    VerticalAlign::Middle => (avail_text_h - text_height) / 2.0,
+                    VerticalAlign::Bottom => avail_text_h - text_height,
+                };
+
+                let text_x_base = cell_x + cell.style.padding_left;
+                let text_area_w = cwidth - cell.style.padding_left - cell.style.padding_right;
+                let line_h = cell_line_heights[idx];
+                let mut line_y = row_top - cell.style.padding_top - v_offset;
+
+                for line in &wrapped_cells[idx] {
+                    let baseline_y = line_y - line.max_font_size;
+                    let align_offset = match cell.style.text_align {
+                        TextAlign::Left | TextAlign::Justify => 0.0,
+                        TextAlign::Center => (text_area_w - line.total_width) / 2.0,
+                        TextAlign::Right => text_area_w - line.total_width,
+                    };
+                    let mut x = text_x_base + align_offset;
+                    for segment in &line.segments {
+                        if let Some((r, g, b)) = segment.color {
+                            page.operations.push(PdfOp::SetFillColor { r, g, b });
+                        }
+                        page.operations.push(PdfOp::BeginText);
+                        page.operations.push(PdfOp::SetFont {
+                            name: segment.font_name.clone(),
+                            size: segment.font_size,
+                        });
+                        page.operations
+                            .push(PdfOp::SetTextPosition { x, y: baseline_y });
+                        page.operations
+                            .push(PdfOp::ShowText(segment.text.clone()));
+                        page.operations.push(PdfOp::EndText);
+                        x += segment.width;
+                    }
+                    line_y -= line_h;
+                }
+
+                cell_x += cwidth;
+            }
+            drop(page);
+
+            *cursor_y = row_bottom;
+        }
+
+        *cursor_y -= table.style.margin_bottom + table.spacing_after;
         Ok(())
     }
 
@@ -847,7 +1237,7 @@ impl Layout {
             link_url: None,
         };
 
-        self.inner.blocks.push(Paragraph {
+        self.inner.blocks.push(Block::Paragraph(Paragraph {
             runs: vec![run],
             line_height: Some(line_height.map_or(fs * 1.2, |h| h as f32)),
             spacing_after: spacing_after as f32,
@@ -865,7 +1255,7 @@ impl Layout {
             marker: None,
             is_hr: false,
             preserve_whitespace: false,
-        });
+        }));
         Ok(())
     }
 
