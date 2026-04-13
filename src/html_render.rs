@@ -5,7 +5,10 @@ use crate::layout::{BlockStyle, LayoutInner, Paragraph, TextRun};
 
 // ── Constants ────────────────────────────────────────────────
 
-const BLOCK_ELEMENTS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "blockquote", "pre"];
+const BLOCK_ELEMENTS: &[&str] = &[
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "blockquote", "pre",
+    "article", "section", "nav", "header", "footer", "aside", "main",
+];
 const SKIP_ELEMENTS: &[&str] = &["head", "title", "style", "script", "meta", "link"];
 const INLINE_BOLD: &[&str] = &["b", "strong"];
 const INLINE_ITALIC: &[&str] = &["i", "em"];
@@ -224,6 +227,22 @@ fn extract_style_attr(handle: &Handle) -> Option<ComputedStyle> {
     }
 }
 
+fn extract_href_attr(handle: &Handle) -> Option<String> {
+    if let NodeData::Element { attrs, .. } = &handle.data {
+        let attrs = attrs.borrow();
+        attrs.iter().find_map(|attr| {
+            if attr.name.local.as_ref() == "href" {
+                let href = attr.value.to_string();
+                if href.is_empty() { None } else { Some(href) }
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    }
+}
+
 // ── HTML renderer ────────────────────────────────────────────
 
 struct HtmlRenderer<'a> {
@@ -246,6 +265,12 @@ struct HtmlRenderer<'a> {
     italic_had_style: Vec<bool>,
     code_had_style: Vec<bool>,
     span_had_style: Vec<bool>,
+    /// Stack of link hrefs, pushed/popped as we enter/leave `<a>` elements.
+    link_stack: Vec<String>,
+    /// Temporary storage for href extracted in walk_node, consumed by handle_start_tag.
+    pending_href: Option<String>,
+    /// Stack of had-style flags for `<a>` tags.
+    link_had_style: Vec<bool>,
     /// Stack of inherited CSS styles, pushed/popped as we enter/leave DOM elements.
     inherit_stack: Vec<ComputedStyle>,
 }
@@ -270,6 +295,9 @@ impl<'a> HtmlRenderer<'a> {
             italic_had_style: Vec::new(),
             code_had_style: Vec::new(),
             span_had_style: Vec::new(),
+            link_stack: Vec::new(),
+            pending_href: None,
+            link_had_style: Vec::new(),
             inherit_stack: Vec::new(),
         }
     }
@@ -329,10 +357,22 @@ impl<'a> HtmlRenderer<'a> {
                     }
                 };
 
+                // Skip elements with display: none (and their entire subtree)
+                if let Some(ref style) = merged_style {
+                    if style.display == Some(css::DisplayValue::None) {
+                        return;
+                    }
+                }
+
                 // Push inherited style for this element's subtree
                 let parent = self.inherit_stack.last().cloned().unwrap_or_default();
                 let inherited = parent.inherit_into(&merged_style);
                 self.inherit_stack.push(inherited);
+
+                // Extract href for <a> tags before handling
+                if tag == "a" {
+                    self.pending_href = extract_href_attr(handle);
+                }
 
                 self.handle_start_tag(tag, merged_style);
                 for child in handle.children.borrow().iter() {
@@ -431,6 +471,16 @@ impl<'a> HtmlRenderer<'a> {
                 self.inline_styles.push(style);
             }
             self.code_had_style.push(has_style);
+        } else if tag == "a" {
+            self.flush_run();
+            if let Some(href) = self.pending_href.take() {
+                self.link_stack.push(href);
+            }
+            let has_style = inline_style.is_some();
+            if let Some(style) = inline_style {
+                self.inline_styles.push(style);
+            }
+            self.link_had_style.push(has_style);
         }
     }
 
@@ -468,6 +518,12 @@ impl<'a> HtmlRenderer<'a> {
             self.flush_run();
             self.code_depth -= 1;
             if self.code_had_style.pop() == Some(true) {
+                self.inline_styles.pop();
+            }
+        } else if tag == "a" && !self.link_had_style.is_empty() {
+            self.flush_run();
+            self.link_stack.pop();
+            if self.link_had_style.pop() == Some(true) {
                 self.inline_styles.pop();
             }
         }
@@ -547,11 +603,22 @@ impl<'a> HtmlRenderer<'a> {
             .and_then(|s| s.color)
             .or_else(|| inherited.and_then(|s| s.color));
 
+        // Resolve text-decoration: CSS → inherited
+        let text_decoration = effective
+            .and_then(|s| s.text_decoration)
+            .or_else(|| inherited.and_then(|s| s.text_decoration))
+            .filter(|td| td.underline || td.line_through)
+            .map(|td| (td.underline, td.line_through));
+
+        let link_url = self.link_stack.last().cloned();
+
         self.runs.push(TextRun {
             text,
             font_name: resolved_font.to_string(),
             font_size,
             color,
+            text_decoration,
+            link_url,
         });
     }
 
@@ -583,6 +650,8 @@ impl<'a> HtmlRenderer<'a> {
                     font_name: "Helvetica".to_string(),
                     font_size: 12.0,
                     color: None,
+                    text_decoration: None,
+                    link_url: None,
                 };
 
                 let mut list_block_style = BlockStyle {
@@ -666,6 +735,18 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(a) = &style.text_align {
                 block_style.text_align = a.clone();
             }
+            if let Some(len) = style.margin_top {
+                block_style.margin_top = len.resolve(em);
+            }
+            if let Some(len) = style.margin_right {
+                block_style.margin_right = len.resolve(em);
+            }
+            if let Some(len) = style.margin_bottom {
+                block_style.margin_bottom = len.resolve(em);
+            }
+            if let Some(len) = style.margin_left {
+                block_style.margin_left = len.resolve(em);
+            }
             if let Some(len) = style.padding_top {
                 block_style.padding_top = len.resolve(em);
             }
@@ -683,6 +764,9 @@ impl<'a> HtmlRenderer<'a> {
             }
             if let Some(c) = style.border_color {
                 block_style.border_color = Some(c);
+            }
+            if let Some(bs) = style.border_style {
+                block_style.border_style = Some(bs);
             }
         }
 
@@ -714,4 +798,38 @@ pub fn render_dom_to_layout(document: &Handle, layout: &mut LayoutInner) -> css:
     renderer.walk_node(document, 0);
     renderer.flush();
     page_style
+}
+
+/// Extract the text content of the first `<title>` element in the DOM.
+pub fn extract_title(handle: &Handle) -> Option<String> {
+    match &handle.data {
+        NodeData::Document => {
+            for child in handle.children.borrow().iter() {
+                if let Some(t) = extract_title(child) {
+                    return Some(t);
+                }
+            }
+        }
+        NodeData::Element { name, .. } => {
+            if name.local.as_ref() == "title" {
+                let mut text = String::new();
+                for child in handle.children.borrow().iter() {
+                    if let NodeData::Text { contents } = &child.data {
+                        text.push_str(&contents.borrow());
+                    }
+                }
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+            for child in handle.children.borrow().iter() {
+                if let Some(t) = extract_title(child) {
+                    return Some(t);
+                }
+            }
+        }
+        _ => {}
+    }
+    None
 }

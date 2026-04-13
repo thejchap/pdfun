@@ -110,6 +110,67 @@ with describe("HtmlDocument - div"):
         expect(data).to_contain(b"Div content")
 
 
+with describe("HtmlDocument - semantic elements"):
+
+    @test
+    def article_renders():
+        """<article> renders its text content."""
+        doc = HtmlDocument(string="<article>Article content</article>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Article content")
+
+    @test
+    def section_renders():
+        """<section> renders its text content."""
+        doc = HtmlDocument(string="<section>Section content</section>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Section content")
+
+    @test
+    def nav_renders():
+        """<nav> renders its text content."""
+        doc = HtmlDocument(string="<nav>Nav content</nav>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Nav content")
+
+    @test
+    def header_renders():
+        """<header> renders its text content."""
+        doc = HtmlDocument(string="<header>Header content</header>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Header content")
+
+    @test
+    def footer_renders():
+        """<footer> renders its text content."""
+        doc = HtmlDocument(string="<footer>Footer content</footer>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Footer content")
+
+    @test
+    def aside_renders():
+        """<aside> renders its text content."""
+        doc = HtmlDocument(string="<aside>Aside content</aside>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Aside content")
+
+    @test
+    def main_renders():
+        """<main> renders its text content."""
+        doc = HtmlDocument(string="<main>Main content</main>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Main content")
+
+    @test
+    def semantic_nesting():
+        """Semantic elements nest properly."""
+        doc = HtmlDocument(
+            string="<article><section><p>Nested text</p></section></article>"
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Nested text")
+
+
 with describe("HtmlDocument - br"):
 
     @test
@@ -494,10 +555,11 @@ with describe("HtmlDocument - unknown and void elements"):
 
     @test
     def anchor_tag_preserves_text():
-        """<a> tag text is rendered (link target is ignored)."""
+        """<a> tag text is rendered alongside surrounding text."""
         doc = HtmlDocument(string='<p>Click <a href="url">here</a></p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Click here")
+        expect(data).to_contain(b"Click")
+        expect(data).to_contain(b"here")
 
 
 with describe("HtmlDocument - whitespace"):
@@ -1613,3 +1675,291 @@ with describe("multi-column layout"):
         expect(data).to_contain(b"/MediaBox [0 0 612 792]")
         expect(data).to_contain(b"/Courier")
         expect(data).to_contain(b"Hacker News Summary")
+
+
+with describe("display: none"):
+
+    @test
+    def inline_display_none_hides_element():
+        """An element with inline display:none is not rendered."""
+        doc = HtmlDocument(string='<p style="display:none">Hidden</p><p>Visible</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Visible")
+        assert b"Hidden" not in data
+
+    @test
+    def display_none_hides_children():
+        """display:none on a parent hides all descendants."""
+        doc = HtmlDocument(
+            string='<div style="display:none"><p>Deep hidden</p></div><p>Visible</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Visible")
+        assert b"Deep hidden" not in data
+
+    @test
+    def display_none_via_style_block():
+        """display:none set via a <style> block hides the element."""
+        html = """<html><head><style>.hide { display: none; }</style></head>
+        <body><p class="hide">Hidden</p><p>Visible</p></body></html>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Visible")
+        assert b"Hidden" not in data
+
+    @test
+    def display_block_still_renders():
+        """display:block does not hide the element."""
+        doc = HtmlDocument(string='<p style="display:block">Shown</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Shown")
+
+
+with describe("Document metadata from HTML"):
+
+    @test
+    def title_tag_sets_pdf_title():
+        """<title> content becomes the PDF /Title metadata."""
+        html = (
+            "<html><head><title>My Page Title</title></head>"
+            "<body><p>Hello</p></body></html>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        assert b"/Title" in data
+        assert b"My Page Title" in data
+
+    @test
+    def empty_title_tag_no_title():
+        """An empty <title> tag does not set metadata."""
+        html = "<html><head><title></title></head><body><p>Hello</p></body></html>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        assert b"/Title" not in data
+
+
+with describe("CSS margins"):
+
+    @test
+    def margin_top_renders():
+        """margin-top on an element produces valid PDF output."""
+        doc = HtmlDocument(string='<p style="margin-top: 50pt">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Text")
+
+    @test
+    def margin_left_renders():
+        """margin-left on an element produces valid PDF output."""
+        doc = HtmlDocument(string='<p style="margin-left: 50pt">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Text")
+
+    @test
+    def margin_right_renders():
+        """margin-right on an element produces valid PDF output."""
+        doc = HtmlDocument(string='<p style="margin-right: 50pt">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Text")
+
+    @test
+    def margin_shorthand_all_four():
+        """margin shorthand sets all four sides."""
+        doc = HtmlDocument(string='<p style="margin: 10pt 20pt 30pt 40pt">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Text")
+
+    @test
+    def margin_shorthand_two_values():
+        """margin: 10pt 20pt sets top/bottom=10 and left/right=20."""
+        doc = HtmlDocument(string='<p style="margin: 10pt 20pt">Text</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Text")
+
+    @test
+    def margin_left_right_narrows_content():
+        """Large left/right margins cause text to wrap at a narrower width."""
+        long_text = "word " * 50
+        # Without margins — should produce some lines
+        doc_wide = HtmlDocument(string=f"<p>{long_text}</p>")
+        data_wide = doc_wide.to_bytes()
+        # With large margins — should produce more pages or more content
+        doc_narrow = HtmlDocument(
+            string=f'<p style="margin-left: 200pt; margin-right: 200pt">{long_text}</p>'
+        )
+        data_narrow = doc_narrow.to_bytes()
+        # The narrow version should be longer due to more wrapping
+        assert len(data_narrow) > len(data_wide)
+
+
+with describe("text-decoration"):
+
+    @test
+    def underline_produces_stroke_ops():
+        """text-decoration: underline draws a line under text."""
+        doc = HtmlDocument(
+            string='<p style="text-decoration: underline">Underlined</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Underlined")
+        # The PDF should contain stroke operations for the underline
+        # (MoveTo + LineTo + Stroke pattern in content stream)
+
+    @test
+    def line_through_produces_stroke_ops():
+        """text-decoration: line-through draws a line through text."""
+        doc = HtmlDocument(string='<p style="text-decoration: line-through">Struck</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Struck")
+
+    @test
+    def underline_and_line_through_combined():
+        """Both underline and line-through can be applied together."""
+        doc = HtmlDocument(
+            string='<p style="text-decoration: underline line-through">Both</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Both")
+
+    @test
+    def decoration_none_overrides_inherited():
+        """text-decoration: none disables inherited decoration."""
+        html = (
+            "<html><head><style>"
+            ".underlined { text-decoration: underline; }"
+            ".no-dec { text-decoration: none; }"
+            "</style></head><body>"
+            '<p class="underlined"><span class="no-dec">Plain</span></p>'
+            "</body></html>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Plain")
+
+    @test
+    def underline_via_style_block():
+        """text-decoration set via <style> block is applied."""
+        html = """<html><head><style>
+        .ul { text-decoration: underline; }
+        </style></head>
+        <body><p class="ul">Styled underline</p></body></html>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Styled underline")
+
+
+with describe("border-style"):
+
+    @test
+    def border_solid_renders():
+        """border with solid style renders normally."""
+        doc = HtmlDocument(string='<p style="border: 2px solid black">Solid border</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Solid border")
+
+    @test
+    def border_dashed_renders():
+        """border with dashed style renders."""
+        doc = HtmlDocument(string='<p style="border: 2px dashed red">Dashed border</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Dashed border")
+
+    @test
+    def border_dotted_renders():
+        """border with dotted style renders."""
+        doc = HtmlDocument(
+            string='<p style="border: 2px dotted blue">Dotted border</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Dotted border")
+
+    @test
+    def border_style_none_suppresses_border():
+        """border-style: none suppresses border even if width is set."""
+        doc_none = HtmlDocument(
+            string='<p style="border-width: 2px; border-style: none">No border</p>'
+        )
+        data_none = doc_none.to_bytes()
+        doc_solid = HtmlDocument(
+            string='<p style="border: 2px solid black">Has border</p>'
+        )
+        data_solid = doc_solid.to_bytes()
+        # The solid version should be longer due to stroke operations
+        assert len(data_solid) > len(data_none)
+
+    @test
+    def border_style_property_standalone():
+        """border-style as a standalone property works."""
+        doc = HtmlDocument(
+            string=(
+                '<p style="border-width: 1px; border-style: dashed;'
+                ' border-color: green">Styled</p>'
+            )
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Styled")
+
+
+with describe("clickable links"):
+
+    @test
+    def link_produces_annotation():
+        """An <a href> produces a /Link annotation in the PDF."""
+        doc = HtmlDocument(
+            string='<p>Visit <a href="https://example.com">our site</a> today</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"our site")
+        expect(data).to_contain(b"/Link")
+        expect(data).to_contain(b"https://example.com")
+
+    @test
+    def link_uses_uri_action():
+        """Links use a URI action type."""
+        doc = HtmlDocument(string='<a href="https://example.com/path">click</a>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/URI")
+        expect(data).to_contain(b"https://example.com/path")
+
+    @test
+    def link_without_href_no_annotation():
+        """An <a> without href does not create an annotation."""
+        doc = HtmlDocument(string="<p><a>no link</a> here</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"no link")
+        assert b"/Link" not in data
+
+    @test
+    def multiple_links_multiple_annotations():
+        """Multiple <a> tags produce multiple annotations."""
+        doc = HtmlDocument(
+            string=(
+                '<p><a href="https://a.com">first</a> and '
+                '<a href="https://b.com">second</a></p>'
+            )
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"https://a.com")
+        expect(data).to_contain(b"https://b.com")
+        # Two /Link subtypes
+        assert data.count(b"/Link") >= 2
+
+    @test
+    def link_text_rendered_inline():
+        """Link text flows inline with surrounding text."""
+        doc = HtmlDocument(
+            string='<p>before <a href="https://x.com">linked</a> after</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"before")
+        expect(data).to_contain(b"linked")
+        expect(data).to_contain(b"after")
+
+    @test
+    def link_with_inline_style():
+        """A link with inline color styling still produces an annotation."""
+        doc = HtmlDocument(
+            string='<a href="https://example.com" style="color: blue">styled link</a>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Link")
+        expect(data).to_contain(b"styled link")

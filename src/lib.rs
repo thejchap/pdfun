@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
+use pdf_writer::types::{ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap};
 use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -58,6 +58,15 @@ pub(crate) enum PdfOp {
     FillAndStroke,
     SaveState,
     RestoreState,
+    SetDashPattern { array: Vec<f32>, phase: f32 },
+}
+
+pub(crate) struct LinkAnnotation {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) url: String,
 }
 
 pub(crate) struct PageContent {
@@ -67,6 +76,7 @@ pub(crate) struct PageContent {
     pub(crate) fonts_used: Vec<String>,
     pub(crate) current_font: Option<String>,
     pub(crate) current_font_size: Option<f32>,
+    pub(crate) links: Vec<LinkAnnotation>,
 }
 
 impl PageContent {
@@ -78,6 +88,7 @@ impl PageContent {
             fonts_used: Vec::new(),
             current_font: None,
             current_font_size: None,
+            links: Vec::new(),
         }
     }
 }
@@ -111,6 +122,11 @@ struct RegisteredFont {
 pub(crate) struct PdfDocument {
     pub(crate) pages: Vec<Arc<Mutex<PageContent>>>,
     registered_fonts: Vec<RegisteredFont>,
+    pub(crate) title: Option<String>,
+    pub(crate) author: Option<String>,
+    pub(crate) subject: Option<String>,
+    pub(crate) keywords: Option<String>,
+    pub(crate) creator: Option<String>,
 }
 
 #[pymethods]
@@ -120,7 +136,32 @@ impl PdfDocument {
         Ok(PdfDocument {
             pages: Vec::new(),
             registered_fonts: Vec::new(),
+            title: None,
+            author: None,
+            subject: None,
+            keywords: None,
+            creator: Some("pdfun".to_string()),
         })
+    }
+
+    fn set_title(&mut self, title: &str) -> PyResult<()> {
+        self.title = Some(title.to_string());
+        Ok(())
+    }
+
+    fn set_author(&mut self, author: &str) -> PyResult<()> {
+        self.author = Some(author.to_string());
+        Ok(())
+    }
+
+    fn set_subject(&mut self, subject: &str) -> PyResult<()> {
+        self.subject = Some(subject.to_string());
+        Ok(())
+    }
+
+    fn set_keywords(&mut self, keywords: &str) -> PyResult<()> {
+        self.keywords = Some(keywords.to_string());
+        Ok(())
     }
 
     #[pyo3(signature = (width=612.0, height=792.0))]
@@ -301,6 +342,32 @@ impl PdfDocument {
         // write catalog
         pdf.catalog(catalog_id).pages(page_tree_id);
 
+        // write document metadata
+        let has_info = self.title.is_some()
+            || self.author.is_some()
+            || self.subject.is_some()
+            || self.keywords.is_some()
+            || self.creator.is_some();
+        if has_info {
+            let info_id = alloc();
+            let mut info = pdf.document_info(info_id);
+            if let Some(ref title) = self.title {
+                info.title(pdf_writer::TextStr(title));
+            }
+            if let Some(ref author) = self.author {
+                info.author(pdf_writer::TextStr(author));
+            }
+            if let Some(ref subject) = self.subject {
+                info.subject(pdf_writer::TextStr(subject));
+            }
+            if let Some(ref keywords) = self.keywords {
+                info.keywords(pdf_writer::TextStr(keywords));
+            }
+            if let Some(ref creator) = self.creator {
+                info.creator(pdf_writer::TextStr(creator));
+            }
+        }
+
         // write page tree
         let page_ids: Vec<Ref> = page_refs.iter().map(|(pid, _)| *pid).collect();
         pdf.pages(page_tree_id)
@@ -387,10 +454,16 @@ impl PdfDocument {
                     PdfOp::RestoreState => {
                         content.restore_state();
                     }
+                    PdfOp::SetDashPattern { array, phase } => {
+                        content.set_dash_pattern(array.iter().copied(), *phase);
+                    }
                 }
             }
 
             let content_bytes = content.finish();
+
+            // pre-allocate refs for link annotations on this page
+            let annot_refs: Vec<Ref> = page.links.iter().map(|_| alloc()).collect();
 
             // write page object
             {
@@ -400,12 +473,35 @@ impl PdfDocument {
                     .media_box(Rect::new(0.0, 0.0, page.width as f32, page.height as f32))
                     .contents(content_id);
 
+                if !annot_refs.is_empty() {
+                    page_writer.annotations(annot_refs.iter().copied());
+                }
+
                 let mut resources = page_writer.resources();
                 let mut fonts_dict = resources.fonts();
                 for (idx, fr) in font_refs.iter().enumerate() {
                     let resource_name = format!("F{}", idx + 1);
                     fonts_dict.pair(Name(resource_name.as_bytes()), fr.type0_ref);
                 }
+            }
+
+            // write link annotation objects
+            for (annot_ref, link) in annot_refs.iter().zip(page.links.iter()) {
+                let rect = Rect::new(
+                    link.x,
+                    link.y,
+                    link.x + link.width,
+                    link.y + link.height,
+                );
+                let mut annot = pdf.annotation(*annot_ref);
+                annot
+                    .subtype(AnnotationType::Link)
+                    .rect(rect)
+                    .border(0.0, 0.0, 0.0, None);
+                annot
+                    .action()
+                    .action_type(ActionType::Uri)
+                    .uri(Str(link.url.as_bytes()));
             }
 
             // write content stream
@@ -842,9 +938,15 @@ fn html_to_pdf(
     page_height: f64,
 ) -> PyResult<PdfDocument> {
     let parsed = dom::parse_html(html);
+    let title = html_render::extract_title(&parsed.document);
     let mut doc = PdfDocument {
         pages: Vec::new(),
         registered_fonts: Vec::new(),
+        title,
+        author: None,
+        subject: None,
+        keywords: None,
+        creator: Some("pdfun".to_string()),
     };
     let mut inner = layout::LayoutInner::new(
         margin_top as f32,

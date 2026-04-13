@@ -51,6 +51,27 @@ pub enum FontStyle {
     Italic,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DisplayValue {
+    Block,
+    Inline,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextDecoration {
+    pub underline: bool,
+    pub line_through: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BorderStyle {
+    None,
+    Solid,
+    Dashed,
+    Dotted,
+}
+
 // ── PageStyle (@page rule) ──────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -75,17 +96,23 @@ pub struct ComputedStyle {
     pub font_family: Option<String>,
     pub text_align: Option<TextAlign>,
     pub line_height: Option<CssLength>,
+    pub margin_top: Option<CssLength>,
+    pub margin_right: Option<CssLength>,
     pub margin_bottom: Option<CssLength>,
+    pub margin_left: Option<CssLength>,
     pub padding_top: Option<CssLength>,
     pub padding_right: Option<CssLength>,
     pub padding_bottom: Option<CssLength>,
     pub padding_left: Option<CssLength>,
     pub border_width: Option<CssLength>,
     pub border_color: Option<(f32, f32, f32)>,
+    pub border_style: Option<BorderStyle>,
     pub column_count: Option<u32>,
     pub column_gap: Option<CssLength>,
     pub column_rule_width: Option<CssLength>,
     pub column_rule_color: Option<(f32, f32, f32)>,
+    pub display: Option<DisplayValue>,
+    pub text_decoration: Option<TextDecoration>,
 }
 
 impl ComputedStyle {
@@ -104,6 +131,7 @@ impl ComputedStyle {
             result.font_family = c.font_family.clone().or_else(|| self.font_family.clone());
             result.text_align = c.text_align.clone().or_else(|| self.text_align.clone());
             result.line_height = c.line_height.or(self.line_height);
+            result.text_decoration = c.text_decoration.or(self.text_decoration);
         } else {
             result.color = self.color;
             result.font_size = self.font_size;
@@ -112,6 +140,7 @@ impl ComputedStyle {
             result.font_family = self.font_family.clone();
             result.text_align = self.text_align.clone();
             result.line_height = self.line_height;
+            result.text_decoration = self.text_decoration;
         }
         result
     }
@@ -126,17 +155,23 @@ impl ComputedStyle {
             || self.font_family.is_some()
             || self.text_align.is_some()
             || self.line_height.is_some()
+            || self.margin_top.is_some()
+            || self.margin_right.is_some()
             || self.margin_bottom.is_some()
+            || self.margin_left.is_some()
             || self.padding_top.is_some()
             || self.padding_right.is_some()
             || self.padding_bottom.is_some()
             || self.padding_left.is_some()
             || self.border_width.is_some()
             || self.border_color.is_some()
+            || self.border_style.is_some()
             || self.column_count.is_some()
             || self.column_gap.is_some()
             || self.column_rule_width.is_some()
             || self.column_rule_color.is_some()
+            || self.display.is_some()
+            || self.text_decoration.is_some()
     }
 }
 
@@ -365,12 +400,22 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
             }
             "margin" => {
                 let (top, right, bottom, left) = parse_box_shorthand(input)?;
-                // Only margin-bottom maps to spacing_after for now
-                let _ = (top, right, left);
+                self.style.margin_top = Some(top);
+                self.style.margin_right = Some(right);
                 self.style.margin_bottom = Some(bottom);
+                self.style.margin_left = Some(left);
+            }
+            "margin-top" => {
+                self.style.margin_top = Some(parse_css_length(input)?);
+            }
+            "margin-right" => {
+                self.style.margin_right = Some(parse_css_length(input)?);
             }
             "margin-bottom" => {
                 self.style.margin_bottom = Some(parse_css_length(input)?);
+            }
+            "margin-left" => {
+                self.style.margin_left = Some(parse_css_length(input)?);
             }
             "padding" => {
                 let (top, right, bottom, left) = parse_non_negative_box_shorthand(input)?;
@@ -397,9 +442,21 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
             "border-color" => {
                 self.style.border_color = Some(parse_css_color(input)?);
             }
+            "border-style" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                match ident.to_ascii_lowercase().as_str() {
+                    "none" | "hidden" => {
+                        self.style.border_style = Some(BorderStyle::None);
+                    }
+                    "solid" => self.style.border_style = Some(BorderStyle::Solid),
+                    "dashed" => self.style.border_style = Some(BorderStyle::Dashed),
+                    "dotted" => self.style.border_style = Some(BorderStyle::Dotted),
+                    _ => return Err(location.new_custom_error(())),
+                }
+            }
             "border" => {
-                // border shorthand: parse width and/or color in any order
-                // (ignore border-style, always solid)
+                // border shorthand: parse width, style, and/or color in any order
                 let mut found = false;
                 for _ in 0..3 {
                     if let Ok(len) = input.try_parse(parse_non_negative_length) {
@@ -408,29 +465,17 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     } else if let Ok(color) = input.try_parse(parse_css_color) {
                         self.style.border_color = Some(color);
                         found = true;
-                    } else if input
-                        .try_parse(|i: &mut Parser<'i, '_>| {
-                            let ident = i.expect_ident()?;
-                            if matches!(
-                                ident.to_ascii_lowercase().as_str(),
-                                "solid"
-                                    | "dashed"
-                                    | "dotted"
-                                    | "none"
-                                    | "hidden"
-                                    | "double"
-                                    | "groove"
-                                    | "ridge"
-                                    | "inset"
-                                    | "outset"
-                            ) {
-                                Ok::<(), ParseError<'i, ()>>(())
-                            } else {
-                                Err(i.new_custom_error(()))
-                            }
-                        })
-                        .is_ok()
-                    {
+                    } else if let Ok(style) = input.try_parse(|i: &mut Parser<'i, '_>| {
+                        let ident = i.expect_ident()?.clone();
+                        match ident.to_ascii_lowercase().as_str() {
+                            "solid" => Ok::<_, ParseError<'i, ()>>(BorderStyle::Solid),
+                            "dashed" => Ok(BorderStyle::Dashed),
+                            "dotted" => Ok(BorderStyle::Dotted),
+                            "none" | "hidden" => Ok(BorderStyle::None),
+                            _ => Err(i.new_custom_error(())),
+                        }
+                    }) {
+                        self.style.border_style = Some(style);
                         found = true;
                     } else {
                         break;
@@ -488,6 +533,37 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 }
                 if !found {
                     return Err(input.new_custom_error(()));
+                }
+            }
+            "text-decoration" | "text-decoration-line" => {
+                let mut underline = false;
+                let mut line_through = false;
+                loop {
+                    let Ok(ident) = input.try_parse(|i| i.expect_ident().cloned()) else {
+                        break;
+                    };
+                    match ident.to_ascii_lowercase().as_str() {
+                        "underline" => underline = true,
+                        "line-through" => line_through = true,
+                        "none" => {
+                            underline = false;
+                            line_through = false;
+                            break;
+                        }
+                        _ => {} // ignore overline, etc.
+                    }
+                }
+                self.style.text_decoration =
+                    Some(TextDecoration { underline, line_through });
+            }
+            "display" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                match ident.to_ascii_lowercase().as_str() {
+                    "none" => self.style.display = Some(DisplayValue::None),
+                    "block" => self.style.display = Some(DisplayValue::Block),
+                    "inline" => self.style.display = Some(DisplayValue::Inline),
+                    _ => return Err(location.new_custom_error(())),
                 }
             }
             _ => return Err(input.new_custom_error(())),
@@ -985,8 +1061,17 @@ pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
     if source.line_height.is_some() {
         target.line_height = source.line_height;
     }
+    if source.margin_top.is_some() {
+        target.margin_top = source.margin_top;
+    }
+    if source.margin_right.is_some() {
+        target.margin_right = source.margin_right;
+    }
     if source.margin_bottom.is_some() {
         target.margin_bottom = source.margin_bottom;
+    }
+    if source.margin_left.is_some() {
+        target.margin_left = source.margin_left;
     }
     if source.padding_top.is_some() {
         target.padding_top = source.padding_top;
@@ -1006,6 +1091,9 @@ pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
     if source.border_color.is_some() {
         target.border_color = source.border_color;
     }
+    if source.border_style.is_some() {
+        target.border_style = source.border_style;
+    }
     if source.column_count.is_some() {
         target.column_count = source.column_count;
     }
@@ -1017,6 +1105,12 @@ pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
     }
     if source.column_rule_color.is_some() {
         target.column_rule_color = source.column_rule_color;
+    }
+    if source.display.is_some() {
+        target.display = source.display;
+    }
+    if source.text_decoration.is_some() {
+        target.text_decoration = source.text_decoration;
     }
 }
 

@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::css;
 use crate::font_metrics;
 use crate::{PageContent, PdfDocument, PdfOp, BUILTIN_FONTS};
 
@@ -63,18 +64,29 @@ pub enum TextAlign {
 pub struct BlockStyle {
     pub color: Option<(f32, f32, f32)>,
     pub background_color: Option<(f32, f32, f32)>,
+    pub margin_top: f32,
+    pub margin_right: f32,
+    pub margin_bottom: f32,
+    pub margin_left: f32,
     pub padding_top: f32,
     pub padding_right: f32,
     pub padding_bottom: f32,
     pub padding_left: f32,
     pub border_width: f32,
     pub border_color: Option<(f32, f32, f32)>,
+    pub border_style: Option<css::BorderStyle>,
     pub text_align: TextAlign,
 }
 
 impl BlockStyle {
     fn has_any_styling(&self) -> bool {
-        self.color.is_some() || self.background_color.is_some() || self.border_width > 0.0
+        self.color.is_some()
+            || self.background_color.is_some()
+            || self.border_width > 0.0
+            || self.margin_top > 0.0
+            || self.margin_right > 0.0
+            || self.margin_bottom > 0.0
+            || self.margin_left > 0.0
     }
 }
 
@@ -92,6 +104,9 @@ pub struct TextRun {
     pub font_size: f32,
     #[pyo3(get)]
     pub color: Option<(f32, f32, f32)>,
+    /// (underline, line_through)
+    pub text_decoration: Option<(bool, bool)>,
+    pub link_url: Option<String>,
 }
 
 #[pymethods]
@@ -109,6 +124,8 @@ impl TextRun {
             font_name: font_name.to_string(),
             font_size: font_size as f32,
             color: color.map(rgb_to_f32),
+            text_decoration: None,
+            link_url: None,
         }
     }
 }
@@ -132,6 +149,8 @@ struct StyledWord {
     font_name: String,
     font_size: f32,
     color: Option<(f32, f32, f32)>,
+    text_decoration: Option<(bool, bool)>,
+    link_url: Option<String>,
 }
 
 struct LineSegment {
@@ -140,6 +159,8 @@ struct LineSegment {
     font_size: f32,
     color: Option<(f32, f32, f32)>,
     width: f32,
+    text_decoration: Option<(bool, bool)>,
+    link_url: Option<String>,
 }
 
 struct WrappedLine {
@@ -167,6 +188,8 @@ fn wrap_runs_impl(
                 font_name: run.font_name.clone(),
                 font_size: run.font_size,
                 color: run.color,
+                text_decoration: run.text_decoration,
+                link_url: run.link_url.clone(),
             });
         }
     }
@@ -215,6 +238,8 @@ fn wrap_runs_impl(
                 last.font_name == word.font_name
                     && last.font_size == word.font_size
                     && last.color == word.color
+                    && last.text_decoration == word.text_decoration
+                    && last.link_url == word.link_url
             });
 
             if can_merge {
@@ -240,6 +265,8 @@ fn wrap_runs_impl(
                     font_size: word.font_size,
                     color: word.color,
                     width,
+                    text_decoration: word.text_decoration,
+                    link_url: word.link_url.clone(),
                 });
             }
         }
@@ -265,12 +292,16 @@ fn wrap_runs_preformatted(runs: &[TextRun]) -> Result<Vec<WrappedLine>, String> 
     let mut font_name = String::new();
     let mut font_size = 12.0_f32;
     let mut color = None;
+    let mut text_decoration = None;
+    let mut link_url = None;
 
     for run in runs {
         full_text.push_str(&run.text);
         font_name.clone_from(&run.font_name);
         font_size = run.font_size;
         color = run.color;
+        text_decoration = run.text_decoration;
+        link_url = run.link_url.clone();
     }
 
     let mut result: Vec<WrappedLine> = Vec::new();
@@ -283,6 +314,8 @@ fn wrap_runs_preformatted(runs: &[TextRun]) -> Result<Vec<WrappedLine>, String> 
             font_size,
             color,
             width,
+            text_decoration,
+            link_url: link_url.clone(),
         };
         result.push(WrappedLine {
             segments: vec![segment],
@@ -458,8 +491,11 @@ impl LayoutInner {
                 continue;
             }
 
+            // Available width after margins
+            let box_width =
+                col_width - block.style.margin_left - block.style.margin_right;
             let text_area_width =
-                col_width - block.style.padding_left - block.style.padding_right;
+                box_width - block.style.padding_left - block.style.padding_right;
 
             let wrapped_lines =
                 wrap_runs_impl(&block.runs, text_area_width, block.preserve_whitespace)?;
@@ -471,8 +507,10 @@ impl LayoutInner {
             let line_height = block.line_height.unwrap_or(max_font_size * 1.2);
 
             let block_text_height = wrapped_lines.len() as f32 * line_height;
-            let block_total_height =
+            let box_height =
                 block.style.padding_top + block_text_height + block.style.padding_bottom;
+            let block_total_height =
+                block.style.margin_top + box_height + block.style.margin_bottom;
 
             if cursor_y - block_total_height < self.margin_bottom && cursor_y < content_top {
                 if current_col < col_count - 1 {
@@ -487,6 +525,10 @@ impl LayoutInner {
             }
 
             let cx = col_x(current_col);
+            // Block box starts after left margin
+            let box_x = cx + block.style.margin_left;
+            // Cursor moves past top margin for box content
+            cursor_y -= block.style.margin_top;
 
             let needs_state_wrap =
                 block.style.has_any_styling() || block.runs.iter().any(|r| r.color.is_some());
@@ -513,24 +555,47 @@ impl LayoutInner {
             if let Some((r, g, b)) = block.style.background_color {
                 page.operations.push(PdfOp::SetFillColor { r, g, b });
                 page.operations.push(PdfOp::Rectangle {
-                    x: cx,
-                    y: cursor_y - block_total_height,
-                    width: col_width,
-                    height: block_total_height,
+                    x: box_x,
+                    y: cursor_y - box_height,
+                    width: box_width,
+                    height: box_height,
                 });
                 page.operations.push(PdfOp::Fill);
             }
 
-            if block.style.border_width > 0.0 {
+            if block.style.border_width > 0.0
+                && !matches!(block.style.border_style, Some(css::BorderStyle::None))
+            {
                 let (r, g, b) = block.style.border_color.unwrap_or((0.0, 0.0, 0.0));
                 page.operations.push(PdfOp::SetStrokeColor { r, g, b });
                 page.operations
                     .push(PdfOp::SetLineWidth(block.style.border_width));
+
+                // Apply dash pattern based on border-style
+                match block.style.border_style {
+                    Some(css::BorderStyle::Dashed) => {
+                        let dash = block.style.border_width * 3.0;
+                        let gap = block.style.border_width * 2.0;
+                        page.operations.push(PdfOp::SetDashPattern {
+                            array: vec![dash, gap],
+                            phase: 0.0,
+                        });
+                    }
+                    Some(css::BorderStyle::Dotted) => {
+                        let dot = block.style.border_width;
+                        page.operations.push(PdfOp::SetDashPattern {
+                            array: vec![dot, dot * 2.0],
+                            phase: 0.0,
+                        });
+                    }
+                    _ => {} // Solid or unset — no dash pattern needed
+                }
+
                 page.operations.push(PdfOp::Rectangle {
-                    x: cx,
-                    y: cursor_y - block_total_height,
-                    width: col_width,
-                    height: block_total_height,
+                    x: box_x,
+                    y: cursor_y - box_height,
+                    width: box_width,
+                    height: box_height,
                 });
                 page.operations.push(PdfOp::Stroke);
             }
@@ -539,7 +604,7 @@ impl LayoutInner {
                 page.operations.push(PdfOp::SetFillColor { r, g, b });
             }
 
-            let text_x_base = cx + block.style.padding_left;
+            let text_x_base = box_x + block.style.padding_left;
             let mut line_y = cursor_y - block.style.padding_top;
             let marker_gap = 6.0_f32;
 
@@ -598,6 +663,66 @@ impl LayoutInner {
                         .push(PdfOp::ShowText(segment.text.clone()));
                     page.operations.push(PdfOp::EndText);
 
+                    // Record link annotation rect if this segment is part of an <a>
+                    if let Some(url) = &segment.link_url {
+                        page.links.push(crate::LinkAnnotation {
+                            x,
+                            y: baseline_y - segment.font_size * 0.2,
+                            width: segment.width,
+                            height: segment.font_size * 1.1,
+                            url: url.clone(),
+                        });
+                    }
+
+                    // Draw text-decoration lines (underline and/or line-through)
+                    if let Some((underline, line_through)) = segment.text_decoration {
+                        if underline || line_through {
+                            let metrics =
+                                font_metrics::get_builtin_metrics(&segment.font_name);
+                            let scale = segment.font_size / 1000.0;
+                            let stroke_width = (segment.font_size * 0.05).max(0.5);
+
+                            page.operations.push(PdfOp::SaveState);
+                            if let Some((r, g, b)) = segment.color {
+                                page.operations
+                                    .push(PdfOp::SetStrokeColor { r, g, b });
+                            }
+                            page.operations.push(PdfOp::SetLineWidth(stroke_width));
+
+                            if underline {
+                                let descent = metrics
+                                    .map_or(-207.0, |m| m.descent as f32);
+                                let underline_y = baseline_y + descent * scale / 3.0;
+                                page.operations.push(PdfOp::MoveTo {
+                                    x,
+                                    y: underline_y,
+                                });
+                                page.operations.push(PdfOp::LineTo {
+                                    x: x + segment.width,
+                                    y: underline_y,
+                                });
+                                page.operations.push(PdfOp::Stroke);
+                            }
+
+                            if line_through {
+                                let ascent =
+                                    metrics.map_or(718.0, |m| m.ascent as f32);
+                                let strike_y = baseline_y + ascent * scale / 3.0;
+                                page.operations.push(PdfOp::MoveTo {
+                                    x,
+                                    y: strike_y,
+                                });
+                                page.operations.push(PdfOp::LineTo {
+                                    x: x + segment.width,
+                                    y: strike_y,
+                                });
+                                page.operations.push(PdfOp::Stroke);
+                            }
+
+                            page.operations.push(PdfOp::RestoreState);
+                        }
+                    }
+
                     x += segment.width;
                 }
 
@@ -609,7 +734,7 @@ impl LayoutInner {
             }
 
             drop(page);
-            cursor_y -= block_total_height + block.spacing_after;
+            cursor_y -= box_height + block.style.margin_bottom + block.spacing_after;
         }
 
         // Draw column rules on the last page
@@ -718,6 +843,8 @@ impl Layout {
             font_name: font.to_string(),
             font_size: fs,
             color: color.map(rgb_to_f32),
+            text_decoration: None,
+            link_url: None,
         };
 
         self.inner.blocks.push(Paragraph {
@@ -725,7 +852,6 @@ impl Layout {
             line_height: Some(line_height.map_or(fs * 1.2, |h| h as f32)),
             spacing_after: spacing_after as f32,
             style: BlockStyle {
-                color: None,
                 background_color: background_color.map(rgb_to_f32),
                 padding_top: pad_t,
                 padding_right: pad_r,
@@ -734,6 +860,7 @@ impl Layout {
                 border_width: border_width as f32,
                 border_color: border_color.map(rgb_to_f32),
                 text_align: align,
+                ..BlockStyle::default()
             },
             marker: None,
             is_hr: false,
@@ -774,6 +901,7 @@ impl Layout {
                 border_width: border_width as f32,
                 border_color: border_color.map(rgb_to_f32),
                 text_align: align,
+                ..BlockStyle::default()
             },
             marker,
             is_hr: false,

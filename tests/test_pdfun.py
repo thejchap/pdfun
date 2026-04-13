@@ -1082,3 +1082,45 @@ with describe("Layout - combined styling"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Styled")
         expect(data).to_contain(b"Plain")
+
+
+with describe("Document metadata"):
+
+    @test
+    def set_title_appears_in_pdf():
+        """set_title() writes a /Title entry in the PDF info dictionary."""
+        doc = PdfDocument()
+        doc.set_title("My Document")
+        doc.add_page()
+        data = doc.to_bytes()
+        assert b"/Title" in data
+        assert b"My Document" in data
+
+    @test
+    def set_author_appears_in_pdf():
+        """set_author() writes an /Author entry."""
+        doc = PdfDocument()
+        doc.set_author("Jane Doe")
+        doc.add_page()
+        data = doc.to_bytes()
+        assert b"/Author" in data
+        assert b"Jane Doe" in data
+
+    @test
+    def set_keywords_appears_in_pdf():
+        """set_keywords() writes a /Keywords entry."""
+        doc = PdfDocument()
+        doc.set_keywords("pdf, test")
+        doc.add_page()
+        data = doc.to_bytes()
+        assert b"/Keywords" in data
+        assert b"pdf, test" in data
+
+    @test
+    def default_creator_is_pdfun():
+        """The default creator is 'pdfun'."""
+        doc = PdfDocument()
+        doc.add_page()
+        data = doc.to_bytes()
+        assert b"/Creator" in data
+        assert b"pdfun" in data
