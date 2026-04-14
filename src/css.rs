@@ -104,6 +104,105 @@ pub struct PageStyle {
     pub margin_left: Option<f32>,
 }
 
+// ── ComputedStyle field table ───────────────────────────────
+//
+// `with_style_fields!` is the single source of truth for every
+// `ComputedStyle` field. Each entry is `(name, kind, inherited)`:
+//   - kind: `copy` for `Option<impl Copy>`, `clone` for `Option<impl Clone>`
+//   - inherited: `yes` if CSS-inheritable, `no` otherwise
+//
+// The generator macros below (`gen_merge`, `gen_has_any`, `gen_inherit`)
+// are invoked via this table, so adding a new CSS property means editing
+// the field list here + adding one match arm to the declaration parser,
+// and the merge / inherit / has_any plumbing is generated automatically.
+
+macro_rules! with_style_fields {
+    ($m:ident) => {
+        $m! {
+            (color,             copy,  yes),
+            (background_color,  copy,  no),
+            (font_size,         copy,  yes),
+            (font_weight,       copy,  yes),
+            (font_style,        copy,  yes),
+            (font_family,       clone, yes),
+            (text_align,        clone, yes),
+            (line_height,       copy,  yes),
+            (margin_top,        copy,  no),
+            (margin_right,      copy,  no),
+            (margin_bottom,     copy,  no),
+            (margin_left,       copy,  no),
+            (padding_top,       copy,  no),
+            (padding_right,     copy,  no),
+            (padding_bottom,    copy,  no),
+            (padding_left,      copy,  no),
+            (border_width,      copy,  no),
+            (border_color,      copy,  no),
+            (border_style,      copy,  no),
+            (column_count,      copy,  no),
+            (column_gap,        copy,  no),
+            (column_rule_width, copy,  no),
+            (column_rule_color, copy,  no),
+            (display,           copy,  no),
+            (text_decoration,   copy,  yes),
+            (list_style_type,   copy,  yes),
+            (page_break_before, copy,  no),
+            (page_break_after,  copy,  no),
+        }
+    };
+}
+
+macro_rules! merge_one {
+    (copy, $t:ident, $s:ident, $f:ident) => {
+        if $s.$f.is_some() { $t.$f = $s.$f; }
+    };
+    (clone, $t:ident, $s:ident, $f:ident) => {
+        if $s.$f.is_some() { $t.$f.clone_from(&$s.$f); }
+    };
+}
+
+macro_rules! inherit_one {
+    (copy, yes, $r:ident, $c:ident, $p:ident, $f:ident) => {
+        $r.$f = $c.and_then(|c| c.$f).or($p.$f);
+    };
+    (clone, yes, $r:ident, $c:ident, $p:ident, $f:ident) => {
+        $r.$f = $c.and_then(|c| c.$f.clone()).or_else(|| $p.$f.clone());
+    };
+    ($kind:ident, no, $r:ident, $c:ident, $p:ident, $f:ident) => {};
+}
+
+macro_rules! gen_merge {
+    ($( ($name:ident, $kind:ident, $inh:ident) ),* $(,)?) => {
+        /// Merge non-None fields from `source` into `target`.
+        pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
+            $( merge_one!($kind, target, source, $name); )*
+        }
+    };
+}
+
+macro_rules! gen_style_impl {
+    ($( ($name:ident, $kind:ident, $inh:ident) ),* $(,)?) => {
+        impl ComputedStyle {
+            /// Returns true if any property is set (non-None).
+            pub fn has_any_property(&self) -> bool {
+                false $( || self.$name.is_some() )*
+            }
+
+            /// Build inherited style for a child element. Inheritable
+            /// properties fall back to parent's value when the child
+            /// leaves them unset; non-inheritable properties reset.
+            pub fn inherit_into(&self, child: &Option<ComputedStyle>) -> ComputedStyle {
+                let mut result = ComputedStyle::default();
+                let c = child.as_ref();
+                $( inherit_one!($kind, $inh, result, c, self, $name); )*
+                result
+            }
+        }
+    };
+}
+
+with_style_fields!(gen_style_impl);
+with_style_fields!(gen_merge);
+
 // ── ComputedStyle ───────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -138,70 +237,6 @@ pub struct ComputedStyle {
     pub page_break_after: Option<PageBreak>,
 }
 
-impl ComputedStyle {
-    /// Build inherited style for a child element.
-    /// For each inheritable property (color, font-*, text-align, line-height):
-    /// use child's value if explicitly set, else parent's.
-    /// Non-inheritable properties (background, margin, padding, border, column)
-    /// are not carried forward.
-    pub fn inherit_into(&self, child: &Option<ComputedStyle>) -> ComputedStyle {
-        let mut result = ComputedStyle::default();
-        if let Some(c) = child {
-            result.color = c.color.or(self.color);
-            result.font_size = c.font_size.or(self.font_size);
-            result.font_weight = c.font_weight.or(self.font_weight);
-            result.font_style = c.font_style.or(self.font_style);
-            result.font_family = c.font_family.clone().or_else(|| self.font_family.clone());
-            result.text_align = c.text_align.clone().or_else(|| self.text_align.clone());
-            result.line_height = c.line_height.or(self.line_height);
-            result.text_decoration = c.text_decoration.or(self.text_decoration);
-            result.list_style_type = c.list_style_type.or(self.list_style_type);
-        } else {
-            result.color = self.color;
-            result.font_size = self.font_size;
-            result.font_weight = self.font_weight;
-            result.font_style = self.font_style;
-            result.font_family = self.font_family.clone();
-            result.text_align = self.text_align.clone();
-            result.line_height = self.line_height;
-            result.text_decoration = self.text_decoration;
-            result.list_style_type = self.list_style_type;
-        }
-        result
-    }
-
-    /// Returns true if any property is set (non-None).
-    pub fn has_any_property(&self) -> bool {
-        self.color.is_some()
-            || self.background_color.is_some()
-            || self.font_size.is_some()
-            || self.font_weight.is_some()
-            || self.font_style.is_some()
-            || self.font_family.is_some()
-            || self.text_align.is_some()
-            || self.line_height.is_some()
-            || self.margin_top.is_some()
-            || self.margin_right.is_some()
-            || self.margin_bottom.is_some()
-            || self.margin_left.is_some()
-            || self.padding_top.is_some()
-            || self.padding_right.is_some()
-            || self.padding_bottom.is_some()
-            || self.padding_left.is_some()
-            || self.border_width.is_some()
-            || self.border_color.is_some()
-            || self.border_style.is_some()
-            || self.column_count.is_some()
-            || self.column_gap.is_some()
-            || self.column_rule_width.is_some()
-            || self.column_rule_color.is_some()
-            || self.display.is_some()
-            || self.text_decoration.is_some()
-            || self.list_style_type.is_some()
-            || self.page_break_before.is_some()
-            || self.page_break_after.is_some()
-    }
-}
 
 // ── Color parsing ───────────────────────────────────────────
 
@@ -330,6 +365,13 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
     type Declaration = ();
     type Error = ();
 
+    // NOTE: `!important` is currently parsed-and-ignored (cssparser consumes
+    // the `!important` marker after this method returns). A full CSS-spec
+    // implementation would give important declarations higher cascade
+    // priority than their specificity would otherwise suggest; we don't do
+    // that yet. Until we do, a `color: red !important` rule can still be
+    // overridden by a later `color: blue`. If that matters to you, move the
+    // target rule later in the stylesheet or increase its specificity.
     fn parse_value<'t>(
         &mut self,
         name: CowRcStr<'i>,
@@ -1127,93 +1169,6 @@ fn selector_matches(selector: &SelectorChain, element: &ElementInfo<'_>) -> bool
     true
 }
 
-/// Merge non-None fields from `source` into `target`.
-pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
-    if source.color.is_some() {
-        target.color = source.color;
-    }
-    if source.background_color.is_some() {
-        target.background_color = source.background_color;
-    }
-    if source.font_size.is_some() {
-        target.font_size = source.font_size;
-    }
-    if source.font_weight.is_some() {
-        target.font_weight = source.font_weight;
-    }
-    if source.font_style.is_some() {
-        target.font_style = source.font_style;
-    }
-    if source.font_family.is_some() {
-        target.font_family.clone_from(&source.font_family);
-    }
-    if source.text_align.is_some() {
-        target.text_align.clone_from(&source.text_align);
-    }
-    if source.line_height.is_some() {
-        target.line_height = source.line_height;
-    }
-    if source.margin_top.is_some() {
-        target.margin_top = source.margin_top;
-    }
-    if source.margin_right.is_some() {
-        target.margin_right = source.margin_right;
-    }
-    if source.margin_bottom.is_some() {
-        target.margin_bottom = source.margin_bottom;
-    }
-    if source.margin_left.is_some() {
-        target.margin_left = source.margin_left;
-    }
-    if source.padding_top.is_some() {
-        target.padding_top = source.padding_top;
-    }
-    if source.padding_right.is_some() {
-        target.padding_right = source.padding_right;
-    }
-    if source.padding_bottom.is_some() {
-        target.padding_bottom = source.padding_bottom;
-    }
-    if source.padding_left.is_some() {
-        target.padding_left = source.padding_left;
-    }
-    if source.border_width.is_some() {
-        target.border_width = source.border_width;
-    }
-    if source.border_color.is_some() {
-        target.border_color = source.border_color;
-    }
-    if source.border_style.is_some() {
-        target.border_style = source.border_style;
-    }
-    if source.column_count.is_some() {
-        target.column_count = source.column_count;
-    }
-    if source.column_gap.is_some() {
-        target.column_gap = source.column_gap;
-    }
-    if source.column_rule_width.is_some() {
-        target.column_rule_width = source.column_rule_width;
-    }
-    if source.column_rule_color.is_some() {
-        target.column_rule_color = source.column_rule_color;
-    }
-    if source.display.is_some() {
-        target.display = source.display;
-    }
-    if source.text_decoration.is_some() {
-        target.text_decoration = source.text_decoration;
-    }
-    if source.list_style_type.is_some() {
-        target.list_style_type = source.list_style_type;
-    }
-    if source.page_break_before.is_some() {
-        target.page_break_before = source.page_break_before;
-    }
-    if source.page_break_after.is_some() {
-        target.page_break_after = source.page_break_after;
-    }
-}
 
 // ── Tests ──────────────────────────────────────────────────
 

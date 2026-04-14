@@ -1,9 +1,44 @@
+import struct
 import tempfile
+import zlib
 from pathlib import Path
 
 from tryke import describe, expect, test
 
 from pdfun import HtmlDocument
+
+
+def _make_png(width: int, height: int, rgb_bytes: bytes) -> bytes:
+    """Build a minimal 8-bit RGB PNG."""
+    sig = b"\x89PNG\r\n\x1a\n"
+
+    def chunk(ctype: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # RGB
+    raw = b""
+    for y in range(height):
+        raw += b"\x00" + rgb_bytes[y * width * 3 : (y + 1) * width * 3]
+    idat = zlib.compress(raw)
+    return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+def _make_png_rgba(width: int, height: int, rgba_bytes: bytes) -> bytes:
+    """Build a minimal 8-bit RGBA PNG."""
+    sig = b"\x89PNG\r\n\x1a\n"
+
+    def chunk(ctype: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(ctype + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + ctype + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)  # RGBA
+    raw = b""
+    for y in range(height):
+        raw += b"\x00" + rgba_bytes[y * width * 4 : (y + 1) * width * 4]
+    idat = zlib.compress(raw)
+    return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
 
 with describe("HtmlDocument - constructor"):
 
@@ -2335,3 +2370,141 @@ with describe("tables"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Left")
         expect(data).to_contain(b"Right")
+
+
+with describe("images"):
+
+    @test
+    def png_img_produces_xobject():
+        """<img src=...> for a PNG produces an Image XObject in the PDF."""
+        png = _make_png(2, 2, bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            doc = HtmlDocument(string=f'<img src="{path}" width="50" height="50">')
+            data = doc.to_bytes()
+            expect(data).to_contain(b"/XObject")
+            expect(data).to_contain(b"/Subtype /Image")
+            expect(data).to_contain(b"/FlateDecode")
+            expect(data).to_contain(b"/DeviceRGB")
+            expect(data).to_contain(b"/Im0 Do")
+        finally:
+            Path(path).unlink()
+
+    @test
+    def png_rgba_produces_smask():
+        """An RGBA PNG produces a soft mask (SMask) for the alpha channel."""
+        rgba = bytes(
+            [
+                255,
+                0,
+                0,
+                255,
+                0,
+                255,
+                0,
+                128,
+                0,
+                0,
+                255,
+                64,
+                255,
+                255,
+                255,
+                0,
+            ]
+        )
+        png = _make_png_rgba(2, 2, rgba)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            doc = HtmlDocument(string=f'<img src="{path}">')
+            data = doc.to_bytes()
+            expect(data).to_contain(b"/SMask")
+            expect(data).to_contain(b"/DeviceGray")
+        finally:
+            Path(path).unlink()
+
+    @test
+    def img_intrinsic_dimensions():
+        """An <img> without width/height uses the PNG's intrinsic dimensions."""
+        # 4x3 PNG, all red
+        rgb = bytes([255, 0, 0] * 12)
+        png = _make_png(4, 3, rgb)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            doc = HtmlDocument(string=f'<img src="{path}">')
+            data = doc.to_bytes()
+            # Just verify width and height dict entries exist
+            expect(data).to_contain(b"/Width 4")
+            expect(data).to_contain(b"/Height 3")
+        finally:
+            Path(path).unlink()
+
+    @test
+    def img_width_preserves_aspect_ratio():
+        """Setting only width preserves aspect ratio for height."""
+        # 4x2 (aspect 2:1)
+        rgb = bytes([0, 0, 0] * 8)
+        png = _make_png(4, 2, rgb)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            doc = HtmlDocument(string=f'<img src="{path}" width="100">')
+            data = doc.to_bytes()
+            # A 100-wide image should become 50 tall (preserving 2:1 ratio)
+            # The CTM is written as "100 0 0 50 x y cm"
+            expect(data).to_contain(b"100 0 0 50")
+        finally:
+            Path(path).unlink()
+
+    @test
+    def missing_image_does_not_crash():
+        """A missing image file is silently skipped."""
+        doc = HtmlDocument(
+            string='<p>before</p><img src="/nonexistent/image.png"><p>after</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"before")
+        expect(data).to_contain(b"after")
+        # No image XObject should appear
+        assert b"/Subtype /Image" not in data
+
+    @test
+    def img_with_base_url():
+        """base_url resolves relative src paths."""
+        png = _make_png(1, 1, bytes([128, 128, 128]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            img_path = Path(tmpdir) / "pixel.png"
+            img_path.write_bytes(png)
+            doc = HtmlDocument(
+                string='<img src="pixel.png">',
+                base_url=tmpdir,
+            )
+            data = doc.to_bytes()
+            expect(data).to_contain(b"/Subtype /Image")
+
+    @test
+    def multiple_images_get_distinct_names():
+        """Multiple images in one document get /Im0 and /Im1."""
+        png1 = _make_png(1, 1, bytes([255, 0, 0]))
+        png2 = _make_png(1, 1, bytes([0, 255, 0]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f1:
+            f1.write(png1)
+            p1 = f1.name
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f2:
+            f2.write(png2)
+            p2 = f2.name
+        try:
+            doc = HtmlDocument(string=f'<img src="{p1}"><img src="{p2}">')
+            data = doc.to_bytes()
+            expect(data).to_contain(b"/Im0 Do")
+            expect(data).to_contain(b"/Im1 Do")
+        finally:
+            Path(p1).unlink()
+            Path(p2).unlink()

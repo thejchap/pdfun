@@ -107,8 +107,7 @@ pub struct TextRun {
     pub font_size: f32,
     #[pyo3(get)]
     pub color: Option<(f32, f32, f32)>,
-    /// (underline, line_through)
-    pub text_decoration: Option<(bool, bool)>,
+    pub text_decoration: Option<css::TextDecoration>,
     pub link_url: Option<String>,
 }
 
@@ -174,9 +173,18 @@ pub struct Table {
     pub default_line_height: Option<f32>,
 }
 
+pub struct ImageBlock {
+    pub image_index: usize,
+    pub width: f32,
+    pub height: f32,
+    pub spacing_after: f32,
+    pub style: BlockStyle,
+}
+
 pub enum Block {
     Paragraph(Paragraph),
     Table(Table),
+    Image(ImageBlock),
 }
 
 // ── Wrapping internals ──────────────────────────────────────
@@ -186,7 +194,7 @@ struct StyledWord {
     font_name: String,
     font_size: f32,
     color: Option<(f32, f32, f32)>,
-    text_decoration: Option<(bool, bool)>,
+    text_decoration: Option<css::TextDecoration>,
     link_url: Option<String>,
 }
 
@@ -196,7 +204,7 @@ struct LineSegment {
     font_size: f32,
     color: Option<(f32, f32, f32)>,
     width: f32,
-    text_decoration: Option<(bool, bool)>,
+    text_decoration: Option<css::TextDecoration>,
     link_url: Option<String>,
 }
 
@@ -444,6 +452,7 @@ pub struct LayoutInner {
     pub column_gap: f32,
     pub column_rule_width: f32,
     pub column_rule_color: Option<(f32, f32, f32)>,
+    pub images: Vec<crate::image::ImageData>,
 }
 
 impl LayoutInner {
@@ -467,6 +476,7 @@ impl LayoutInner {
             column_gap: 0.0,
             column_rule_width: 0.0,
             column_rule_color: None,
+            images: Vec::new(),
         }
     }
 
@@ -482,6 +492,10 @@ impl LayoutInner {
 
     pub fn push_table(&mut self, table: Table) {
         self.blocks.push(Block::Table(table));
+    }
+
+    pub fn push_image(&mut self, img: ImageBlock) {
+        self.blocks.push(Block::Image(img));
     }
 
     pub fn push_hr(&mut self) {
@@ -543,18 +557,33 @@ impl LayoutInner {
                     )?;
                     continue;
                 }
+                Block::Image(img) => {
+                    self.render_image(
+                        &mut current_page,
+                        doc,
+                        img,
+                        &mut cursor_y,
+                        &mut current_col,
+                        col_count,
+                        col_width,
+                        col_gap,
+                        content_top,
+                    );
+                    continue;
+                }
             };
             if block.is_hr {
                 if cursor_y - 12.0 < self.margin_bottom && cursor_y < content_top {
-                    if current_col < col_count - 1 {
-                        current_col += 1;
-                        cursor_y = content_top;
-                    } else {
-                        self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
-                        current_page = new_page(doc, self.page_width, self.page_height);
-                        cursor_y = content_top;
-                        current_col = 0;
-                    }
+                    self.advance_column_or_page(
+                        &mut current_page,
+                        doc,
+                        &mut cursor_y,
+                        &mut current_col,
+                        col_count,
+                        col_width,
+                        col_gap,
+                        content_top,
+                    );
                 }
                 let cx = col_x(current_col);
                 let mut page = current_page.lock().unwrap();
@@ -581,15 +610,16 @@ impl LayoutInner {
             if matches!(block.style.page_break_before, Some(css::PageBreak::Always))
                 && cursor_y < content_top
             {
-                if current_col < col_count - 1 {
-                    current_col += 1;
-                    cursor_y = content_top;
-                } else {
-                    self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
-                    current_page = new_page(doc, self.page_width, self.page_height);
-                    cursor_y = content_top;
-                    current_col = 0;
-                }
+                self.advance_column_or_page(
+                    &mut current_page,
+                    doc,
+                    &mut cursor_y,
+                    &mut current_col,
+                    col_count,
+                    col_width,
+                    col_gap,
+                    content_top,
+                );
             }
 
             // Available width after margins
@@ -614,15 +644,16 @@ impl LayoutInner {
                 block.style.margin_top + box_height + block.style.margin_bottom;
 
             if cursor_y - block_total_height < self.margin_bottom && cursor_y < content_top {
-                if current_col < col_count - 1 {
-                    current_col += 1;
-                    cursor_y = content_top;
-                } else {
-                    self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
-                    current_page = new_page(doc, self.page_width, self.page_height);
-                    cursor_y = content_top;
-                    current_col = 0;
-                }
+                self.advance_column_or_page(
+                    &mut current_page,
+                    doc,
+                    &mut cursor_y,
+                    &mut current_col,
+                    col_count,
+                    col_width,
+                    col_gap,
+                    content_top,
+                );
             }
 
             let cx = col_x(current_col);
@@ -801,8 +832,8 @@ impl LayoutInner {
                     }
 
                     // Draw text-decoration lines (underline and/or line-through)
-                    if let Some((underline, line_through)) = segment.text_decoration {
-                        if underline || line_through {
+                    if let Some(td) = segment.text_decoration {
+                        if td.underline || td.line_through {
                             let metrics =
                                 font_metrics::get_builtin_metrics(&segment.font_name);
                             let scale = segment.font_size / 1000.0;
@@ -815,7 +846,7 @@ impl LayoutInner {
                             }
                             page.operations.push(PdfOp::SetLineWidth(stroke_width));
 
-                            if underline {
+                            if td.underline {
                                 let descent = metrics
                                     .map_or(-207.0, |m| m.descent as f32);
                                 let underline_y = baseline_y + descent * scale / 3.0;
@@ -830,7 +861,7 @@ impl LayoutInner {
                                 page.operations.push(PdfOp::Stroke);
                             }
 
-                            if line_through {
+                            if td.line_through {
                                 let ascent =
                                     metrics.map_or(718.0, |m| m.ascent as f32);
                                 let strike_y = baseline_y + ascent * scale / 3.0;
@@ -871,15 +902,16 @@ impl LayoutInner {
 
             // page-break-after: force advance after rendering
             if matches!(block.style.page_break_after, Some(css::PageBreak::Always)) {
-                if current_col < col_count - 1 {
-                    current_col += 1;
-                    cursor_y = content_top;
-                } else {
-                    self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
-                    current_page = new_page(doc, self.page_width, self.page_height);
-                    cursor_y = content_top;
-                    current_col = 0;
-                }
+                self.advance_column_or_page(
+                    &mut current_page,
+                    doc,
+                    &mut cursor_y,
+                    &mut current_col,
+                    col_count,
+                    col_width,
+                    col_gap,
+                    content_top,
+                );
             }
         }
 
@@ -1007,15 +1039,16 @@ impl LayoutInner {
 
             // Page-break check: move the entire row to next column/page if it doesn't fit
             if *cursor_y - row_height < self.margin_bottom && *cursor_y < content_top {
-                if *current_col < col_count - 1 {
-                    *current_col += 1;
-                    *cursor_y = content_top;
-                } else {
-                    self.draw_column_rules(current_page, content_top, col_width, col_gap, col_count);
-                    *current_page = new_page(doc, self.page_width, self.page_height);
-                    *cursor_y = content_top;
-                    *current_col = 0;
-                }
+                self.advance_column_or_page(
+                    current_page,
+                    doc,
+                    cursor_y,
+                    current_col,
+                    col_count,
+                    col_width,
+                    col_gap,
+                    content_top,
+                );
             }
 
             // Draw cells in this row
@@ -1131,6 +1164,94 @@ impl LayoutInner {
 
         *cursor_y -= table.style.margin_bottom + table.spacing_after;
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_image(
+        &mut self,
+        current_page: &mut Arc<Mutex<PageContent>>,
+        doc: &mut PdfDocument,
+        img: &ImageBlock,
+        cursor_y: &mut f32,
+        current_col: &mut u32,
+        col_count: u32,
+        col_width: f32,
+        col_gap: f32,
+        content_top: f32,
+    ) {
+        let col_x_for = |col: u32| -> f32 {
+            self.margin_left + col as f32 * (col_width + col_gap)
+        };
+
+        // Scale down if wider than column content width
+        let box_width = col_width
+            - img.style.margin_left
+            - img.style.margin_right;
+        let (draw_w, draw_h) = if img.width > box_width && img.width > 0.0 {
+            let scale = box_width / img.width;
+            (box_width, img.height * scale)
+        } else {
+            (img.width, img.height)
+        };
+
+        let total_height = img.style.margin_top + draw_h + img.style.margin_bottom;
+
+        // Page-break check
+        if *cursor_y - total_height < self.margin_bottom && *cursor_y < content_top {
+            self.advance_column_or_page(
+                current_page,
+                doc,
+                cursor_y,
+                current_col,
+                col_count,
+                col_width,
+                col_gap,
+                content_top,
+            );
+        }
+
+        *cursor_y -= img.style.margin_top;
+        let x = col_x_for(*current_col) + img.style.margin_left;
+        let y_bottom = *cursor_y - draw_h;
+
+        let mut page = current_page.lock().unwrap();
+        if !page.images_used.contains(&img.image_index) {
+            page.images_used.push(img.image_index);
+        }
+        page.operations.push(PdfOp::DrawImage {
+            index: img.image_index,
+            x,
+            y: y_bottom,
+            width: draw_w,
+            height: draw_h,
+        });
+        drop(page);
+
+        *cursor_y = y_bottom - img.style.margin_bottom - img.spacing_after;
+    }
+
+    /// Advance to the next column, or if already in the last column,
+    /// draw rules on the current page and start a new one.
+    fn advance_column_or_page(
+        &self,
+        current_page: &mut Arc<Mutex<PageContent>>,
+        doc: &mut PdfDocument,
+        cursor_y: &mut f32,
+        current_col: &mut u32,
+        col_count: u32,
+        col_width: f32,
+        col_gap: f32,
+        content_top: f32,
+    ) {
+        if *current_col < col_count - 1 {
+            *current_col += 1;
+            *cursor_y = content_top;
+        } else {
+            self.draw_column_rules(current_page, content_top, col_width, col_gap, col_count);
+            *current_page = new_page(doc, self.page_width, self.page_height);
+            *cursor_y = content_top;
+            *current_col = 0;
+        }
     }
 
     fn draw_column_rules(
@@ -1303,5 +1424,70 @@ impl Layout {
     fn finish(&mut self, py: Python<'_>) -> PyResult<()> {
         let mut doc = self.doc.borrow_mut(py);
         self.inner.finish(&mut doc).map_err(PyValueError::new_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_text_empty_input_returns_empty() {
+        let lines = wrap_text_impl("", 100.0, "Helvetica", 12.0).unwrap();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn wrap_text_whitespace_only_returns_empty() {
+        let lines = wrap_text_impl("   \t\n  ", 100.0, "Helvetica", 12.0).unwrap();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn wrap_text_short_fits_on_one_line() {
+        let lines = wrap_text_impl("hello world", 200.0, "Helvetica", 12.0).unwrap();
+        assert_eq!(lines, vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn wrap_text_wraps_at_word_boundary() {
+        let lines = wrap_text_impl(
+            "one two three four five six seven eight nine ten",
+            60.0,
+            "Helvetica",
+            12.0,
+        )
+        .unwrap();
+        assert!(lines.len() > 1);
+        for line in &lines {
+            assert!(!line.starts_with(' '));
+            assert!(!line.ends_with(' '));
+        }
+    }
+
+    #[test]
+    fn wrap_text_single_long_word_kept_on_own_line() {
+        let lines = wrap_text_impl(
+            "short verylongunbreakableword more",
+            40.0,
+            "Helvetica",
+            12.0,
+        )
+        .unwrap();
+        // the long word overflows but should still produce a line for it
+        // rather than getting lost.
+        assert!(lines.iter().any(|l| l.contains("verylongunbreakableword")));
+    }
+
+    #[test]
+    fn wrap_text_collapses_multiple_spaces() {
+        let lines = wrap_text_impl("hello    world", 200.0, "Helvetica", 12.0).unwrap();
+        assert_eq!(lines, vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn wrap_text_rejects_unknown_font() {
+        let err = wrap_text_impl("hello", 100.0, "NotAFont", 12.0).unwrap_err();
+        assert!(err.contains("unknown font"));
     }
 }

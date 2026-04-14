@@ -10,10 +10,40 @@ const BLOCK_ELEMENTS: &[&str] = &[
     "article", "section", "nav", "header", "footer", "aside", "main",
 ];
 const SKIP_ELEMENTS: &[&str] = &["head", "title", "style", "script", "meta", "link"];
-const INLINE_BOLD: &[&str] = &["b", "strong"];
-const INLINE_ITALIC: &[&str] = &["i", "em"];
-const INLINE_CODE: &[&str] = &["code", "kbd", "samp"];
 const LIST_ELEMENTS: &[&str] = &["ul", "ol"];
+
+/// Inline tag categories — determines which depth counter and had-style
+/// stack a tag uses during inline-context tracking.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InlineKind {
+    Bold,
+    Italic,
+    Code,
+    Span,
+    Link,
+}
+
+/// Single source of truth for inline tag dispatch. Adding a new inline tag
+/// (e.g. `<mark>`) means one row here, not parallel edits to start/end
+/// handlers and `flush_run`.
+static INLINE_TAGS: &[(&str, InlineKind)] = &[
+    ("b", InlineKind::Bold),
+    ("strong", InlineKind::Bold),
+    ("i", InlineKind::Italic),
+    ("em", InlineKind::Italic),
+    ("code", InlineKind::Code),
+    ("kbd", InlineKind::Code),
+    ("samp", InlineKind::Code),
+    ("span", InlineKind::Span),
+    ("a", InlineKind::Link),
+];
+
+fn lookup_inline(tag: &str) -> Option<InlineKind> {
+    INLINE_TAGS
+        .iter()
+        .find(|(t, _)| *t == tag)
+        .map(|(_, k)| *k)
+}
 const LIST_INDENT: f32 = 36.0;
 const LIST_ITEM_SPACING: f32 = 4.0;
 const MAX_NESTING_DEPTH: usize = 256;
@@ -275,6 +305,40 @@ fn to_roman(n: usize, upper: bool) -> String {
     out
 }
 
+/// Extract src, width, height attributes from an `<img>` element.
+fn extract_img_attrs(handle: &Handle) -> (Option<String>, Option<f32>, Option<f32>) {
+    if let NodeData::Element { attrs, .. } = &handle.data {
+        let attrs = attrs.borrow();
+        let mut src = None;
+        let mut width = None;
+        let mut height = None;
+        for attr in attrs.iter() {
+            match attr.name.local.as_ref() {
+                "src" => {
+                    let v = attr.value.to_string();
+                    if !v.is_empty() {
+                        src = Some(v);
+                    }
+                }
+                "width" => {
+                    if let Ok(v) = attr.value.parse::<f32>() {
+                        width = Some(v);
+                    }
+                }
+                "height" => {
+                    if let Ok(v) = attr.value.parse::<f32>() {
+                        height = Some(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (src, width, height)
+    } else {
+        (None, None, None)
+    }
+}
+
 fn extract_href_attr(handle: &Handle) -> Option<String> {
     if let NodeData::Element { attrs, .. } = &handle.data {
         let attrs = attrs.borrow();
@@ -321,6 +385,10 @@ struct HtmlRenderer<'a> {
     link_had_style: Vec<bool>,
     /// Stack of inherited CSS styles, pushed/popped as we enter/leave DOM elements.
     inherit_stack: Vec<ComputedStyle>,
+    /// Base directory for resolving relative image paths.
+    base_dir: Option<std::path::PathBuf>,
+    /// Non-fatal issues collected during rendering (image load failures, etc.).
+    warnings: Vec<String>,
 }
 
 impl<'a> HtmlRenderer<'a> {
@@ -347,6 +415,8 @@ impl<'a> HtmlRenderer<'a> {
             pending_href: None,
             link_had_style: Vec::new(),
             inherit_stack: Vec::new(),
+            base_dir: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -421,6 +491,14 @@ impl<'a> HtmlRenderer<'a> {
                 if tag == "table" {
                     self.flush();
                     self.build_and_push_table(handle, merged_style);
+                    self.inherit_stack.pop();
+                    return;
+                }
+
+                // Images
+                if tag == "img" {
+                    self.flush();
+                    self.build_and_push_image(handle, merged_style.as_ref());
                     self.inherit_stack.pop();
                     return;
                 }
@@ -500,47 +578,35 @@ impl<'a> HtmlRenderer<'a> {
         } else if tag == "hr" {
             self.flush();
             self.layout.push_hr();
-        } else if tag == "span" {
-            let has_style = inline_style.is_some();
-            if let Some(style) = inline_style {
-                self.flush_run();
-                self.inline_styles.push(style);
-            }
-            self.span_had_style.push(has_style);
-        } else if INLINE_BOLD.contains(&tag) {
+        } else if let Some(kind) = lookup_inline(tag) {
             self.flush_run();
-            self.bold_depth += 1;
-            let has_style = inline_style.is_some();
-            if let Some(style) = inline_style {
-                self.inline_styles.push(style);
-            }
-            self.bold_had_style.push(has_style);
-        } else if INLINE_ITALIC.contains(&tag) {
-            self.flush_run();
-            self.italic_depth += 1;
-            let has_style = inline_style.is_some();
-            if let Some(style) = inline_style {
-                self.inline_styles.push(style);
-            }
-            self.italic_had_style.push(has_style);
-        } else if INLINE_CODE.contains(&tag) {
-            self.flush_run();
-            self.code_depth += 1;
-            let has_style = inline_style.is_some();
-            if let Some(style) = inline_style {
-                self.inline_styles.push(style);
-            }
-            self.code_had_style.push(has_style);
-        } else if tag == "a" {
-            self.flush_run();
-            if let Some(href) = self.pending_href.take() {
-                self.link_stack.push(href);
+            match kind {
+                InlineKind::Bold => self.bold_depth += 1,
+                InlineKind::Italic => self.italic_depth += 1,
+                InlineKind::Code => self.code_depth += 1,
+                InlineKind::Link => {
+                    if let Some(href) = self.pending_href.take() {
+                        self.link_stack.push(href);
+                    }
+                }
+                InlineKind::Span => {}
             }
             let has_style = inline_style.is_some();
             if let Some(style) = inline_style {
                 self.inline_styles.push(style);
             }
-            self.link_had_style.push(has_style);
+            self.had_style_stack(kind).push(has_style);
+        }
+    }
+
+    /// Return the had-style stack for a given inline kind.
+    fn had_style_stack(&mut self, kind: InlineKind) -> &mut Vec<bool> {
+        match kind {
+            InlineKind::Bold => &mut self.bold_had_style,
+            InlineKind::Italic => &mut self.italic_had_style,
+            InlineKind::Code => &mut self.code_had_style,
+            InlineKind::Span => &mut self.span_had_style,
+            InlineKind::Link => &mut self.link_had_style,
         }
     }
 
@@ -557,33 +623,29 @@ impl<'a> HtmlRenderer<'a> {
             }
             self.current_tag = None;
             self.block_style = None;
-        } else if tag == "span" && !self.span_had_style.is_empty() {
-            self.flush_run();
-            if self.span_had_style.pop() == Some(true) {
-                self.inline_styles.pop();
+        } else if let Some(kind) = lookup_inline(tag) {
+            // Only act if the matching stack is non-empty (defensive against
+            // mismatched/extra closing tags).
+            if self.had_style_stack(kind).is_empty() {
+                return;
             }
-        } else if INLINE_BOLD.contains(&tag) && self.bold_depth > 0 {
-            self.flush_run();
-            self.bold_depth -= 1;
-            if self.bold_had_style.pop() == Some(true) {
-                self.inline_styles.pop();
+            match kind {
+                InlineKind::Bold if self.bold_depth == 0 => return,
+                InlineKind::Italic if self.italic_depth == 0 => return,
+                InlineKind::Code if self.code_depth == 0 => return,
+                _ => {}
             }
-        } else if INLINE_ITALIC.contains(&tag) && self.italic_depth > 0 {
             self.flush_run();
-            self.italic_depth -= 1;
-            if self.italic_had_style.pop() == Some(true) {
-                self.inline_styles.pop();
+            match kind {
+                InlineKind::Bold => self.bold_depth -= 1,
+                InlineKind::Italic => self.italic_depth -= 1,
+                InlineKind::Code => self.code_depth -= 1,
+                InlineKind::Link => {
+                    self.link_stack.pop();
+                }
+                InlineKind::Span => {}
             }
-        } else if INLINE_CODE.contains(&tag) && self.code_depth > 0 {
-            self.flush_run();
-            self.code_depth -= 1;
-            if self.code_had_style.pop() == Some(true) {
-                self.inline_styles.pop();
-            }
-        } else if tag == "a" && !self.link_had_style.is_empty() {
-            self.flush_run();
-            self.link_stack.pop();
-            if self.link_had_style.pop() == Some(true) {
+            if self.had_style_stack(kind).pop() == Some(true) {
                 self.inline_styles.pop();
             }
         }
@@ -667,8 +729,7 @@ impl<'a> HtmlRenderer<'a> {
         let text_decoration = effective
             .and_then(|s| s.text_decoration)
             .or_else(|| inherited.and_then(|s| s.text_decoration))
-            .filter(|td| td.underline || td.line_through)
-            .map(|td| (td.underline, td.line_through));
+            .filter(|td| td.underline || td.line_through);
 
         let link_url = self.link_stack.last().cloned();
 
@@ -845,6 +906,92 @@ impl<'a> HtmlRenderer<'a> {
             default_line_height,
         };
         self.layout.push_table(table);
+    }
+
+    fn build_and_push_image(
+        &mut self,
+        img_handle: &Handle,
+        inline_style: Option<&ComputedStyle>,
+    ) {
+        use crate::layout::ImageBlock;
+
+        // Extract src and optional width/height attributes
+        let (src, attr_w, attr_h) = extract_img_attrs(img_handle);
+        let Some(src) = src else {
+            return;
+        };
+
+        // Resolve path relative to base_dir if given, else CWD
+        let path = if let Some(base) = &self.base_dir {
+            base.join(&src)
+        } else {
+            std::path::PathBuf::from(&src)
+        };
+
+        let img_data = match crate::image::load_from_path(&path) {
+            Ok(data) => data,
+            Err(e) => {
+                self.warnings.push(format!("image {src}: {e}"));
+                return;
+            }
+        };
+
+        let intrinsic_w = img_data.width as f32;
+        let intrinsic_h = img_data.height as f32;
+
+        // Resolve display width/height: CSS → attribute → intrinsic
+        let em = 12.0_f32;
+        let css_w = inline_style.and_then(|s| s.padding_left.map(|_| 0.0));
+        let _ = css_w;
+
+        let css_width = inline_style
+            .and_then(|s| {
+                // We don't have dedicated width/height fields on ComputedStyle
+                // yet — layout width is not CSS-driven for images. Use attrs.
+                let _ = s;
+                None::<f32>
+            });
+
+        let width = css_width
+            .or(attr_w)
+            .unwrap_or(intrinsic_w);
+
+        let height = if let Some(h) = attr_h {
+            h
+        } else if let Some(w) = attr_w {
+            // Preserve aspect ratio
+            intrinsic_h * (w / intrinsic_w)
+        } else {
+            intrinsic_h
+        };
+
+        // Store in layout's image vec and get an index
+        let image_index = self.layout.images.len();
+        self.layout.images.push(img_data);
+
+        let mut style = BlockStyle::default();
+        if let Some(s) = inline_style {
+            if let Some(len) = s.margin_top {
+                style.margin_top = len.resolve(em);
+            }
+            if let Some(len) = s.margin_right {
+                style.margin_right = len.resolve(em);
+            }
+            if let Some(len) = s.margin_bottom {
+                style.margin_bottom = len.resolve(em);
+            }
+            if let Some(len) = s.margin_left {
+                style.margin_left = len.resolve(em);
+            }
+        }
+
+        self.layout.push_image(ImageBlock {
+            image_index,
+            width,
+            height,
+            spacing_after: 6.0,
+            style,
+        });
     }
 
     // ── CSS application helpers ─────────────────────────────
@@ -1128,16 +1275,30 @@ fn collect_cell_text(
     }
 }
 
+/// Result of rendering a DOM: page style from `@page`, plus any non-fatal
+/// warnings produced along the way (e.g. image load failures).
+pub struct RenderOutcome {
+    pub page_style: css::PageStyle,
+    pub warnings: Vec<String>,
+}
+
 /// Walk an html5ever DOM and produce paragraphs into a `LayoutInner`.
-/// Returns the `PageStyle` extracted from any `@page` CSS rule.
-pub fn render_dom_to_layout(document: &Handle, layout: &mut LayoutInner) -> css::PageStyle {
+pub fn render_dom_to_layout(
+    document: &Handle,
+    layout: &mut LayoutInner,
+    base_dir: Option<&std::path::Path>,
+) -> RenderOutcome {
     let css_text = extract_style_blocks(document);
     let stylesheet = css::parse_stylesheet(&css_text);
     let page_style = stylesheet.page_style.clone();
     let mut renderer = HtmlRenderer::new(layout, stylesheet);
+    renderer.base_dir = base_dir.map(std::path::Path::to_path_buf);
     renderer.walk_node(document, 0);
     renderer.flush();
-    page_style
+    RenderOutcome {
+        page_style,
+        warnings: renderer.warnings,
+    }
 }
 
 /// Extract the text content of the first `<title>` element in the DOM.

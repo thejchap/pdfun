@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use pdf_writer::types::{ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap};
-use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str};
+use pdf_writer::{Content, Filter, Name, Pdf, Rect, Ref, Str};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -15,6 +15,7 @@ mod css;
 mod dom;
 mod font_metrics;
 mod html_render;
+mod image;
 mod layout;
 
 // ── Built-in PDF fonts ─────────────────────────────────────────
@@ -60,6 +61,14 @@ pub(crate) enum PdfOp {
     RestoreState,
     SetDashPattern { array: Vec<f32>, phase: f32 },
     SetWordSpacing(f32),
+    /// Draw image #index at (x, y) with given width/height (points).
+    DrawImage {
+        index: usize,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
 }
 
 pub(crate) struct LinkAnnotation {
@@ -78,6 +87,8 @@ pub(crate) struct PageContent {
     pub(crate) current_font: Option<String>,
     pub(crate) current_font_size: Option<f32>,
     pub(crate) links: Vec<LinkAnnotation>,
+    /// Indices into `PdfDocument::images` of images used on this page.
+    pub(crate) images_used: Vec<usize>,
 }
 
 impl PageContent {
@@ -90,6 +101,7 @@ impl PageContent {
             current_font: None,
             current_font_size: None,
             links: Vec::new(),
+            images_used: Vec::new(),
         }
     }
 }
@@ -117,17 +129,377 @@ struct RegisteredFont {
     name: String, // e.g. "Custom-0"
 }
 
+// ── Indirect-ref allocator ─────────────────────────────────────
+
+struct RefAllocator(i32);
+
+impl RefAllocator {
+    fn new() -> Self { Self(1) }
+    fn alloc(&mut self) -> Ref {
+        let r = Ref::new(self.0);
+        self.0 += 1;
+        r
+    }
+}
+
+// ── Font bookkeeping for a single to_bytes() call ─────────────
+
+struct FontRefs {
+    name: String,
+    type0_ref: Ref,
+    cid_font_ref: Option<Ref>,
+    font_descriptor_ref: Option<Ref>,
+    font_file_ref: Option<Ref>,
+    tounicode_ref: Option<Ref>,
+}
+
+struct CustomFontData {
+    subset_data: Vec<u8>,
+    char_to_new_gid: BTreeMap<char, u16>,
+    gid_widths: BTreeMap<u16, f32>,
+    ascent: f32,
+    descent: f32,
+    cap_height: f32,
+    bbox: Rect,
+    family: String,
+}
+
+/// Walk every page's ops and collect (custom font name → chars used).
+fn collect_font_chars(pages: &[Arc<Mutex<PageContent>>]) -> BTreeMap<String, Vec<char>> {
+    let mut out: BTreeMap<String, Vec<char>> = BTreeMap::new();
+    for page_arc in pages {
+        let page = page_arc.lock().unwrap();
+        let mut current: Option<String> = None;
+        for op in &page.operations {
+            match op {
+                PdfOp::SetFont { name, .. } => current = Some(name.clone()),
+                PdfOp::ShowGlyphs(chars) => {
+                    if let Some(ref fname) = current {
+                        out.entry(fname.clone()).or_default().extend(chars);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// For each registered custom font used on some page, parse the TTF,
+/// subset it down to the required glyphs, and extract metrics.
+fn build_custom_font_data(
+    registered: &[RegisteredFont],
+    font_chars: &BTreeMap<String, Vec<char>>,
+) -> PyResult<BTreeMap<String, CustomFontData>> {
+    let mut out: BTreeMap<String, CustomFontData> = BTreeMap::new();
+
+    for rf in registered {
+        let Some(chars) = font_chars.get(&rf.name) else {
+            continue;
+        };
+
+        let face = ttf_parser::Face::parse(&rf.data, 0).map_err(|e| {
+            PyValueError::new_err(format!("failed to parse font for embedding: {e}"))
+        })?;
+
+        let units_per_em = f32::from(face.units_per_em());
+
+        let mut remapper = subsetter::GlyphRemapper::new();
+        let mut char_to_old_gid: BTreeMap<char, u16> = BTreeMap::new();
+
+        for &ch in chars {
+            if let Some(gid) = face.glyph_index(ch) {
+                let old_gid = gid.0;
+                remapper.remap(old_gid);
+                char_to_old_gid.insert(ch, old_gid);
+            }
+        }
+
+        let subset_data = subsetter::subset(&rf.data, 0, &remapper)
+            .unwrap_or_else(|_| rf.data.clone());
+
+        let mut char_to_new_gid: BTreeMap<char, u16> = BTreeMap::new();
+        let mut gid_widths: BTreeMap<u16, f32> = BTreeMap::new();
+
+        for (&ch, &old_gid) in &char_to_old_gid {
+            if let Some(new_gid) = remapper.get(old_gid) {
+                char_to_new_gid.insert(ch, new_gid);
+                let width = f32::from(
+                    face.glyph_hor_advance(ttf_parser::GlyphId(old_gid))
+                        .unwrap_or(0),
+                );
+                let scaled_width = width * 1000.0 / units_per_em;
+                gid_widths.insert(new_gid, scaled_width);
+            }
+        }
+
+        let ascent = f32::from(face.ascender()) * 1000.0 / units_per_em;
+        let descent = f32::from(face.descender()) * 1000.0 / units_per_em;
+        let cap_height = f32::from(face.capital_height().unwrap_or(face.ascender())) * 1000.0
+            / units_per_em;
+        let global_bbox = face.global_bounding_box();
+        let bbox = Rect::new(
+            f32::from(global_bbox.x_min) * 1000.0 / units_per_em,
+            f32::from(global_bbox.y_min) * 1000.0 / units_per_em,
+            f32::from(global_bbox.x_max) * 1000.0 / units_per_em,
+            f32::from(global_bbox.y_max) * 1000.0 / units_per_em,
+        );
+
+        out.insert(
+            rf.name.clone(),
+            CustomFontData {
+                subset_data,
+                char_to_new_gid,
+                gid_widths,
+                ascent,
+                descent,
+                cap_height,
+                bbox,
+                family: rf.family.clone(),
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+/// Emit the PDF content stream for a single page, walking its `PdfOp`s.
+fn write_page_content_stream(
+    page: &PageContent,
+    font_refs: &[FontRefs],
+    custom_data: &BTreeMap<String, CustomFontData>,
+) -> Vec<u8> {
+    let mut content = Content::new();
+    let mut current_font_name: Option<String> = None;
+
+    for op in &page.operations {
+        match op {
+            PdfOp::BeginText => {
+                content.begin_text();
+            }
+            PdfOp::EndText => {
+                content.end_text();
+            }
+            PdfOp::SetFont { name, size } => {
+                current_font_name = Some(name.clone());
+                let idx = font_refs
+                    .iter()
+                    .position(|fr| fr.name == *name)
+                    .unwrap_or(0);
+                let resource_name = format!("F{}", idx + 1);
+                content.set_font(Name(resource_name.as_bytes()), *size);
+            }
+            PdfOp::SetTextPosition { x, y } => {
+                content.next_line(*x, *y);
+            }
+            PdfOp::ShowText(text) => {
+                let escaped = pdf_escape(text);
+                content.show(Str(&escaped));
+            }
+            PdfOp::ShowGlyphs(chars) => {
+                if let Some(ref fname) = current_font_name
+                    && let Some(cfd) = custom_data.get(fname)
+                {
+                    let mut bytes = Vec::with_capacity(chars.len() * 2);
+                    for &ch in chars {
+                        let gid = cfd.char_to_new_gid.get(&ch).copied().unwrap_or(0);
+                        bytes.push((gid >> 8) as u8);
+                        bytes.push((gid & 0xff) as u8);
+                    }
+                    content.show(Str(&bytes));
+                }
+            }
+            PdfOp::SetFillColor { r, g, b } => {
+                content.set_fill_rgb(*r, *g, *b);
+            }
+            PdfOp::SetStrokeColor { r, g, b } => {
+                content.set_stroke_rgb(*r, *g, *b);
+            }
+            PdfOp::SetLineWidth(w) => {
+                content.set_line_width(*w);
+            }
+            PdfOp::Rectangle { x, y, width, height } => {
+                content.rect(*x, *y, *width, *height);
+            }
+            PdfOp::MoveTo { x, y } => {
+                content.move_to(*x, *y);
+            }
+            PdfOp::LineTo { x, y } => {
+                content.line_to(*x, *y);
+            }
+            PdfOp::Stroke => {
+                content.stroke();
+            }
+            PdfOp::Fill => {
+                content.fill_nonzero();
+            }
+            PdfOp::FillAndStroke => {
+                content.fill_nonzero_and_stroke();
+            }
+            PdfOp::SaveState => {
+                content.save_state();
+            }
+            PdfOp::RestoreState => {
+                content.restore_state();
+            }
+            PdfOp::SetDashPattern { array, phase } => {
+                content.set_dash_pattern(array.iter().copied(), *phase);
+            }
+            PdfOp::SetWordSpacing(spacing) => {
+                content.set_word_spacing(*spacing);
+            }
+            PdfOp::DrawImage { index, x, y, width, height } => {
+                let resource_name = format!("Im{index}");
+                content.save_state();
+                content.transform([*width, 0.0, 0.0, *height, *x, *y]);
+                content.x_object(Name(resource_name.as_bytes()));
+                content.restore_state();
+            }
+        }
+    }
+
+    content.finish().to_vec()
+}
+
+/// Write PDF image XObjects for every image and its optional alpha SMask.
+fn write_image_xobjects(
+    pdf: &mut Pdf,
+    images: &[image::ImageData],
+    image_refs: &[(Ref, Option<Ref>)],
+) {
+    for (idx, img) in images.iter().enumerate() {
+        let (main_ref, smask_ref) = image_refs[idx];
+
+        {
+            let mut xobj = pdf.image_xobject(main_ref, &img.data);
+            xobj.width(img.width as i32);
+            xobj.height(img.height as i32);
+            xobj.bits_per_component(i32::from(img.bits_per_component));
+            match img.color_space {
+                image::ImageColorSpace::DeviceGray => {
+                    xobj.color_space().device_gray();
+                }
+                image::ImageColorSpace::DeviceRgb => {
+                    xobj.color_space().device_rgb();
+                }
+            }
+            match img.filter {
+                image::ImageFilter::Dct => {
+                    xobj.filter(Filter::DctDecode);
+                }
+                image::ImageFilter::Flate => {
+                    xobj.filter(Filter::FlateDecode);
+                }
+                image::ImageFilter::None => {}
+            }
+            if let Some(smask) = smask_ref {
+                xobj.s_mask(smask);
+            }
+        }
+
+        if let (Some(smask), Some(alpha)) = (smask_ref, img.alpha_mask.as_ref()) {
+            let mut smask_obj = pdf.image_xobject(smask, &alpha.data);
+            smask_obj.width(alpha.width as i32);
+            smask_obj.height(alpha.height as i32);
+            smask_obj.bits_per_component(i32::from(alpha.bits_per_component));
+            smask_obj.color_space().device_gray();
+            if matches!(alpha.filter, image::ImageFilter::Flate) {
+                smask_obj.filter(Filter::FlateDecode);
+            }
+        }
+    }
+}
+
+/// Write all font objects: Type1 for the 14 built-ins, Type0/CIDFont2
+/// for every embedded custom font (with descriptor, font file, ToUnicode).
+fn write_font_objects(
+    pdf: &mut Pdf,
+    font_refs: &[FontRefs],
+    custom_data: &BTreeMap<String, CustomFontData>,
+) {
+    for fr in font_refs {
+        if fr.name.starts_with("Custom-") {
+            let Some(cfd) = custom_data.get(&fr.name) else {
+                continue;
+            };
+            let cid_font_ref = fr.cid_font_ref.unwrap();
+            let font_descriptor_ref = fr.font_descriptor_ref.unwrap();
+            let font_file_ref = fr.font_file_ref.unwrap();
+            let tounicode_ref = fr.tounicode_ref.unwrap();
+
+            let base_font_name = cfd.family.replace(' ', "-");
+
+            pdf.type0_font(fr.type0_ref)
+                .base_font(Name(base_font_name.as_bytes()))
+                .encoding_predefined(Name(b"Identity-H"))
+                .descendant_font(cid_font_ref)
+                .to_unicode(tounicode_ref);
+
+            {
+                let mut cid = pdf.cid_font(cid_font_ref);
+                cid.subtype(CidFontType::Type2)
+                    .base_font(Name(base_font_name.as_bytes()))
+                    .system_info(SystemInfo {
+                        registry: Str(b"Adobe"),
+                        ordering: Str(b"Identity"),
+                        supplement: 0,
+                    })
+                    .font_descriptor(font_descriptor_ref)
+                    .cid_to_gid_map_predefined(Name(b"Identity"));
+
+                let mut widths = cid.widths();
+                for (&gid, &w) in &cfd.gid_widths {
+                    widths.consecutive(gid, [w]);
+                }
+            }
+
+            pdf.font_descriptor(font_descriptor_ref)
+                .name(Name(base_font_name.as_bytes()))
+                .flags(FontFlags::NON_SYMBOLIC)
+                .bbox(cfd.bbox)
+                .italic_angle(0.0)
+                .ascent(cfd.ascent)
+                .descent(cfd.descent)
+                .cap_height(cfd.cap_height)
+                .stem_v(80.0)
+                .font_file2(font_file_ref);
+
+            pdf.stream(font_file_ref, &cfd.subset_data);
+
+            let sys_info = SystemInfo {
+                registry: Str(b"Adobe"),
+                ordering: Str(b"Identity"),
+                supplement: 0,
+            };
+            let mut cmap = UnicodeCmap::new(Name(b"Custom"), sys_info);
+            for (&ch, &new_gid) in &cfd.char_to_new_gid {
+                cmap.pair(new_gid, ch);
+            }
+            let cmap_data = cmap.finish();
+            pdf.stream(tounicode_ref, cmap_data.as_slice());
+        } else {
+            pdf.type1_font(fr.type0_ref)
+                .base_font(Name(fr.name.as_bytes()));
+        }
+    }
+}
+
 // ── PdfDocument ────────────────────────────────────────────────
 
 #[pyclass]
 pub(crate) struct PdfDocument {
     pub(crate) pages: Vec<Arc<Mutex<PageContent>>>,
     registered_fonts: Vec<RegisteredFont>,
+    pub(crate) images: Vec<image::ImageData>,
     pub(crate) title: Option<String>,
     pub(crate) author: Option<String>,
     pub(crate) subject: Option<String>,
     pub(crate) keywords: Option<String>,
     pub(crate) creator: Option<String>,
+    /// Non-fatal diagnostics collected during rendering — e.g. image
+    /// load failures. Exposed to Python so callers can decide whether
+    /// to surface them to end users.
+    pub(crate) warnings: Vec<String>,
 }
 
 #[pymethods]
@@ -137,12 +509,20 @@ impl PdfDocument {
         Ok(PdfDocument {
             pages: Vec::new(),
             registered_fonts: Vec::new(),
+            images: Vec::new(),
             title: None,
             author: None,
             subject: None,
             keywords: None,
             creator: Some("pdfun".to_string()),
+            warnings: Vec::new(),
         })
+    }
+
+    /// Non-fatal diagnostics from rendering (e.g. image load failures).
+    #[getter]
+    fn warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 
     fn set_title(&mut self, title: &str) -> PyResult<()> {
@@ -172,24 +552,20 @@ impl PdfDocument {
         Ok(Page { content })
     }
 
-    #[allow(clippy::too_many_lines)]
-    #[allow(clippy::items_after_statements)]
     fn to_bytes(&self) -> PyResult<Vec<u8>> {
         let mut pdf = Pdf::new();
-        let mut next_id = 1;
-        let mut alloc = || {
-            let id = Ref::new(next_id);
-            next_id += 1;
-            id
-        };
+        let mut allocator = RefAllocator::new();
 
-        let catalog_id = alloc();
-        let page_tree_id = alloc();
+        let catalog_id = allocator.alloc();
+        let page_tree_id = allocator.alloc();
 
-        // pre-allocate refs for each page (page obj + content stream)
-        let page_refs: Vec<(Ref, Ref)> = self.pages.iter().map(|_| (alloc(), alloc())).collect();
+        let page_refs: Vec<(Ref, Ref)> = self
+            .pages
+            .iter()
+            .map(|_| (allocator.alloc(), allocator.alloc()))
+            .collect();
 
-        // collect all unique font names across all pages
+        // Collect unique fonts used across all pages and allocate per-font refs.
         let mut all_fonts: Vec<String> = Vec::new();
         for page_arc in &self.pages {
             let page = page_arc.lock().unwrap();
@@ -200,157 +576,45 @@ impl PdfDocument {
             }
         }
 
-        // allocate font refs: builtin fonts get 1 ref, custom fonts get 5
-        // (type0, cid_font, font_descriptor, font_file, tounicode)
-        struct FontRefs {
-            name: String,
-            type0_ref: Ref,
-            cid_font_ref: Option<Ref>,
-            font_descriptor_ref: Option<Ref>,
-            font_file_ref: Option<Ref>,
-            tounicode_ref: Option<Ref>,
-        }
-
         let font_refs: Vec<FontRefs> = all_fonts
             .iter()
             .map(|name| {
                 let is_custom = name.starts_with("Custom-");
-                let type0_ref = alloc();
                 FontRefs {
                     name: name.clone(),
-                    type0_ref,
-                    cid_font_ref: if is_custom { Some(alloc()) } else { None },
-                    font_descriptor_ref: if is_custom { Some(alloc()) } else { None },
-                    font_file_ref: if is_custom { Some(alloc()) } else { None },
-                    tounicode_ref: if is_custom { Some(alloc()) } else { None },
+                    type0_ref: allocator.alloc(),
+                    cid_font_ref: is_custom.then(|| allocator.alloc()),
+                    font_descriptor_ref: is_custom.then(|| allocator.alloc()),
+                    font_file_ref: is_custom.then(|| allocator.alloc()),
+                    tounicode_ref: is_custom.then(|| allocator.alloc()),
                 }
             })
             .collect();
 
-        // for custom fonts, parse face data and collect glyph info from all pages
-        // key: custom font name -> (RegisteredFont index, collected chars)
-        let mut custom_font_chars: BTreeMap<String, Vec<char>> = BTreeMap::new();
-        for page_arc in &self.pages {
-            let page = page_arc.lock().unwrap();
-            let mut current_font_name: Option<String> = None;
-            for op in &page.operations {
-                match op {
-                    PdfOp::SetFont { name, .. } => {
-                        current_font_name = Some(name.clone());
-                    }
-                    PdfOp::ShowGlyphs(chars) => {
-                        if let Some(ref fname) = current_font_name {
-                            custom_font_chars
-                                .entry(fname.clone())
-                                .or_default()
-                                .extend(chars);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let image_refs: Vec<(Ref, Option<Ref>)> = self
+            .images
+            .iter()
+            .map(|img| {
+                let main = allocator.alloc();
+                let smask = img.alpha_mask.as_ref().map(|_| allocator.alloc());
+                (main, smask)
+            })
+            .collect();
 
-        // build glyph mappings for each custom font
-        // font_name -> (face, remapper, subset_data, gid_map: char -> new_gid, widths: new_gid -> width)
-        struct CustomFontData {
-            subset_data: Vec<u8>,
-            // char -> new glyph id
-            char_to_new_gid: BTreeMap<char, u16>,
-            // new_gid -> width (1000-unit scale)
-            gid_widths: BTreeMap<u16, f32>,
-            // font metrics (1000-unit scale)
-            ascent: f32,
-            descent: f32,
-            cap_height: f32,
-            bbox: Rect,
-            family: String,
-        }
+        // Subset custom fonts based on glyphs used across all pages.
+        let custom_font_chars = collect_font_chars(&self.pages);
+        let custom_data = build_custom_font_data(&self.registered_fonts, &custom_font_chars)?;
 
-        let mut custom_data: BTreeMap<String, CustomFontData> = BTreeMap::new();
-
-        for rf in &self.registered_fonts {
-            let Some(chars) = custom_font_chars.get(&rf.name) else {
-                continue;
-            };
-
-            let face = ttf_parser::Face::parse(&rf.data, 0).map_err(|e| {
-                PyValueError::new_err(format!("failed to parse font for embedding: {e}"))
-            })?;
-
-            let units_per_em = f32::from(face.units_per_em());
-
-            // build glyph remapper
-            let mut remapper = subsetter::GlyphRemapper::new();
-            let mut char_to_old_gid: BTreeMap<char, u16> = BTreeMap::new();
-
-            for &ch in chars {
-                if let Some(gid) = face.glyph_index(ch) {
-                    let old_gid = gid.0;
-                    remapper.remap(old_gid);
-                    char_to_old_gid.insert(ch, old_gid);
-                }
-            }
-
-            // subset the font (fall back to full data if subsetting fails)
-            let subset_data = subsetter::subset(&rf.data, 0, &remapper)
-                .unwrap_or_else(|_| rf.data.clone());
-
-            // build char -> new_gid mapping and gid -> width
-            let mut char_to_new_gid: BTreeMap<char, u16> = BTreeMap::new();
-            let mut gid_widths: BTreeMap<u16, f32> = BTreeMap::new();
-
-            for (&ch, &old_gid) in &char_to_old_gid {
-                if let Some(new_gid) = remapper.get(old_gid) {
-                    char_to_new_gid.insert(ch, new_gid);
-                    let width = f32::from(
-                        face.glyph_hor_advance(ttf_parser::GlyphId(old_gid))
-                            .unwrap_or(0),
-                    );
-                    // convert to 1000-unit scale
-                    let scaled_width = width * 1000.0 / units_per_em;
-                    gid_widths.insert(new_gid, scaled_width);
-                }
-            }
-
-            let ascent = f32::from(face.ascender()) * 1000.0 / units_per_em;
-            let descent = f32::from(face.descender()) * 1000.0 / units_per_em;
-            let cap_height = f32::from(face.capital_height().unwrap_or(face.ascender())) * 1000.0
-                / units_per_em;
-            let global_bbox = face.global_bounding_box();
-            let bbox = Rect::new(
-                f32::from(global_bbox.x_min) * 1000.0 / units_per_em,
-                f32::from(global_bbox.y_min) * 1000.0 / units_per_em,
-                f32::from(global_bbox.x_max) * 1000.0 / units_per_em,
-                f32::from(global_bbox.y_max) * 1000.0 / units_per_em,
-            );
-
-            custom_data.insert(
-                rf.name.clone(),
-                CustomFontData {
-                    subset_data,
-                    char_to_new_gid,
-                    gid_widths,
-                    ascent,
-                    descent,
-                    cap_height,
-                    bbox,
-                    family: rf.family.clone(),
-                },
-            );
-        }
-
-        // write catalog
+        // Catalog and document metadata.
         pdf.catalog(catalog_id).pages(page_tree_id);
 
-        // write document metadata
         let has_info = self.title.is_some()
             || self.author.is_some()
             || self.subject.is_some()
             || self.keywords.is_some()
             || self.creator.is_some();
         if has_info {
-            let info_id = alloc();
+            let info_id = allocator.alloc();
             let mut info = pdf.document_info(info_id);
             if let Some(ref title) = self.title {
                 info.title(pdf_writer::TextStr(title));
@@ -369,107 +633,20 @@ impl PdfDocument {
             }
         }
 
-        // write page tree
+        // Page tree.
         let page_ids: Vec<Ref> = page_refs.iter().map(|(pid, _)| *pid).collect();
         pdf.pages(page_tree_id)
             .kids(page_ids)
             .count(self.pages.len() as i32);
 
-        // write each page
+        // Per-page content streams, resource dicts, and annotation objects.
         for (i, page_arc) in self.pages.iter().enumerate() {
             let page = page_arc.lock().unwrap();
             let (page_id, content_id) = page_refs[i];
 
-            // build content stream
-            let mut content = Content::new();
-            let mut current_font_name: Option<String> = None;
+            let content_bytes = write_page_content_stream(&page, &font_refs, &custom_data);
+            let annot_refs: Vec<Ref> = page.links.iter().map(|_| allocator.alloc()).collect();
 
-            for op in &page.operations {
-                match op {
-                    PdfOp::BeginText => {
-                        content.begin_text();
-                    }
-                    PdfOp::EndText => {
-                        content.end_text();
-                    }
-                    PdfOp::SetFont { name, size } => {
-                        current_font_name = Some(name.clone());
-                        let idx = font_refs
-                            .iter()
-                            .position(|fr| fr.name == *name)
-                            .unwrap_or(0);
-                        let resource_name = format!("F{}", idx + 1);
-                        content.set_font(Name(resource_name.as_bytes()), *size);
-                    }
-                    PdfOp::SetTextPosition { x, y } => {
-                        content.next_line(*x, *y);
-                    }
-                    PdfOp::ShowText(text) => {
-                        let escaped = pdf_escape(text);
-                        content.show(Str(&escaped));
-                    }
-                    PdfOp::ShowGlyphs(chars) => {
-                        // resolve glyph ids using the custom font data
-                        if let Some(ref fname) = current_font_name
-                            && let Some(cfd) = custom_data.get(fname)
-                        {
-                            let mut bytes = Vec::with_capacity(chars.len() * 2);
-                            for &ch in chars {
-                                let gid = cfd.char_to_new_gid.get(&ch).copied().unwrap_or(0);
-                                bytes.push((gid >> 8) as u8);
-                                bytes.push((gid & 0xff) as u8);
-                            }
-                            content.show(Str(&bytes));
-                        }
-                    }
-                    PdfOp::SetFillColor { r, g, b } => {
-                        content.set_fill_rgb(*r, *g, *b);
-                    }
-                    PdfOp::SetStrokeColor { r, g, b } => {
-                        content.set_stroke_rgb(*r, *g, *b);
-                    }
-                    PdfOp::SetLineWidth(w) => {
-                        content.set_line_width(*w);
-                    }
-                    PdfOp::Rectangle { x, y, width, height } => {
-                        content.rect(*x, *y, *width, *height);
-                    }
-                    PdfOp::MoveTo { x, y } => {
-                        content.move_to(*x, *y);
-                    }
-                    PdfOp::LineTo { x, y } => {
-                        content.line_to(*x, *y);
-                    }
-                    PdfOp::Stroke => {
-                        content.stroke();
-                    }
-                    PdfOp::Fill => {
-                        content.fill_nonzero();
-                    }
-                    PdfOp::FillAndStroke => {
-                        content.fill_nonzero_and_stroke();
-                    }
-                    PdfOp::SaveState => {
-                        content.save_state();
-                    }
-                    PdfOp::RestoreState => {
-                        content.restore_state();
-                    }
-                    PdfOp::SetDashPattern { array, phase } => {
-                        content.set_dash_pattern(array.iter().copied(), *phase);
-                    }
-                    PdfOp::SetWordSpacing(spacing) => {
-                        content.set_word_spacing(*spacing);
-                    }
-                }
-            }
-
-            let content_bytes = content.finish();
-
-            // pre-allocate refs for link annotations on this page
-            let annot_refs: Vec<Ref> = page.links.iter().map(|_| alloc()).collect();
-
-            // write page object
             {
                 let mut page_writer = pdf.page(page_id);
                 page_writer
@@ -482,14 +659,23 @@ impl PdfDocument {
                 }
 
                 let mut resources = page_writer.resources();
-                let mut fonts_dict = resources.fonts();
-                for (idx, fr) in font_refs.iter().enumerate() {
-                    let resource_name = format!("F{}", idx + 1);
-                    fonts_dict.pair(Name(resource_name.as_bytes()), fr.type0_ref);
+                {
+                    let mut fonts_dict = resources.fonts();
+                    for (idx, fr) in font_refs.iter().enumerate() {
+                        let resource_name = format!("F{}", idx + 1);
+                        fonts_dict.pair(Name(resource_name.as_bytes()), fr.type0_ref);
+                    }
+                }
+                if !page.images_used.is_empty() {
+                    let mut xobjects = resources.x_objects();
+                    for &img_idx in &page.images_used {
+                        let resource_name = format!("Im{img_idx}");
+                        xobjects
+                            .pair(Name(resource_name.as_bytes()), image_refs[img_idx].0);
+                    }
                 }
             }
 
-            // write link annotation objects
             for (annot_ref, link) in annot_refs.iter().zip(page.links.iter()) {
                 let rect = Rect::new(
                     link.x,
@@ -508,84 +694,11 @@ impl PdfDocument {
                     .uri(Str(link.url.as_bytes()));
             }
 
-            // write content stream
             pdf.stream(content_id, &content_bytes);
         }
 
-        // write font objects
-        for fr in &font_refs {
-            if fr.name.starts_with("Custom-") {
-                // composite font
-                if let Some(cfd) = custom_data.get(&fr.name) {
-                    let cid_font_ref = fr.cid_font_ref.unwrap();
-                    let font_descriptor_ref = fr.font_descriptor_ref.unwrap();
-                    let font_file_ref = fr.font_file_ref.unwrap();
-                    let tounicode_ref = fr.tounicode_ref.unwrap();
-
-                    // sanitize family name for PDF (replace spaces with hyphens)
-                    let base_font_name = cfd.family.replace(' ', "-");
-
-                    // write type0 font
-                    pdf.type0_font(fr.type0_ref)
-                        .base_font(Name(base_font_name.as_bytes()))
-                        .encoding_predefined(Name(b"Identity-H"))
-                        .descendant_font(cid_font_ref)
-                        .to_unicode(tounicode_ref);
-
-                    // write cid font
-                    {
-                        let mut cid = pdf.cid_font(cid_font_ref);
-                        cid.subtype(CidFontType::Type2)
-                            .base_font(Name(base_font_name.as_bytes()))
-                            .system_info(SystemInfo {
-                                registry: Str(b"Adobe"),
-                                ordering: Str(b"Identity"),
-                                supplement: 0,
-                            })
-                            .font_descriptor(font_descriptor_ref)
-                            .cid_to_gid_map_predefined(Name(b"Identity"));
-
-                        // write /W widths array
-                        let mut widths = cid.widths();
-                        for (&gid, &w) in &cfd.gid_widths {
-                            widths.consecutive(gid, [w]);
-                        }
-                    }
-
-                    // write font descriptor
-                    pdf.font_descriptor(font_descriptor_ref)
-                        .name(Name(base_font_name.as_bytes()))
-                        .flags(FontFlags::NON_SYMBOLIC)
-                        .bbox(cfd.bbox)
-                        .italic_angle(0.0)
-                        .ascent(cfd.ascent)
-                        .descent(cfd.descent)
-                        .cap_height(cfd.cap_height)
-                        .stem_v(80.0)
-                        .font_file2(font_file_ref);
-
-                    // write font file stream (subset data)
-                    pdf.stream(font_file_ref, &cfd.subset_data);
-
-                    // write tounicode cmap
-                    let sys_info = SystemInfo {
-                        registry: Str(b"Adobe"),
-                        ordering: Str(b"Identity"),
-                        supplement: 0,
-                    };
-                    let mut cmap = UnicodeCmap::new(Name(b"Custom"), sys_info);
-                    for (&ch, &new_gid) in &cfd.char_to_new_gid {
-                        cmap.pair(new_gid, ch);
-                    }
-                    let cmap_data = cmap.finish();
-                    pdf.stream(tounicode_ref, cmap_data.as_slice());
-                }
-            } else {
-                // builtin font
-                pdf.type1_font(fr.type0_ref)
-                    .base_font(Name(fr.name.as_bytes()));
-            }
-        }
+        write_image_xobjects(&mut pdf, &self.images, &image_refs);
+        write_font_objects(&mut pdf, &font_refs, &custom_data);
 
         Ok(pdf.finish())
     }
@@ -930,7 +1043,7 @@ impl FontDatabase {
 
 /// Render HTML to a PDF document (called from Python `HtmlDocument`).
 #[pyfunction]
-#[pyo3(signature = (html, margin_top=72.0, margin_right=72.0, margin_bottom=72.0, margin_left=72.0, page_width=612.0, page_height=792.0))]
+#[pyo3(signature = (html, margin_top=72.0, margin_right=72.0, margin_bottom=72.0, margin_left=72.0, page_width=612.0, page_height=792.0, base_url=None))]
 #[allow(clippy::too_many_arguments)]
 fn html_to_pdf(
     html: &str,
@@ -940,17 +1053,20 @@ fn html_to_pdf(
     margin_left: f64,
     page_width: f64,
     page_height: f64,
+    base_url: Option<&str>,
 ) -> PyResult<PdfDocument> {
     let parsed = dom::parse_html(html);
     let title = html_render::extract_title(&parsed.document);
     let mut doc = PdfDocument {
         pages: Vec::new(),
         registered_fonts: Vec::new(),
+        images: Vec::new(),
         title,
         author: None,
         subject: None,
         keywords: None,
         creator: Some("pdfun".to_string()),
+        warnings: Vec::new(),
     };
     let mut inner = layout::LayoutInner::new(
         margin_top as f32,
@@ -960,7 +1076,14 @@ fn html_to_pdf(
         page_width as f32,
         page_height as f32,
     );
-    let page_style = html_render::render_dom_to_layout(&parsed.document, &mut inner);
+    let base_path = base_url.map(std::path::PathBuf::from);
+    let outcome = html_render::render_dom_to_layout(
+        &parsed.document,
+        &mut inner,
+        base_path.as_deref(),
+    );
+    let page_style = outcome.page_style;
+    doc.warnings.extend(outcome.warnings);
 
     // Apply @page CSS overrides
     if let Some(w) = page_style.width {
@@ -983,6 +1106,8 @@ fn html_to_pdf(
     }
 
     inner.finish(&mut doc).map_err(PyValueError::new_err)?;
+    // Transfer any images collected during rendering to the document
+    doc.images.append(&mut inner.images);
     Ok(doc)
 }
 
