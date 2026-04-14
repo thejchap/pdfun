@@ -79,6 +79,26 @@ pub struct BlockStyle {
     pub text_align: TextAlign,
     pub page_break_before: Option<css::PageBreak>,
     pub page_break_after: Option<css::PageBreak>,
+    /// Resolved content-box sizing constraints in PDF points. `None` means
+    /// "auto" / "no constraint". These are applied when computing the
+    /// content width of a block in `render_paragraph_block`.
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub min_width: Option<f32>,
+    pub min_height: Option<f32>,
+    pub max_width: Option<f32>,
+    pub max_height: Option<f32>,
+    /// Extra per-character space in points (CSS `letter-spacing`). Added
+    /// after every glyph, including the last — matches PDF `Tc` semantics.
+    pub letter_spacing: f32,
+    /// Extra space between words in points (CSS `word-spacing`). Applied
+    /// on top of the space character's natural width, and on top of any
+    /// justification widening.
+    pub word_spacing: f32,
+    /// CSS `box-sizing`. Default is `ContentBox`, where `width`/`height`
+    /// refer to the content area; `BorderBox` makes them include padding
+    /// and border.
+    pub box_sizing: css::BoxSizing,
 }
 
 impl BlockStyle {
@@ -214,14 +234,23 @@ struct WrappedLine {
     max_font_size: f32,
 }
 
+/// Extra per-line spacing applied during wrapping. `letter_spacing` is
+/// added after every glyph, `word_spacing` after every space.
+#[derive(Clone, Copy, Default)]
+struct SpacingOpts {
+    letter_spacing: f32,
+    word_spacing: f32,
+}
+
 /// Wrap a sequence of `TextRun`s into lines that fit within `max_width`.
 fn wrap_runs_impl(
     runs: &[TextRun],
     max_width: f32,
     preserve_whitespace: bool,
+    spacing: SpacingOpts,
 ) -> Result<Vec<WrappedLine>, String> {
     if preserve_whitespace {
-        return wrap_runs_preformatted(runs);
+        return wrap_runs_preformatted(runs, spacing);
     }
 
     // Phase 1: flatten runs into styled words
@@ -249,15 +278,21 @@ fn wrap_runs_impl(
     let mut current_width: f32 = 0.0;
 
     for word in words {
-        let word_width = font_metrics::measure_str(&word.text, &word.font_name, word.font_size)
-            .ok_or_else(|| format!("unknown font: {}", word.font_name))?;
+        let base_word_width =
+            font_metrics::measure_str(&word.text, &word.font_name, word.font_size)
+                .ok_or_else(|| format!("unknown font: {}", word.font_name))?;
+        let word_width =
+            base_word_width + spacing.letter_spacing * word.text.chars().count() as f32;
 
         if current.is_empty() {
             current_width = word_width;
             current.push(word);
         } else {
-            let space_width =
+            let base_space =
                 font_metrics::measure_str(" ", &word.font_name, word.font_size).unwrap_or(0.0);
+            // The joining space is itself a glyph, so one letter-spacing
+            // advances after it as well as word-spacing.
+            let space_width = base_space + spacing.letter_spacing + spacing.word_spacing;
             if current_width + space_width + word_width <= max_width {
                 current_width += space_width + word_width;
                 current.push(word);
@@ -291,9 +326,13 @@ fn wrap_runs_impl(
                 let last = segments.last_mut().unwrap();
                 last.text.push(' ');
                 last.text.push_str(&word.text);
-                last.width =
-                    font_metrics::measure_str(&last.text, &last.font_name, last.font_size)
-                        .unwrap_or(0.0);
+                let base = font_metrics::measure_str(&last.text, &last.font_name, last.font_size)
+                    .unwrap_or(0.0);
+                let n_chars = last.text.chars().count() as f32;
+                let n_spaces = last.text.matches(' ').count() as f32;
+                last.width = base
+                    + spacing.letter_spacing * n_chars
+                    + spacing.word_spacing * n_spaces;
             } else {
                 // Prepend space if not the first segment on the line
                 let text = if segments.is_empty() {
@@ -301,9 +340,12 @@ fn wrap_runs_impl(
                 } else {
                     format!(" {}", word.text)
                 };
+                let base = font_metrics::measure_str(&text, &word.font_name, word.font_size)
+                    .unwrap_or(0.0);
+                let n_chars = text.chars().count() as f32;
+                let n_spaces = text.matches(' ').count() as f32;
                 let width =
-                    font_metrics::measure_str(&text, &word.font_name, word.font_size)
-                        .unwrap_or(0.0);
+                    base + spacing.letter_spacing * n_chars + spacing.word_spacing * n_spaces;
                 segments.push(LineSegment {
                     text,
                     font_name: word.font_name.clone(),
@@ -332,7 +374,10 @@ fn wrap_runs_impl(
 }
 
 /// Wrap preformatted text: preserve whitespace, split on newlines only.
-fn wrap_runs_preformatted(runs: &[TextRun]) -> Result<Vec<WrappedLine>, String> {
+fn wrap_runs_preformatted(
+    runs: &[TextRun],
+    spacing: SpacingOpts,
+) -> Result<Vec<WrappedLine>, String> {
     let mut full_text = String::new();
     let mut font_name = String::new();
     let mut font_size = 12.0_f32;
@@ -351,8 +396,11 @@ fn wrap_runs_preformatted(runs: &[TextRun]) -> Result<Vec<WrappedLine>, String> 
 
     let mut result: Vec<WrappedLine> = Vec::new();
     for line in full_text.split('\n') {
-        let width = font_metrics::measure_str(line, &font_name, font_size)
+        let base = font_metrics::measure_str(line, &font_name, font_size)
             .ok_or_else(|| format!("unknown font: {font_name}"))?;
+        let width = base
+            + spacing.letter_spacing * line.chars().count() as f32
+            + spacing.word_spacing * line.matches(' ').count() as f32;
         let segment = LineSegment {
             text: line.to_string(),
             font_name: font_name.clone(),
@@ -622,14 +670,42 @@ impl LayoutInner {
                 );
             }
 
-            // Available width after margins
-            let box_width =
-                col_width - block.style.margin_left - block.style.margin_right;
-            let text_area_width =
-                box_width - block.style.padding_left - block.style.padding_right;
+            // Available width after margins. CSS `width` sets the content
+            // (text-area) width under `content-box`, or the full box under
+            // `border-box`; we subtract padding + border in that case to
+            // recover the content width. `max-width`/`min-width` clamp
+            // under the same sizing model.
+            let h_padding = block.style.padding_left + block.style.padding_right;
+            let h_border = block.style.border_width * 2.0;
+            let content_adjust = match block.style.box_sizing {
+                css::BoxSizing::ContentBox => 0.0,
+                css::BoxSizing::BorderBox => h_padding + h_border,
+            };
+            let available_text_width =
+                col_width - block.style.margin_left - block.style.margin_right - h_padding;
+            let mut text_area_width = match block.style.width {
+                Some(w) => (w - content_adjust).max(0.0),
+                None => available_text_width,
+            };
+            if let Some(max_w) = block.style.max_width {
+                text_area_width = text_area_width.min((max_w - content_adjust).max(0.0));
+            }
+            if let Some(min_w) = block.style.min_width {
+                text_area_width = text_area_width.max((min_w - content_adjust).max(0.0));
+            }
+            text_area_width = text_area_width.min(available_text_width).max(0.0);
+            let box_width = text_area_width + h_padding;
 
-            let wrapped_lines =
-                wrap_runs_impl(&block.runs, text_area_width, block.preserve_whitespace)?;
+            let spacing = SpacingOpts {
+                letter_spacing: block.style.letter_spacing,
+                word_spacing: block.style.word_spacing,
+            };
+            let wrapped_lines = wrap_runs_impl(
+                &block.runs,
+                text_area_width,
+                block.preserve_whitespace,
+                spacing,
+            )?;
 
             let max_font_size = wrapped_lines
                 .iter()
@@ -775,8 +851,9 @@ impl LayoutInner {
                 let is_justified_line = matches!(block.style.text_align, TextAlign::Justify)
                     && line_idx + 1 < wrapped_lines.len();
 
-                let word_spacing = if is_justified_line {
-                    // Count spaces across all segments on this line
+                // CSS word-spacing is already baked into `line.total_width`
+                // (see wrap_runs_impl) and justification adds on top of it.
+                let justify_word_spacing = if is_justified_line {
                     let space_count: usize = line
                         .segments
                         .iter()
@@ -790,6 +867,7 @@ impl LayoutInner {
                 } else {
                     0.0
                 };
+                let total_word_spacing = block.style.word_spacing + justify_word_spacing;
 
                 let align_offset = match block.style.text_align {
                     TextAlign::Left | TextAlign::Justify => 0.0,
@@ -797,9 +875,17 @@ impl LayoutInner {
                     TextAlign::Right => text_area_width - line.total_width,
                 };
 
-                // Apply/reset word spacing for justified lines
-                if is_justified_line {
-                    page.operations.push(PdfOp::SetWordSpacing(word_spacing));
+                // Apply Tw/Tc for this line if either spacing is non-zero.
+                // We unconditionally reset after the line so the PDF state
+                // doesn't leak into marker glyphs or neighbouring paragraphs.
+                let needs_tw = total_word_spacing != 0.0;
+                let needs_tc = block.style.letter_spacing != 0.0;
+                if needs_tw {
+                    page.operations.push(PdfOp::SetWordSpacing(total_word_spacing));
+                }
+                if needs_tc {
+                    page.operations
+                        .push(PdfOp::SetCharacterSpacing(block.style.letter_spacing));
                 }
 
                 let mut x = text_x_base + align_offset;
@@ -880,14 +966,20 @@ impl LayoutInner {
                         }
                     }
 
-                    // Advance x, including extra word-spacing (Tw) for justified lines
+                    // Advance x. The segment's `width` already includes
+                    // baked-in letter/word spacing (see wrap_runs_impl), so
+                    // we only add the *justification* extra per space.
                     let spaces_in_segment = segment.text.matches(' ').count() as f32;
-                    x += segment.width + spaces_in_segment * word_spacing;
+                    x += segment.width + spaces_in_segment * justify_word_spacing;
                 }
 
-                // Reset word spacing after a justified line
-                if is_justified_line {
+                // Reset Tw/Tc after the line so downstream operations
+                // start from a clean text state.
+                if needs_tw {
                     page.operations.push(PdfOp::SetWordSpacing(0.0));
+                }
+                if needs_tc {
+                    page.operations.push(PdfOp::SetCharacterSpacing(0.0));
                 }
 
                 line_y -= line_height;
@@ -1014,7 +1106,11 @@ impl LayoutInner {
                 }
                 let cwidth = col_widths[idx];
                 let text_w = (cwidth - cell.style.padding_left - cell.style.padding_right).max(1.0);
-                let wrapped = wrap_runs_impl(&cell.runs, text_w, false)?;
+                let cell_spacing = SpacingOpts {
+                    letter_spacing: cell.style.letter_spacing,
+                    word_spacing: cell.style.word_spacing,
+                };
+                let wrapped = wrap_runs_impl(&cell.runs, text_w, false, cell_spacing)?;
                 let max_fs = wrapped
                     .iter()
                     .map(|l| l.max_font_size)

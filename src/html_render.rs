@@ -860,7 +860,7 @@ impl<'a> HtmlRenderer<'a> {
     ) {
         use crate::layout::{Table, TableRow};
 
-        let em = 12.0_f32;
+        let ctx = self.length_context();
         let inherited = self.inherit_stack.last().cloned().unwrap_or_default();
         let inherited_with_table = inherited.inherit_into(&table_style);
 
@@ -869,22 +869,22 @@ impl<'a> HtmlRenderer<'a> {
 
         if let Some(style) = table_style.as_ref() {
             if let Some(len) = style.margin_top {
-                table_block_style.margin_top = len.resolve(em);
+                table_block_style.margin_top = len.resolve_ctx(&ctx);
             }
             if let Some(len) = style.margin_right {
-                table_block_style.margin_right = len.resolve(em);
+                table_block_style.margin_right = len.resolve_ctx(&ctx);
             }
             if let Some(len) = style.margin_bottom {
-                table_block_style.margin_bottom = len.resolve(em);
+                table_block_style.margin_bottom = len.resolve_ctx(&ctx);
             }
             if let Some(len) = style.margin_left {
-                table_block_style.margin_left = len.resolve(em);
+                table_block_style.margin_left = len.resolve_ctx(&ctx);
             }
         }
 
         let default_line_height = inherited_with_table
             .line_height
-            .map(|len| len.resolve(em));
+            .map(|len| len.resolve_ctx(&ctx));
 
         let mut rows: Vec<TableRow> = Vec::new();
         collect_table_rows(
@@ -939,31 +939,41 @@ impl<'a> HtmlRenderer<'a> {
         let intrinsic_w = img_data.width as f32;
         let intrinsic_h = img_data.height as f32;
 
-        // Resolve display width/height: CSS → attribute → intrinsic
-        let em = 12.0_f32;
-        let css_w = inline_style.and_then(|s| s.padding_left.map(|_| 0.0));
-        let _ = css_w;
+        // Resolve display width/height: CSS width/height wins over the HTML
+        // width/height attribute, which in turn wins over the image's
+        // intrinsic pixel dimensions. max-width/max-height clamp the final
+        // result. If only one dimension is given, the other scales to
+        // preserve aspect ratio.
+        let ctx = self.length_context();
+        let css_width = inline_style.and_then(|s| s.width.map(|len| len.resolve_ctx(&ctx)));
+        let css_height = inline_style.and_then(|s| s.height.map(|len| len.resolve_ctx(&ctx)));
 
-        let css_width = inline_style
-            .and_then(|s| {
-                // We don't have dedicated width/height fields on ComputedStyle
-                // yet — layout width is not CSS-driven for images. Use attrs.
-                let _ = s;
-                None::<f32>
-            });
-
-        let width = css_width
-            .or(attr_w)
-            .unwrap_or(intrinsic_w);
-
-        let height = if let Some(h) = attr_h {
-            h
-        } else if let Some(w) = attr_w {
-            // Preserve aspect ratio
-            intrinsic_h * (w / intrinsic_w)
-        } else {
-            intrinsic_h
+        let (mut width, mut height) = match (css_width, css_height) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, intrinsic_h * (w / intrinsic_w)),
+            (None, Some(h)) => (intrinsic_w * (h / intrinsic_h), h),
+            (None, None) => match (attr_w, attr_h) {
+                (Some(w), Some(h)) => (w, h),
+                (Some(w), None) => (w, intrinsic_h * (w / intrinsic_w)),
+                (None, Some(h)) => (intrinsic_w * (h / intrinsic_h), h),
+                (None, None) => (intrinsic_w, intrinsic_h),
+            },
         };
+
+        if let Some(max_w) = inline_style.and_then(|s| s.max_width.map(|len| len.resolve_ctx(&ctx))) {
+            if width > max_w {
+                let scale = max_w / width;
+                width = max_w;
+                height *= scale;
+            }
+        }
+        if let Some(max_h) = inline_style.and_then(|s| s.max_height.map(|len| len.resolve_ctx(&ctx))) {
+            if height > max_h {
+                let scale = max_h / height;
+                height = max_h;
+                width *= scale;
+            }
+        }
 
         // Store in layout's image vec and get an index
         let image_index = self.layout.images.len();
@@ -972,16 +982,16 @@ impl<'a> HtmlRenderer<'a> {
         let mut style = BlockStyle::default();
         if let Some(s) = inline_style {
             if let Some(len) = s.margin_top {
-                style.margin_top = len.resolve(em);
+                style.margin_top = len.resolve_ctx(&ctx);
             }
             if let Some(len) = s.margin_right {
-                style.margin_right = len.resolve(em);
+                style.margin_right = len.resolve_ctx(&ctx);
             }
             if let Some(len) = s.margin_bottom {
-                style.margin_bottom = len.resolve(em);
+                style.margin_bottom = len.resolve_ctx(&ctx);
             }
             if let Some(len) = s.margin_left {
-                style.margin_left = len.resolve(em);
+                style.margin_left = len.resolve_ctx(&ctx);
             }
         }
 
@@ -1001,26 +1011,47 @@ impl<'a> HtmlRenderer<'a> {
         ua_style(tag).font_size
     }
 
+    /// Build a full `LengthContext` using the current element's font size,
+    /// the default root font size, and the layout's page dimensions. The
+    /// `container` value defaults to the page's content width, which is
+    /// the right reference for top-level block children; nested blocks
+    /// with a narrower parent currently see the same value (a known
+    /// limitation addressed when we add real parent-chain tracking).
+    fn length_context(&self) -> css::LengthContext {
+        let container = (self.layout.page_width
+            - self.layout.margin_left
+            - self.layout.margin_right)
+            .max(0.0);
+        css::LengthContext {
+            em: self.resolve_em_base(),
+            rem: css::LengthContext::DEFAULT_EM,
+            vw: self.layout.page_width,
+            vh: self.layout.page_height,
+            container,
+        }
+    }
+
     fn resolve_line_height(&self) -> Option<f32> {
-        let em = self.resolve_em_base();
+        let ctx = self.length_context();
         self.block_style
             .as_ref()
             .and_then(|s| s.line_height)
             .or_else(|| self.inherit_stack.last().and_then(|s| s.line_height))
-            .map(|len| len.resolve(em))
+            .map(|len| len.resolve_ctx(&ctx))
     }
 
     fn resolve_spacing_after(&self, default: f32) -> f32 {
-        let em = self.resolve_em_base();
+        let ctx = self.length_context();
         self.block_style
             .as_ref()
             .and_then(|s| s.margin_bottom)
-            .map_or(default, |len| len.resolve(em))
+            .map_or(default, |len| len.resolve_ctx(&ctx))
     }
 
     fn apply_block_css(&self, block_style: &mut BlockStyle) {
         let inherited = self.inherit_stack.last();
-        let em = self.resolve_em_base();
+        let ctx = self.length_context();
+        let resolve = |len: css::CssLength| len.resolve_ctx(&ctx);
 
         if let Some(style) = self.block_style.as_ref() {
             if let Some(c) = style.color {
@@ -1033,31 +1064,31 @@ impl<'a> HtmlRenderer<'a> {
                 block_style.text_align = a.clone();
             }
             if let Some(len) = style.margin_top {
-                block_style.margin_top = len.resolve(em);
+                block_style.margin_top = resolve(len);
             }
             if let Some(len) = style.margin_right {
-                block_style.margin_right = len.resolve(em);
+                block_style.margin_right = resolve(len);
             }
             if let Some(len) = style.margin_bottom {
-                block_style.margin_bottom = len.resolve(em);
+                block_style.margin_bottom = resolve(len);
             }
             if let Some(len) = style.margin_left {
-                block_style.margin_left = len.resolve(em);
+                block_style.margin_left = resolve(len);
             }
             if let Some(len) = style.padding_top {
-                block_style.padding_top = len.resolve(em);
+                block_style.padding_top = resolve(len);
             }
             if let Some(len) = style.padding_right {
-                block_style.padding_right = len.resolve(em);
+                block_style.padding_right = resolve(len);
             }
             if let Some(len) = style.padding_bottom {
-                block_style.padding_bottom = len.resolve(em);
+                block_style.padding_bottom = resolve(len);
             }
             if let Some(len) = style.padding_left {
-                block_style.padding_left = len.resolve(em);
+                block_style.padding_left = resolve(len);
             }
             if let Some(len) = style.border_width {
-                block_style.border_width = len.resolve(em);
+                block_style.border_width = resolve(len);
             }
             if let Some(c) = style.border_color {
                 block_style.border_color = Some(c);
@@ -1070,6 +1101,57 @@ impl<'a> HtmlRenderer<'a> {
             }
             if let Some(pb) = style.page_break_after {
                 block_style.page_break_after = Some(pb);
+            }
+            if let Some(len) = style.width {
+                block_style.width = Some(resolve(len));
+            }
+            if let Some(len) = style.height {
+                block_style.height = Some(resolve(len));
+            }
+            if let Some(len) = style.min_width {
+                block_style.min_width = Some(resolve(len));
+            }
+            if let Some(len) = style.min_height {
+                block_style.min_height = Some(resolve(len));
+            }
+            if let Some(len) = style.max_width {
+                block_style.max_width = Some(resolve(len));
+            }
+            if let Some(len) = style.max_height {
+                block_style.max_height = Some(resolve(len));
+            }
+            if let Some(len) = style.letter_spacing {
+                block_style.letter_spacing = resolve(len);
+            }
+            if let Some(len) = style.word_spacing {
+                block_style.word_spacing = resolve(len);
+            }
+            if let Some(bs) = style.box_sizing {
+                block_style.box_sizing = bs;
+            }
+        }
+
+        // Inherit letter/word-spacing from ancestor if not explicitly set
+        // locally. These are CSS-inheritable so a <p> with letter-spacing on
+        // <body> should still pick it up.
+        if let Some(inh) = inherited {
+            let has_letter = self
+                .block_style
+                .as_ref()
+                .is_some_and(|s| s.letter_spacing.is_some());
+            if !has_letter {
+                if let Some(len) = inh.letter_spacing {
+                    block_style.letter_spacing = resolve(len);
+                }
+            }
+            let has_word = self
+                .block_style
+                .as_ref()
+                .is_some_and(|s| s.word_spacing.is_some());
+            if !has_word {
+                if let Some(len) = inh.word_spacing {
+                    block_style.word_spacing = resolve(len);
+                }
             }
         }
 
@@ -1143,7 +1225,12 @@ fn build_table_cell(
     let cell_style: Option<ComputedStyle> = extract_style_attr(handle);
 
     let merged_inherited = inherited.inherit_into(&cell_style);
-    let em = 12.0_f32;
+    // Table cells currently resolve lengths against a fallback context.
+    // This is a known limitation — `rem`/`vw`/`vh` inside cells won't see
+    // the real root font size or viewport. Threading the renderer's
+    // `LengthContext` through `collect_table_rows` is left for a later
+    // pass because it would touch every table helper signature.
+    let ctx = css::LengthContext::fallback();
 
     // Build BlockStyle for the cell
     let mut block_style = BlockStyle {
@@ -1175,19 +1262,19 @@ fn build_table_cell(
             block_style.text_align = a.clone();
         }
         if let Some(len) = style.padding_top {
-            block_style.padding_top = len.resolve(em);
+            block_style.padding_top = len.resolve_ctx(&ctx);
         }
         if let Some(len) = style.padding_right {
-            block_style.padding_right = len.resolve(em);
+            block_style.padding_right = len.resolve_ctx(&ctx);
         }
         if let Some(len) = style.padding_bottom {
-            block_style.padding_bottom = len.resolve(em);
+            block_style.padding_bottom = len.resolve_ctx(&ctx);
         }
         if let Some(len) = style.padding_left {
-            block_style.padding_left = len.resolve(em);
+            block_style.padding_left = len.resolve_ctx(&ctx);
         }
         if let Some(len) = style.border_width {
-            block_style.border_width = len.resolve(em);
+            block_style.border_width = len.resolve_ctx(&ctx);
         }
         if let Some(c) = style.border_color {
             block_style.border_color = Some(c);
@@ -1212,7 +1299,7 @@ fn build_table_cell(
 
     TableCell {
         runs,
-        line_height: merged_inherited.line_height.map(|len| len.resolve(em)),
+        line_height: merged_inherited.line_height.map(|len| len.resolve_ctx(&ctx)),
         style: block_style,
         vertical_align: VerticalAlign::Top,
     }

@@ -61,6 +61,7 @@ pub(crate) enum PdfOp {
     RestoreState,
     SetDashPattern { array: Vec<f32>, phase: f32 },
     SetWordSpacing(f32),
+    SetCharacterSpacing(f32),
     /// Draw image #index at (x, y) with given width/height (points).
     DrawImage {
         index: usize,
@@ -347,6 +348,9 @@ fn write_page_content_stream(
             }
             PdfOp::SetWordSpacing(spacing) => {
                 content.set_word_spacing(*spacing);
+            }
+            PdfOp::SetCharacterSpacing(spacing) => {
+                content.set_char_spacing(*spacing);
             }
             PdfOp::DrawImage { index, x, y, width, height } => {
                 let resource_name = format!("Im{index}");
