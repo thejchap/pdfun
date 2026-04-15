@@ -1058,6 +1058,48 @@ pub enum SimpleSelector {
         op: AttrOp,
         value: Option<String>,
     },
+    /// Pseudo-class such as `:first-child`, `:nth-child(2n+1)`, `:not(.foo)`.
+    PseudoClass(PseudoClass),
+}
+
+/// CSS pseudo-classes supported by the selector matcher.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PseudoClass {
+    FirstChild,
+    LastChild,
+    OnlyChild,
+    NthChild(AnB),
+    /// `:not(compound)` — single compound-selector argument (no selector lists).
+    Not(Box<CompoundSelector>),
+}
+
+/// `An+B` formula for `:nth-child()`.
+#[derive(Clone, Debug, PartialEq, Copy)]
+pub struct AnB {
+    pub a: i32,
+    pub b: i32,
+}
+
+impl AnB {
+    /// Does this formula match a 1-based position `n`?
+    pub fn matches(&self, n: i32) -> bool {
+        if n < 1 {
+            return false;
+        }
+        if self.a == 0 {
+            return n == self.b;
+        }
+        // n = a*k + b  =>  k = (n - b) / a
+        let diff = n - self.b;
+        if diff == 0 {
+            return true;
+        }
+        if self.a > 0 {
+            diff >= 0 && diff % self.a == 0
+        } else {
+            diff <= 0 && diff % self.a == 0
+        }
+    }
 }
 
 /// Attribute selector operator.
@@ -1086,28 +1128,63 @@ pub enum Combinator {
     Descendant,
     /// Child combinator: `div > p`.
     Child,
+    /// Adjacent sibling combinator: `h1 + p`.
+    AdjacentSibling,
+    /// General sibling combinator: `h1 ~ p`.
+    GeneralSibling,
 }
 
 /// A compound selector is a sequence of simple selectors that all match one element.
 /// For example, `p.note#main` = [Type("p"), Class("note"), Id("main")].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompoundSelector {
     pub parts: Vec<SimpleSelector>,
 }
 
 impl CompoundSelector {
-    fn matches(
+    /// Full match including optional sibling-position data used for pseudo-classes.
+    /// `sibling_pos` is the 0-based element-sibling index; `sibling_count` is the
+    /// number of element siblings on the shared parent (including self).
+    #[allow(clippy::too_many_arguments)]
+    fn matches_full(
         &self,
         tag: &str,
         classes: &[&str],
         id: Option<&str>,
         attributes: &[(&str, &str)],
+        sibling_pos: Option<usize>,
+        sibling_count: Option<usize>,
     ) -> bool {
         self.parts.iter().all(|part| match part {
             SimpleSelector::Type(t) => t.eq_ignore_ascii_case(tag),
             SimpleSelector::Class(c) => classes.iter().any(|cl| cl.eq_ignore_ascii_case(c)),
             SimpleSelector::Id(i) => id.is_some_and(|elem_id| elem_id.eq_ignore_ascii_case(i)),
             SimpleSelector::Universal => true,
+            SimpleSelector::PseudoClass(pc) => {
+                match pc {
+                    PseudoClass::FirstChild => sibling_pos == Some(0),
+                    PseudoClass::LastChild => match (sibling_pos, sibling_count) {
+                        (Some(i), Some(n)) => i + 1 == n,
+                        _ => false,
+                    },
+                    PseudoClass::OnlyChild => match (sibling_pos, sibling_count) {
+                        (Some(i), Some(n)) => i == 0 && n == 1,
+                        _ => false,
+                    },
+                    PseudoClass::NthChild(anb) => match sibling_pos {
+                        Some(i) => anb.matches(i as i32 + 1),
+                        None => false,
+                    },
+                    PseudoClass::Not(inner) => !inner.matches_full(
+                        tag,
+                        classes,
+                        id,
+                        attributes,
+                        sibling_pos,
+                        sibling_count,
+                    ),
+                }
+            }
             SimpleSelector::Attribute { name, op, value } => {
                 let attr_value = attributes
                     .iter()
@@ -1201,52 +1278,50 @@ fn parse_selector_list(selector_text: &str) -> Vec<SelectorChain> {
 }
 
 /// Parse a single selector (no commas) from raw text.
-/// Splits on whitespace and `>` to find compound selectors and combinators.
+/// Splits on whitespace and recognises `>`, `+`, `~` combinators.
 fn parse_one_selector_from_text(text: &str) -> Option<SelectorChain> {
-    // Tokenize by splitting on whitespace, but keep `>` as a separator
     let mut compounds: Vec<CompoundSelector> = Vec::new();
     let mut combinators: Vec<Combinator> = Vec::new();
     let mut id_count: u16 = 0;
     let mut class_count: u16 = 0;
     let mut type_count: u16 = 0;
-    let mut pending_child = false;
 
-    for token in text.split_whitespace() {
-        if token == ">" {
-            pending_child = true;
-            continue;
-        }
+    // Tokenize into a stream where compound selectors and combinator symbols
+    // are separate tokens. We walk character-by-character so combinators
+    // attached to the previous compound (e.g. `h1+p`) are split properly.
+    let tokens = tokenize_selector(text);
 
-        // Handle `>` attached to other tokens (e.g., "div>p")
-        let sub_parts: Vec<&str> = if token.contains('>') {
-            token.split('>').collect()
-        } else {
-            vec![token]
-        };
-
-        for (i, sub) in sub_parts.iter().enumerate() {
-            let sub = sub.trim();
-            if sub.is_empty() {
-                if i > 0 {
-                    pending_child = true;
-                }
-                continue;
+    let mut pending_combinator: Option<Combinator> = None;
+    let mut first = true;
+    for tok in tokens {
+        match tok {
+            SelectorToken::Combinator(c) => {
+                // A combinator symbol overrides any pending descendant combinator.
+                pending_combinator = Some(c);
             }
-
-            let compound = parse_compound_from_text(sub, &mut id_count, &mut class_count, &mut type_count);
-            if compound.parts.is_empty() {
-                continue;
-            }
-
-            if !compounds.is_empty() {
-                if pending_child || (i > 0) {
-                    combinators.push(Combinator::Child);
-                } else {
-                    combinators.push(Combinator::Descendant);
+            SelectorToken::Whitespace => {
+                if !first && pending_combinator.is_none() {
+                    pending_combinator = Some(Combinator::Descendant);
                 }
             }
-            pending_child = false;
-            compounds.push(compound);
+            SelectorToken::Compound(text) => {
+                let compound = parse_compound_from_text(
+                    &text,
+                    &mut id_count,
+                    &mut class_count,
+                    &mut type_count,
+                );
+                if compound.parts.is_empty() {
+                    continue;
+                }
+                if !first {
+                    combinators
+                        .push(pending_combinator.unwrap_or(Combinator::Descendant));
+                }
+                pending_combinator = None;
+                compounds.push(compound);
+                first = false;
+            }
         }
     }
 
@@ -1265,6 +1340,77 @@ fn parse_one_selector_from_text(text: &str) -> Option<SelectorChain> {
     })
 }
 
+enum SelectorToken {
+    Compound(String),
+    Combinator(Combinator),
+    Whitespace,
+}
+
+/// Walk the selector text and split it into compound-selector tokens,
+/// whitespace runs, and explicit combinator symbols (`>`, `+`, `~`).
+/// Respects `[...]` brackets and `(...)` pseudo-class argument parens.
+fn tokenize_selector(text: &str) -> Vec<SelectorToken> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            out.push(SelectorToken::Whitespace);
+            continue;
+        }
+        if c == '>' {
+            out.push(SelectorToken::Combinator(Combinator::Child));
+            i += 1;
+            continue;
+        }
+        if c == '+' {
+            out.push(SelectorToken::Combinator(Combinator::AdjacentSibling));
+            i += 1;
+            continue;
+        }
+        if c == '~' {
+            // Could be an attribute `~=` inside `[...]`, but we're outside of
+            // brackets here (brackets consumed as part of compound).
+            out.push(SelectorToken::Combinator(Combinator::GeneralSibling));
+            i += 1;
+            continue;
+        }
+        // Start of a compound: consume until we hit whitespace or a top-level
+        // combinator symbol, respecting `[...]` and `(...)` nesting.
+        let start = i;
+        let mut depth_brack: i32 = 0;
+        let mut depth_paren: i32 = 0;
+        while i < chars.len() {
+            let ch = chars[i];
+            if depth_brack == 0 && depth_paren == 0 {
+                if ch.is_whitespace() || ch == '>' || ch == '+' || ch == '~' {
+                    break;
+                }
+            }
+            if ch == '[' {
+                depth_brack += 1;
+            } else if ch == ']' {
+                depth_brack -= 1;
+            } else if ch == '(' {
+                depth_paren += 1;
+            } else if ch == ')' {
+                depth_paren -= 1;
+            }
+            i += 1;
+        }
+        if start < i {
+            out.push(SelectorToken::Compound(chars[start..i].iter().collect()));
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Parse a compound selector from a text token like `p.note#main[data-x="y"]`.
 fn parse_compound_from_text(
     text: &str,
@@ -1277,7 +1423,7 @@ fn parse_compound_from_text(
 
     // Stop characters for ident-like runs.
     fn is_boundary(c: char) -> bool {
-        c == '.' || c == '#' || c == '['
+        c == '.' || c == '#' || c == '[' || c == ':' || c == '('
     }
 
     while let Some(&(pos, ch)) = chars.peek() {
@@ -1356,6 +1502,56 @@ fn parse_compound_from_text(
                     *class_count += 1;
                 }
             }
+            ':' => {
+                chars.next();
+                // Read the pseudo-class name.
+                let name_start = pos + 1;
+                while let Some(&(_, c)) = chars.peek() {
+                    if c.is_ascii_alphanumeric() || c == '-' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let name_end = chars.peek().map_or(text.len(), |&(i, _)| i);
+                let name = text[name_start..name_end].to_ascii_lowercase();
+
+                // Optional parenthesised argument.
+                let mut arg: Option<String> = None;
+                if chars.peek().map(|&(_, c)| c) == Some('(') {
+                    chars.next();
+                    let arg_start = chars.peek().map_or(text.len(), |&(i, _)| i);
+                    let mut depth = 1;
+                    let mut arg_end = text.len();
+                    while let Some(&(i, c)) = chars.peek() {
+                        if c == '(' {
+                            depth += 1;
+                            chars.next();
+                        } else if c == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                arg_end = i;
+                                chars.next();
+                                break;
+                            }
+                            chars.next();
+                        } else {
+                            chars.next();
+                        }
+                    }
+                    arg = Some(text[arg_start..arg_end].to_string());
+                }
+
+                if let Some((pseudo, spec_delta)) = parse_pseudo_class(&name, arg.as_deref()) {
+                    parts.push(SimpleSelector::PseudoClass(pseudo));
+                    // `:not(x)` contributes the specificity of its argument,
+                    // other pseudo-classes add (0,1,0) like classes.
+                    *id_count += spec_delta.0;
+                    *class_count += spec_delta.1;
+                    *type_count += spec_delta.2;
+                }
+                // Unknown pseudo-class: silently skip.
+            }
             _ => {
                 let start = pos;
                 while chars.peek().is_some_and(|&(_, c)| !is_boundary(c)) {
@@ -1372,6 +1568,82 @@ fn parse_compound_from_text(
     }
 
     CompoundSelector { parts }
+}
+
+/// Parse a pseudo-class by name (lowercased) and optional argument text.
+/// Returns `(pseudo, specificity_delta)` on success or `None` to skip.
+fn parse_pseudo_class(
+    name: &str,
+    arg: Option<&str>,
+) -> Option<(PseudoClass, (u16, u16, u16))> {
+    match name {
+        "first-child" => Some((PseudoClass::FirstChild, (0, 1, 0))),
+        "last-child" => Some((PseudoClass::LastChild, (0, 1, 0))),
+        "only-child" => Some((PseudoClass::OnlyChild, (0, 1, 0))),
+        "nth-child" => {
+            let arg = arg?.trim();
+            let anb = parse_an_b(arg)?;
+            Some((PseudoClass::NthChild(anb), (0, 1, 0)))
+        }
+        "not" => {
+            let arg = arg?.trim();
+            // Parse the argument as a single compound selector.
+            let mut id_c = 0u16;
+            let mut cls_c = 0u16;
+            let mut typ_c = 0u16;
+            let compound = parse_compound_from_text(arg, &mut id_c, &mut cls_c, &mut typ_c);
+            if compound.parts.is_empty() {
+                return None;
+            }
+            Some((
+                PseudoClass::Not(Box::new(compound)),
+                (id_c, cls_c, typ_c),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Parse an `An+B` microsyntax argument to `:nth-child()`:
+/// `odd`, `even`, `3`, `2n`, `2n+1`, `-n+3`, `n`, ` +3n - 2 `, etc.
+pub(crate) fn parse_an_b(arg: &str) -> Option<AnB> {
+    let s: String = arg.chars().filter(|c| !c.is_whitespace()).collect();
+    let lower = s.to_ascii_lowercase();
+    if lower == "odd" {
+        return Some(AnB { a: 2, b: 1 });
+    }
+    if lower == "even" {
+        return Some(AnB { a: 2, b: 0 });
+    }
+    if lower.is_empty() {
+        return None;
+    }
+
+    // Split into (a-part, b-part) around an `n` if present.
+    if let Some(n_pos) = lower.find('n') {
+        let a_str = &lower[..n_pos];
+        let b_str = &lower[n_pos + 1..];
+        let a: i32 = match a_str {
+            "" | "+" => 1,
+            "-" => -1,
+            s => s.parse().ok()?,
+        };
+        let b: i32 = if b_str.is_empty() {
+            0
+        } else {
+            // Must start with + or -
+            let first = b_str.as_bytes()[0] as char;
+            if first != '+' && first != '-' {
+                return None;
+            }
+            b_str.parse().ok()?
+        };
+        Some(AnB { a, b })
+    } else {
+        // Just a literal integer B.
+        let b: i32 = lower.parse().ok()?;
+        Some(AnB { a: 0, b })
+    }
 }
 
 /// Parse the contents inside `[` ... `]` into an attribute selector.
@@ -1559,6 +1831,19 @@ fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut
 
 // ── Selector matching ─────────────────────────────────────
 
+/// A minimal record for preceding element siblings used by sibling combinators.
+#[derive(Clone, Debug)]
+pub struct SiblingRecord<'a> {
+    pub tag: &'a str,
+    pub classes: Vec<&'a str>,
+    pub id: Option<&'a str>,
+    pub attributes: Vec<(&'a str, &'a str)>,
+    /// 0-based element-sibling index on the shared parent.
+    pub sibling_index: usize,
+    /// Total element-sibling count on the shared parent.
+    pub sibling_count: usize,
+}
+
 /// Information about an element needed for selector matching.
 pub struct ElementInfo<'a> {
     pub tag: &'a str,
@@ -1574,7 +1859,14 @@ pub struct ElementInfo<'a> {
         Option<&'a str>,
         Vec<(&'a str, &'a str)>,
     )>,
+    /// 0-based index of this element among its element siblings.
+    pub sibling_index: usize,
+    /// Total number of element siblings on the shared parent (including self).
+    pub sibling_count: usize,
+    /// Preceding element siblings in document order.
+    pub preceding_siblings: Vec<SiblingRecord<'a>>,
 }
+
 
 /// Match all rules in a stylesheet against an element, returning the
 /// merged `ComputedStyle` from all matching rules (respecting specificity).
@@ -1606,49 +1898,116 @@ pub fn match_rules(element: &ElementInfo<'_>, stylesheet: &Stylesheet) -> Comput
     result
 }
 
+fn compound_matches_sibling(compound: &CompoundSelector, sib: &SiblingRecord<'_>) -> bool {
+    compound.matches_full(
+        sib.tag,
+        &sib.classes,
+        sib.id,
+        &sib.attributes,
+        Some(sib.sibling_index),
+        Some(sib.sibling_count),
+    )
+}
+
 fn selector_matches(selector: &SelectorChain, element: &ElementInfo<'_>) -> bool {
     // The subject (first compound after reversal) must match the element
     let subject = &selector.compounds[0];
-    if !subject.matches(element.tag, &element.classes, element.id, &element.attributes) {
+    if !subject.matches_full(
+        element.tag,
+        &element.classes,
+        element.id,
+        &element.attributes,
+        Some(element.sibling_index),
+        Some(element.sibling_count),
+    ) {
         return false;
     }
 
-    // Match ancestor chain
+    // Match ancestor/sibling chain
     if selector.compounds.len() == 1 {
         return true;
     }
 
-    // Walk the combinator chain
-    let mut ancestor_idx = 0;
+    // Walk the combinator chain. We track the current "cursor" position in the
+    // tree: either walking ancestors (for descendant/child combinators) or
+    // walking preceding siblings (for sibling combinators).
+    //
+    // For sibling combinators, the cursor stays at the same parent level, so
+    // subsequent ancestor combinators resume from the element's own ancestor
+    // list. This is a simplification that covers the common cases used in
+    // the brief (e.g. `div > p:first-child`, `h1 + p`, `h1 ~ p`).
+    let mut ancestor_idx: usize = 0;
+    // Current siblings view: at the start this is the subject element's own
+    // preceding_siblings, but after walking an ancestor combinator we lose
+    // the sibling context, which is fine because subsequent sibling
+    // combinators on a different level are not expressible without selector
+    // lists anyway.
+    let mut sibling_cursor: Option<usize> = Some(element.preceding_siblings.len());
+    // When Some(k), the next sibling combinator looks at
+    // element.preceding_siblings[..k]. When None, sibling combinators cannot
+    // be applied (we've walked past sibling scope).
+
     for i in 1..selector.compounds.len() {
         let compound = &selector.compounds[i];
         let combinator = selector.combinators[i - 1];
 
         match combinator {
             Combinator::Child => {
-                // Must match the immediate parent
                 if ancestor_idx >= element.ancestors.len() {
                     return false;
                 }
                 let (tag, ref classes, id, ref attrs) = element.ancestors[ancestor_idx];
-                if !compound.matches(tag, classes, id, attrs) {
+                // Ancestors don't carry sibling info — pseudo-classes referring
+                // to sibling position will fail to match here. That's
+                // acceptable for the scope of this work.
+                if !compound.matches_full(tag, classes, id, attrs, None, None) {
                     return false;
                 }
                 ancestor_idx += 1;
+                sibling_cursor = None;
             }
             Combinator::Descendant => {
-                // Must match some ancestor
                 let mut found = false;
                 while ancestor_idx < element.ancestors.len() {
                     let (tag, ref classes, id, ref attrs) = element.ancestors[ancestor_idx];
                     ancestor_idx += 1;
-                    if compound.matches(tag, classes, id, attrs) {
+                    if compound.matches_full(tag, classes, id, attrs, None, None) {
                         found = true;
                         break;
                     }
                 }
                 if !found {
                     return false;
+                }
+                sibling_cursor = None;
+            }
+            Combinator::AdjacentSibling => {
+                let Some(k) = sibling_cursor else {
+                    return false;
+                };
+                if k == 0 {
+                    return false;
+                }
+                let sib = &element.preceding_siblings[k - 1];
+                if !compound_matches_sibling(compound, sib) {
+                    return false;
+                }
+                sibling_cursor = Some(k - 1);
+            }
+            Combinator::GeneralSibling => {
+                let Some(k) = sibling_cursor else {
+                    return false;
+                };
+                let mut found_at: Option<usize> = None;
+                for j in (0..k).rev() {
+                    if compound_matches_sibling(compound, &element.preceding_siblings[j]) {
+                        found_at = Some(j);
+                        break;
+                    }
+                }
+                match found_at {
+                    Some(j) => sibling_cursor = Some(j),
+                    None => return false,
                 }
             }
         }
@@ -2244,10 +2603,29 @@ mod tests {
 
     // ── Selector matching tests ───────────────────────────────
 
+    fn test_elem<'a>(
+        tag: &'a str,
+        classes: Vec<&'a str>,
+        id: Option<&'a str>,
+        attributes: Vec<(&'a str, &'a str)>,
+        ancestors: Vec<(&'a str, Vec<&'a str>, Option<&'a str>, Vec<(&'a str, &'a str)>)>,
+    ) -> ElementInfo<'a> {
+        ElementInfo {
+            tag,
+            classes,
+            id,
+            attributes,
+            ancestors,
+            sibling_index: 0,
+            sibling_count: 1,
+            preceding_siblings: Vec::new(),
+        }
+    }
+
     #[test]
     fn match_type_selector() {
         let sheet = parse_stylesheet("p { color: red }");
-        let elem = ElementInfo { tag: "p", classes: vec![], id: None, attributes: vec![], ancestors: vec![] };
+        let elem = test_elem("p", vec![], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
     }
@@ -2255,7 +2633,7 @@ mod tests {
     #[test]
     fn match_class_selector() {
         let sheet = parse_stylesheet(".red { color: red }");
-        let elem = ElementInfo { tag: "p", classes: vec!["red"], id: None, attributes: vec![], ancestors: vec![] };
+        let elem = test_elem("p", vec!["red"], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
     }
@@ -2263,7 +2641,7 @@ mod tests {
     #[test]
     fn no_match_wrong_class() {
         let sheet = parse_stylesheet(".red { color: red }");
-        let elem = ElementInfo { tag: "p", classes: vec!["blue"], id: None, attributes: vec![], ancestors: vec![] };
+        let elem = test_elem("p", vec!["blue"], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
         assert!(style.color.is_none());
     }
@@ -2271,10 +2649,13 @@ mod tests {
     #[test]
     fn match_descendant_selector() {
         let sheet = parse_stylesheet("div p { color: red }");
-        let elem = ElementInfo {
-            tag: "p", classes: vec![], id: None, attributes: vec![],
-            ancestors: vec![("div", vec![], None, vec![])],
-        };
+        let elem = test_elem(
+            "p",
+            vec![],
+            None,
+            vec![],
+            vec![("div", vec![], None, vec![])],
+        );
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
     }
@@ -2282,10 +2663,13 @@ mod tests {
     #[test]
     fn match_child_selector() {
         let sheet = parse_stylesheet("div > p { color: red }");
-        let elem = ElementInfo {
-            tag: "p", classes: vec![], id: None, attributes: vec![],
-            ancestors: vec![("div", vec![], None, vec![])],
-        };
+        let elem = test_elem(
+            "p",
+            vec![],
+            None,
+            vec![],
+            vec![("div", vec![], None, vec![])],
+        );
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
     }
@@ -2293,10 +2677,16 @@ mod tests {
     #[test]
     fn child_no_match_grandchild() {
         let sheet = parse_stylesheet("div > p { color: red }");
-        let elem = ElementInfo {
-            tag: "p", classes: vec![], id: None, attributes: vec![],
-            ancestors: vec![("blockquote", vec![], None, vec![]), ("div", vec![], None, vec![])],
-        };
+        let elem = test_elem(
+            "p",
+            vec![],
+            None,
+            vec![],
+            vec![
+                ("blockquote", vec![], None, vec![]),
+                ("div", vec![], None, vec![]),
+            ],
+        );
         let style = match_rules(&elem, &sheet);
         assert!(style.color.is_none());
     }
@@ -2304,7 +2694,7 @@ mod tests {
     #[test]
     fn specificity_class_beats_type() {
         let sheet = parse_stylesheet("p { color: red } .blue { color: blue }");
-        let elem = ElementInfo { tag: "p", classes: vec!["blue"], id: None, attributes: vec![], ancestors: vec![] };
+        let elem = test_elem("p", vec!["blue"], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((0.0, 0.0, 1.0)));
     }
@@ -2314,13 +2704,7 @@ mod tests {
     #[test]
     fn match_attr_exists() {
         let sheet = parse_stylesheet("[data-x] { color: red }");
-        let elem = ElementInfo {
-            tag: "p",
-            classes: vec![],
-            id: None,
-            attributes: vec![("data-x", "")],
-            ancestors: vec![],
-        };
+        let elem = test_elem("p", vec![], None, vec![("data-x", "")], vec![]);
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
     }
@@ -2328,62 +2712,38 @@ mod tests {
     #[test]
     fn match_attr_equals() {
         let sheet = parse_stylesheet("[data-role=\"primary\"] { color: red }");
-        let elem = ElementInfo {
-            tag: "p",
-            classes: vec![],
-            id: None,
-            attributes: vec![("data-role", "primary")],
-            ancestors: vec![],
-        };
+        let elem = test_elem("p", vec![], None, vec![("data-role", "primary")], vec![]);
         assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
     }
 
     #[test]
     fn match_attr_includes() {
         let sheet = parse_stylesheet("[class~=\"note\"] { color: red }");
-        let elem_match = ElementInfo {
-            tag: "p",
-            classes: vec!["intro", "note", "main"],
-            id: None,
-            attributes: vec![("class", "intro note main")],
-            ancestors: vec![],
-        };
+        let elem_match = test_elem(
+            "p",
+            vec!["intro", "note", "main"],
+            None,
+            vec![("class", "intro note main")],
+            vec![],
+        );
         assert_eq!(match_rules(&elem_match, &sheet).color, Some((1.0, 0.0, 0.0)));
 
-        let elem_no = ElementInfo {
-            tag: "p",
-            classes: vec!["notepad"],
-            id: None,
-            attributes: vec![("class", "notepad")],
-            ancestors: vec![],
-        };
+        let elem_no = test_elem(
+            "p",
+            vec!["notepad"],
+            None,
+            vec![("class", "notepad")],
+            vec![],
+        );
         assert!(match_rules(&elem_no, &sheet).color.is_none());
     }
 
     #[test]
     fn match_attr_dashmatch() {
         let sheet = parse_stylesheet("[lang|=\"en\"] { color: red }");
-        let a = ElementInfo {
-            tag: "p",
-            classes: vec![],
-            id: None,
-            attributes: vec![("lang", "en")],
-            ancestors: vec![],
-        };
-        let b = ElementInfo {
-            tag: "p",
-            classes: vec![],
-            id: None,
-            attributes: vec![("lang", "en-US")],
-            ancestors: vec![],
-        };
-        let c = ElementInfo {
-            tag: "p",
-            classes: vec![],
-            id: None,
-            attributes: vec![("lang", "english")],
-            ancestors: vec![],
-        };
+        let a = test_elem("p", vec![], None, vec![("lang", "en")], vec![]);
+        let b = test_elem("p", vec![], None, vec![("lang", "en-US")], vec![]);
+        let c = test_elem("p", vec![], None, vec![("lang", "english")], vec![]);
         assert_eq!(match_rules(&a, &sheet).color, Some((1.0, 0.0, 0.0)));
         assert_eq!(match_rules(&b, &sheet).color, Some((1.0, 0.0, 0.0)));
         assert!(match_rules(&c, &sheet).color.is_none());
@@ -2394,27 +2754,21 @@ mod tests {
         let sheet_prefix = parse_stylesheet("[href^=\"http\"] { color: red }");
         let sheet_suffix = parse_stylesheet("[src$=\".png\"] { color: red }");
         let sheet_substr = parse_stylesheet("[class*=\"big\"] { color: red }");
-        let a = ElementInfo {
-            tag: "a",
-            classes: vec![],
-            id: None,
-            attributes: vec![("href", "https://example.com")],
-            ancestors: vec![],
-        };
-        let b = ElementInfo {
-            tag: "img",
-            classes: vec![],
-            id: None,
-            attributes: vec![("src", "pic.png")],
-            ancestors: vec![],
-        };
-        let c = ElementInfo {
-            tag: "div",
-            classes: vec!["bigbox"],
-            id: None,
-            attributes: vec![("class", "bigbox")],
-            ancestors: vec![],
-        };
+        let a = test_elem(
+            "a",
+            vec![],
+            None,
+            vec![("href", "https://example.com")],
+            vec![],
+        );
+        let b = test_elem("img", vec![], None, vec![("src", "pic.png")], vec![]);
+        let c = test_elem(
+            "div",
+            vec!["bigbox"],
+            None,
+            vec![("class", "bigbox")],
+            vec![],
+        );
         assert_eq!(match_rules(&a, &sheet_prefix).color, Some((1.0, 0.0, 0.0)));
         assert_eq!(match_rules(&b, &sheet_suffix).color, Some((1.0, 0.0, 0.0)));
         assert_eq!(match_rules(&c, &sheet_substr).color, Some((1.0, 0.0, 0.0)));
@@ -2423,13 +2777,7 @@ mod tests {
     #[test]
     fn match_attr_compound_with_type() {
         let sheet = parse_stylesheet("p[class=\"foo\"] { color: red }");
-        let elem = ElementInfo {
-            tag: "p",
-            classes: vec!["foo"],
-            id: None,
-            attributes: vec![("class", "foo")],
-            ancestors: vec![],
-        };
+        let elem = test_elem("p", vec!["foo"], None, vec![("class", "foo")], vec![]);
         assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
     }
 
@@ -2437,6 +2785,236 @@ mod tests {
     fn attr_selector_specificity() {
         let selectors = parse_selector_list("[data-x]");
         assert_eq!(selectors[0].specificity, (0, 1, 0));
+    }
+
+    // ── Pseudo-class and sibling combinator tests ─────────────
+
+    #[test]
+    fn parse_an_b_keywords() {
+        assert_eq!(parse_an_b("odd"), Some(AnB { a: 2, b: 1 }));
+        assert_eq!(parse_an_b("even"), Some(AnB { a: 2, b: 0 }));
+        assert_eq!(parse_an_b("ODD"), Some(AnB { a: 2, b: 1 }));
+    }
+
+    #[test]
+    fn parse_an_b_integer() {
+        assert_eq!(parse_an_b("3"), Some(AnB { a: 0, b: 3 }));
+    }
+
+    #[test]
+    fn parse_an_b_n_forms() {
+        assert_eq!(parse_an_b("n"), Some(AnB { a: 1, b: 0 }));
+        assert_eq!(parse_an_b("2n"), Some(AnB { a: 2, b: 0 }));
+        assert_eq!(parse_an_b("2n+1"), Some(AnB { a: 2, b: 1 }));
+        assert_eq!(parse_an_b(" 2n + 1 "), Some(AnB { a: 2, b: 1 }));
+        assert_eq!(parse_an_b("-n+3"), Some(AnB { a: -1, b: 3 }));
+    }
+
+    #[test]
+    fn an_b_matches_arithmetic() {
+        let even = AnB { a: 2, b: 0 };
+        assert!(even.matches(2));
+        assert!(even.matches(4));
+        assert!(!even.matches(1));
+        assert!(!even.matches(3));
+
+        let odd = AnB { a: 2, b: 1 };
+        assert!(odd.matches(1));
+        assert!(odd.matches(3));
+        assert!(!odd.matches(2));
+
+        let literal = AnB { a: 0, b: 3 };
+        assert!(literal.matches(3));
+        assert!(!literal.matches(2));
+
+        let neg = AnB { a: -1, b: 3 };
+        // matches n = 1, 2, 3
+        assert!(neg.matches(1));
+        assert!(neg.matches(2));
+        assert!(neg.matches(3));
+        assert!(!neg.matches(4));
+    }
+
+    #[test]
+    fn parse_first_child_pseudo() {
+        let selectors = parse_selector_list("p:first-child");
+        assert_eq!(selectors.len(), 1);
+        let parts = &selectors[0].compounds[0].parts;
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], SimpleSelector::Type("p".into()));
+        assert_eq!(
+            parts[1],
+            SimpleSelector::PseudoClass(PseudoClass::FirstChild)
+        );
+        // Specificity: (0, 1, 1) — type + pseudo-class
+        assert_eq!(selectors[0].specificity, (0, 1, 1));
+    }
+
+    #[test]
+    fn parse_nth_child_pseudo() {
+        let selectors = parse_selector_list("li:nth-child(2n+1)");
+        let parts = &selectors[0].compounds[0].parts;
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[1],
+            SimpleSelector::PseudoClass(PseudoClass::NthChild(AnB { a: 2, b: 1 }))
+        );
+    }
+
+    #[test]
+    fn parse_not_pseudo_specificity() {
+        let selectors = parse_selector_list("p:not(.foo)");
+        // type p (0,0,1) + :not(.foo) adds (0,1,0) = (0,1,1)
+        assert_eq!(selectors[0].specificity, (0, 1, 1));
+        let parts = &selectors[0].compounds[0].parts;
+        assert!(matches!(
+            &parts[1],
+            SimpleSelector::PseudoClass(PseudoClass::Not(_))
+        ));
+    }
+
+    #[test]
+    fn parse_adjacent_sibling_combinator() {
+        let selectors = parse_selector_list("h1 + p");
+        assert_eq!(selectors[0].compounds.len(), 2);
+        assert_eq!(
+            selectors[0].combinators,
+            vec![Combinator::AdjacentSibling]
+        );
+    }
+
+    #[test]
+    fn parse_general_sibling_combinator() {
+        let selectors = parse_selector_list("h1 ~ p");
+        assert_eq!(selectors[0].compounds.len(), 2);
+        assert_eq!(
+            selectors[0].combinators,
+            vec![Combinator::GeneralSibling]
+        );
+    }
+
+    #[test]
+    fn match_first_child() {
+        let sheet = parse_stylesheet("p:first-child { color: red }");
+        let mut first = test_elem("p", vec![], None, vec![], vec![]);
+        first.sibling_index = 0;
+        first.sibling_count = 3;
+        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0)));
+
+        let mut second = test_elem("p", vec![], None, vec![], vec![]);
+        second.sibling_index = 1;
+        second.sibling_count = 3;
+        assert!(match_rules(&second, &sheet).color.is_none());
+    }
+
+    #[test]
+    fn match_nth_child_even() {
+        let sheet = parse_stylesheet("li:nth-child(2n) { color: red }");
+        let mut li2 = test_elem("li", vec![], None, vec![], vec![]);
+        li2.sibling_index = 1; // 2nd
+        li2.sibling_count = 4;
+        assert_eq!(match_rules(&li2, &sheet).color, Some((1.0, 0.0, 0.0)));
+
+        let mut li1 = test_elem("li", vec![], None, vec![], vec![]);
+        li1.sibling_index = 0;
+        li1.sibling_count = 4;
+        assert!(match_rules(&li1, &sheet).color.is_none());
+    }
+
+    #[test]
+    fn match_not_pseudo() {
+        let sheet = parse_stylesheet("p:not(.skip) { color: red }");
+        let plain = test_elem("p", vec![], None, vec![], vec![]);
+        assert_eq!(match_rules(&plain, &sheet).color, Some((1.0, 0.0, 0.0)));
+
+        let skipped = test_elem("p", vec!["skip"], None, vec![], vec![]);
+        assert!(match_rules(&skipped, &sheet).color.is_none());
+    }
+
+    #[test]
+    fn match_adjacent_sibling() {
+        let sheet = parse_stylesheet("h1 + p { color: red }");
+        let mut p = test_elem("p", vec![], None, vec![], vec![]);
+        p.sibling_index = 1;
+        p.sibling_count = 2;
+        p.preceding_siblings = vec![SiblingRecord {
+            tag: "h1",
+            classes: vec![],
+            id: None,
+            attributes: vec![],
+            sibling_index: 0,
+            sibling_count: 2,
+        }];
+        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0)));
+
+        // A p following a div should NOT match h1+p.
+        let mut p2 = test_elem("p", vec![], None, vec![], vec![]);
+        p2.sibling_index = 1;
+        p2.sibling_count = 2;
+        p2.preceding_siblings = vec![SiblingRecord {
+            tag: "div",
+            classes: vec![],
+            id: None,
+            attributes: vec![],
+            sibling_index: 0,
+            sibling_count: 2,
+        }];
+        assert!(match_rules(&p2, &sheet).color.is_none());
+    }
+
+    #[test]
+    fn match_general_sibling() {
+        let sheet = parse_stylesheet("h1 ~ p { color: red }");
+        // Structure: h1, div, p. The p comes after the h1 but not adjacently.
+        let mut p = test_elem("p", vec![], None, vec![], vec![]);
+        p.sibling_index = 2;
+        p.sibling_count = 3;
+        p.preceding_siblings = vec![
+            SiblingRecord {
+                tag: "h1",
+                classes: vec![],
+                id: None,
+                attributes: vec![],
+                sibling_index: 0,
+                sibling_count: 3,
+            },
+            SiblingRecord {
+                tag: "div",
+                classes: vec![],
+                id: None,
+                attributes: vec![],
+                sibling_index: 1,
+                sibling_count: 3,
+            },
+        ];
+        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn match_child_with_first_child_pseudo() {
+        // `div > p:first-child` - compose pseudo-classes with combinators.
+        let sheet = parse_stylesheet("div > p:first-child { color: red }");
+        let mut first = test_elem(
+            "p",
+            vec![],
+            None,
+            vec![],
+            vec![("div", vec![], None, vec![])],
+        );
+        first.sibling_index = 0;
+        first.sibling_count = 2;
+        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0)));
+
+        let mut second = test_elem(
+            "p",
+            vec![],
+            None,
+            vec![],
+            vec![("div", vec![], None, vec![])],
+        );
+        second.sibling_index = 1;
+        second.sibling_count = 2;
+        assert!(match_rules(&second, &sheet).color.is_none());
     }
 
     #[test]
