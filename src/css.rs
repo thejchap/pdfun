@@ -152,6 +152,14 @@ pub enum BoxSizing {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TextTransform {
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ListStyleType {
     None,
     Disc,
@@ -162,6 +170,13 @@ pub enum ListStyleType {
     UpperAlpha,
     LowerRoman,
     UpperRoman,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ListStylePosition {
+    #[default]
+    Outside,
+    Inside,
 }
 
 // ── PageStyle (@page rule) ──────────────────────────────────
@@ -217,6 +232,7 @@ macro_rules! with_style_fields {
             (display,           copy,  no),
             (text_decoration,   copy,  yes),
             (list_style_type,   copy,  yes),
+            (list_style_position, copy, yes),
             (page_break_before, copy,  no),
             (page_break_after,  copy,  no),
             (width,             copy,  no),
@@ -228,6 +244,8 @@ macro_rules! with_style_fields {
             (letter_spacing,    copy,  yes),
             (word_spacing,      copy,  yes),
             (box_sizing,        copy,  no),
+            (text_transform,    copy,  yes),
+            (text_indent,       copy,  yes),
         }
     };
 }
@@ -314,6 +332,7 @@ pub struct ComputedStyle {
     pub display: Option<DisplayValue>,
     pub text_decoration: Option<TextDecoration>,
     pub list_style_type: Option<ListStyleType>,
+    pub list_style_position: Option<ListStylePosition>,
     pub page_break_before: Option<PageBreak>,
     pub page_break_after: Option<PageBreak>,
     pub width: Option<CssLength>,
@@ -325,6 +344,8 @@ pub struct ComputedStyle {
     pub letter_spacing: Option<CssLength>,
     pub word_spacing: Option<CssLength>,
     pub box_sizing: Option<BoxSizing>,
+    pub text_transform: Option<TextTransform>,
+    pub text_indent: Option<CssLength>,
 }
 
 
@@ -364,8 +385,68 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
                 Ok((r / 255.0, g / 255.0, b / 255.0))
             })
         }
+        Token::Function(name)
+            if name.eq_ignore_ascii_case("hsl") || name.eq_ignore_ascii_case("hsla") =>
+        {
+            input.parse_nested_block(|input| {
+                let h = expect_hue(input)?;
+                input.expect_comma()?;
+                let s = input.expect_percentage()?.clamp(0.0, 1.0);
+                input.expect_comma()?;
+                let l = input.expect_percentage()?.clamp(0.0, 1.0);
+                // Optional alpha: ", <number>" — parsed and ignored.
+                let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
+                    i.expect_comma()?;
+                    let _ = i.expect_number()?;
+                    Ok(())
+                });
+                let (r, g, b) = hsl_to_rgb(h, s, l);
+                Ok((r, g, b))
+            })
+        }
         _ => Err(location.new_custom_error(())),
     }
+}
+
+fn expect_hue<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
+    let location = input.current_source_location();
+    let token = input.next()?.clone();
+    match &token {
+        Token::Number { value, .. } => Ok(*value),
+        Token::Dimension { value, unit, .. } => {
+            let unit = unit.to_ascii_lowercase();
+            let degrees = match unit.as_str() {
+                "deg" => *value,
+                "grad" => *value * 0.9,
+                "rad" => value.to_degrees(),
+                "turn" => *value * 360.0,
+                _ => return Err(location.new_custom_error(())),
+            };
+            Ok(degrees)
+        }
+        _ => Err(location.new_custom_error(())),
+    }
+}
+
+fn hsl_to_rgb(hue_deg: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    let h = hue_deg.rem_euclid(360.0) / 60.0;
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = if h < 1.0 {
+        (c, x, 0.0)
+    } else if h < 2.0 {
+        (x, c, 0.0)
+    } else if h < 3.0 {
+        (0.0, c, x)
+    } else if h < 4.0 {
+        (0.0, x, c)
+    } else if h < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = l - c / 2.0;
+    (r1 + m, g1 + m, b1 + m)
 }
 
 // ── Length parsing ──────────────────────────────────────────
@@ -835,6 +916,21 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 };
                 self.style.box_sizing = Some(bs);
             }
+            "text-indent" => {
+                self.style.text_indent = Some(parse_css_length(input)?);
+            }
+            "text-transform" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let tt = match ident.to_ascii_lowercase().as_str() {
+                    "none" => TextTransform::None,
+                    "uppercase" => TextTransform::Uppercase,
+                    "lowercase" => TextTransform::Lowercase,
+                    "capitalize" => TextTransform::Capitalize,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.text_transform = Some(tt);
+            }
             "list-style-type" => {
                 let location = input.current_source_location();
                 let ident = input.expect_ident()?.clone();
@@ -851,6 +947,16 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     _ => return Err(location.new_custom_error(())),
                 };
                 self.style.list_style_type = Some(lst);
+            }
+            "list-style-position" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let pos = match ident.to_ascii_lowercase().as_str() {
+                    "outside" => ListStylePosition::Outside,
+                    "inside" => ListStylePosition::Inside,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.list_style_position = Some(pos);
             }
             "list-style" => {
                 // Shorthand: only capture the list-style-type component.
@@ -946,6 +1052,31 @@ pub enum SimpleSelector {
     Id(String),
     /// Matches any element (`*`).
     Universal,
+    /// Matches element by attribute (e.g., `[name]`, `[name="value"]`).
+    Attribute {
+        name: String,
+        op: AttrOp,
+        value: Option<String>,
+    },
+}
+
+/// Attribute selector operator.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttrOp {
+    /// `[name]` — attribute exists.
+    Exists,
+    /// `[name="value"]` — exact equality.
+    Equals,
+    /// `[name~="value"]` — whitespace-separated list contains value.
+    Includes,
+    /// `[name|="value"]` — equals value or starts with `value-`.
+    DashMatch,
+    /// `[name^="value"]` — starts with value.
+    Prefix,
+    /// `[name$="value"]` — ends with value.
+    Suffix,
+    /// `[name*="value"]` — contains value.
+    Substring,
 }
 
 /// How two compound selectors are combined.
@@ -965,12 +1096,58 @@ pub struct CompoundSelector {
 }
 
 impl CompoundSelector {
-    fn matches(&self, tag: &str, classes: &[&str], id: Option<&str>) -> bool {
+    fn matches(
+        &self,
+        tag: &str,
+        classes: &[&str],
+        id: Option<&str>,
+        attributes: &[(&str, &str)],
+    ) -> bool {
         self.parts.iter().all(|part| match part {
             SimpleSelector::Type(t) => t.eq_ignore_ascii_case(tag),
             SimpleSelector::Class(c) => classes.iter().any(|cl| cl.eq_ignore_ascii_case(c)),
             SimpleSelector::Id(i) => id.is_some_and(|elem_id| elem_id.eq_ignore_ascii_case(i)),
             SimpleSelector::Universal => true,
+            SimpleSelector::Attribute { name, op, value } => {
+                let attr_value = attributes
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| *v);
+                match (op, value) {
+                    (AttrOp::Exists, _) => attr_value.is_some(),
+                    (_, None) => attr_value.is_some(),
+                    (AttrOp::Equals, Some(v)) => attr_value == Some(v.as_str()),
+                    (AttrOp::Includes, Some(v)) => {
+                        if v.is_empty() || v.contains(char::is_whitespace) {
+                            return false;
+                        }
+                        attr_value
+                            .map(|av| av.split_whitespace().any(|tok| tok == v))
+                            .unwrap_or(false)
+                    }
+                    (AttrOp::DashMatch, Some(v)) => attr_value
+                        .map(|av| av == v || av.starts_with(&format!("{}-", v)))
+                        .unwrap_or(false),
+                    (AttrOp::Prefix, Some(v)) => {
+                        if v.is_empty() {
+                            return false;
+                        }
+                        attr_value.map(|av| av.starts_with(v.as_str())).unwrap_or(false)
+                    }
+                    (AttrOp::Suffix, Some(v)) => {
+                        if v.is_empty() {
+                            return false;
+                        }
+                        attr_value.map(|av| av.ends_with(v.as_str())).unwrap_or(false)
+                    }
+                    (AttrOp::Substring, Some(v)) => {
+                        if v.is_empty() {
+                            return false;
+                        }
+                        attr_value.map(|av| av.contains(v.as_str())).unwrap_or(false)
+                    }
+                }
+            }
         })
     }
 }
@@ -1088,7 +1265,7 @@ fn parse_one_selector_from_text(text: &str) -> Option<SelectorChain> {
     })
 }
 
-/// Parse a compound selector from a text token like `p.note#main`.
+/// Parse a compound selector from a text token like `p.note#main[data-x="y"]`.
 fn parse_compound_from_text(
     text: &str,
     id_count: &mut u16,
@@ -1098,12 +1275,17 @@ fn parse_compound_from_text(
     let mut parts: Vec<SimpleSelector> = Vec::new();
     let mut chars = text.char_indices().peekable();
 
+    // Stop characters for ident-like runs.
+    fn is_boundary(c: char) -> bool {
+        c == '.' || c == '#' || c == '['
+    }
+
     while let Some(&(pos, ch)) = chars.peek() {
         match ch {
             '#' => {
                 chars.next();
                 let start = pos + 1;
-                while chars.peek().is_some_and(|&(_, c)| c != '.' && c != '#') {
+                while chars.peek().is_some_and(|&(_, c)| !is_boundary(c)) {
                     chars.next();
                 }
                 let end = chars.peek().map_or(text.len(), |&(i, _)| i);
@@ -1116,7 +1298,7 @@ fn parse_compound_from_text(
             '.' => {
                 chars.next();
                 let start = pos + 1;
-                while chars.peek().is_some_and(|&(_, c)| c != '.' && c != '#') {
+                while chars.peek().is_some_and(|&(_, c)| !is_boundary(c)) {
                     chars.next();
                 }
                 let end = chars.peek().map_or(text.len(), |&(i, _)| i);
@@ -1130,9 +1312,53 @@ fn parse_compound_from_text(
                 chars.next();
                 parts.push(SimpleSelector::Universal);
             }
+            '[' => {
+                chars.next(); // consume `[`
+                // Find the matching `]`, respecting quoted strings.
+                let content_start = chars.peek().map_or(text.len(), |&(i, _)| i);
+                let mut content_end = text.len();
+                let mut in_quote: Option<char> = None;
+                let mut escaped = false;
+                while let Some(&(i, c)) = chars.peek() {
+                    if escaped {
+                        escaped = false;
+                        chars.next();
+                        continue;
+                    }
+                    if c == '\\' {
+                        escaped = true;
+                        chars.next();
+                        continue;
+                    }
+                    if let Some(q) = in_quote {
+                        if c == q {
+                            in_quote = None;
+                        }
+                        chars.next();
+                        continue;
+                    }
+                    if c == '"' || c == '\'' {
+                        in_quote = Some(c);
+                        chars.next();
+                        continue;
+                    }
+                    if c == ']' {
+                        content_end = i;
+                        chars.next(); // consume `]`
+                        break;
+                    }
+                    chars.next();
+                }
+                let inner = &text[content_start..content_end];
+                if let Some(attr_sel) = parse_attribute_selector(inner) {
+                    parts.push(attr_sel);
+                    // Attribute selectors count as class-level specificity.
+                    *class_count += 1;
+                }
+            }
             _ => {
                 let start = pos;
-                while chars.peek().is_some_and(|&(_, c)| c != '.' && c != '#') {
+                while chars.peek().is_some_and(|&(_, c)| !is_boundary(c)) {
                     chars.next();
                 }
                 let end = chars.peek().map_or(text.len(), |&(i, _)| i);
@@ -1146,6 +1372,75 @@ fn parse_compound_from_text(
     }
 
     CompoundSelector { parts }
+}
+
+/// Parse the contents inside `[` ... `]` into an attribute selector.
+fn parse_attribute_selector(inner: &str) -> Option<SimpleSelector> {
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    fn is_name_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    }
+
+    // Scan for end of attribute name.
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && is_name_char(bytes[i] as char) {
+        i += 1;
+    }
+    let name = inner[..i].trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let rest = inner[i..].trim_start();
+    if rest.is_empty() {
+        return Some(SimpleSelector::Attribute {
+            name: name.to_string(),
+            op: AttrOp::Exists,
+            value: None,
+        });
+    }
+
+    let (op, value_str) = if let Some(stripped) = rest.strip_prefix("~=") {
+        (AttrOp::Includes, stripped)
+    } else if let Some(stripped) = rest.strip_prefix("|=") {
+        (AttrOp::DashMatch, stripped)
+    } else if let Some(stripped) = rest.strip_prefix("^=") {
+        (AttrOp::Prefix, stripped)
+    } else if let Some(stripped) = rest.strip_prefix("$=") {
+        (AttrOp::Suffix, stripped)
+    } else if let Some(stripped) = rest.strip_prefix("*=") {
+        (AttrOp::Substring, stripped)
+    } else if let Some(stripped) = rest.strip_prefix('=') {
+        (AttrOp::Equals, stripped)
+    } else {
+        // Unrecognized — treat as Exists.
+        return Some(SimpleSelector::Attribute {
+            name: name.to_string(),
+            op: AttrOp::Exists,
+            value: None,
+        });
+    };
+
+    let value_str = value_str.trim();
+    // Strip surrounding quotes if present.
+    let value = if (value_str.starts_with('"') && value_str.ends_with('"') && value_str.len() >= 2)
+        || (value_str.starts_with('\'') && value_str.ends_with('\'') && value_str.len() >= 2)
+    {
+        value_str[1..value_str.len() - 1].to_string()
+    } else {
+        value_str.to_string()
+    };
+
+    Some(SimpleSelector::Attribute {
+        name: name.to_string(),
+        op,
+        value: Some(value),
+    })
 }
 
 // ── @page rule parsing ───────────────────────────────────
@@ -1269,9 +1564,16 @@ pub struct ElementInfo<'a> {
     pub tag: &'a str,
     pub classes: Vec<&'a str>,
     pub id: Option<&'a str>,
+    /// All attributes on the element (name, value).
+    pub attributes: Vec<(&'a str, &'a str)>,
     /// Ancestor chain from parent to root.
-    /// Each entry: (tag, classes, id).
-    pub ancestors: Vec<(&'a str, Vec<&'a str>, Option<&'a str>)>,
+    /// Each entry: (tag, classes, id, attributes).
+    pub ancestors: Vec<(
+        &'a str,
+        Vec<&'a str>,
+        Option<&'a str>,
+        Vec<(&'a str, &'a str)>,
+    )>,
 }
 
 /// Match all rules in a stylesheet against an element, returning the
@@ -1307,7 +1609,7 @@ pub fn match_rules(element: &ElementInfo<'_>, stylesheet: &Stylesheet) -> Comput
 fn selector_matches(selector: &SelectorChain, element: &ElementInfo<'_>) -> bool {
     // The subject (first compound after reversal) must match the element
     let subject = &selector.compounds[0];
-    if !subject.matches(element.tag, &element.classes, element.id) {
+    if !subject.matches(element.tag, &element.classes, element.id, &element.attributes) {
         return false;
     }
 
@@ -1328,8 +1630,8 @@ fn selector_matches(selector: &SelectorChain, element: &ElementInfo<'_>) -> bool
                 if ancestor_idx >= element.ancestors.len() {
                     return false;
                 }
-                let (tag, ref classes, id) = element.ancestors[ancestor_idx];
-                if !compound.matches(tag, classes, id) {
+                let (tag, ref classes, id, ref attrs) = element.ancestors[ancestor_idx];
+                if !compound.matches(tag, classes, id, attrs) {
                     return false;
                 }
                 ancestor_idx += 1;
@@ -1338,9 +1640,9 @@ fn selector_matches(selector: &SelectorChain, element: &ElementInfo<'_>) -> bool
                 // Must match some ancestor
                 let mut found = false;
                 while ancestor_idx < element.ancestors.len() {
-                    let (tag, ref classes, id) = element.ancestors[ancestor_idx];
+                    let (tag, ref classes, id, ref attrs) = element.ancestors[ancestor_idx];
                     ancestor_idx += 1;
-                    if compound.matches(tag, classes, id) {
+                    if compound.matches(tag, classes, id, attrs) {
                         found = true;
                         break;
                     }
@@ -1945,7 +2247,7 @@ mod tests {
     #[test]
     fn match_type_selector() {
         let sheet = parse_stylesheet("p { color: red }");
-        let elem = ElementInfo { tag: "p", classes: vec![], id: None, ancestors: vec![] };
+        let elem = ElementInfo { tag: "p", classes: vec![], id: None, attributes: vec![], ancestors: vec![] };
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
     }
@@ -1953,7 +2255,7 @@ mod tests {
     #[test]
     fn match_class_selector() {
         let sheet = parse_stylesheet(".red { color: red }");
-        let elem = ElementInfo { tag: "p", classes: vec!["red"], id: None, ancestors: vec![] };
+        let elem = ElementInfo { tag: "p", classes: vec!["red"], id: None, attributes: vec![], ancestors: vec![] };
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
     }
@@ -1961,7 +2263,7 @@ mod tests {
     #[test]
     fn no_match_wrong_class() {
         let sheet = parse_stylesheet(".red { color: red }");
-        let elem = ElementInfo { tag: "p", classes: vec!["blue"], id: None, ancestors: vec![] };
+        let elem = ElementInfo { tag: "p", classes: vec!["blue"], id: None, attributes: vec![], ancestors: vec![] };
         let style = match_rules(&elem, &sheet);
         assert!(style.color.is_none());
     }
@@ -1970,8 +2272,8 @@ mod tests {
     fn match_descendant_selector() {
         let sheet = parse_stylesheet("div p { color: red }");
         let elem = ElementInfo {
-            tag: "p", classes: vec![], id: None,
-            ancestors: vec![("div", vec![], None)],
+            tag: "p", classes: vec![], id: None, attributes: vec![],
+            ancestors: vec![("div", vec![], None, vec![])],
         };
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
@@ -1981,8 +2283,8 @@ mod tests {
     fn match_child_selector() {
         let sheet = parse_stylesheet("div > p { color: red }");
         let elem = ElementInfo {
-            tag: "p", classes: vec![], id: None,
-            ancestors: vec![("div", vec![], None)],
+            tag: "p", classes: vec![], id: None, attributes: vec![],
+            ancestors: vec![("div", vec![], None, vec![])],
         };
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
@@ -1992,8 +2294,8 @@ mod tests {
     fn child_no_match_grandchild() {
         let sheet = parse_stylesheet("div > p { color: red }");
         let elem = ElementInfo {
-            tag: "p", classes: vec![], id: None,
-            ancestors: vec![("blockquote", vec![], None), ("div", vec![], None)],
+            tag: "p", classes: vec![], id: None, attributes: vec![],
+            ancestors: vec![("blockquote", vec![], None, vec![]), ("div", vec![], None, vec![])],
         };
         let style = match_rules(&elem, &sheet);
         assert!(style.color.is_none());
@@ -2002,9 +2304,139 @@ mod tests {
     #[test]
     fn specificity_class_beats_type() {
         let sheet = parse_stylesheet("p { color: red } .blue { color: blue }");
-        let elem = ElementInfo { tag: "p", classes: vec!["blue"], id: None, ancestors: vec![] };
+        let elem = ElementInfo { tag: "p", classes: vec!["blue"], id: None, attributes: vec![], ancestors: vec![] };
         let style = match_rules(&elem, &sheet);
         assert_eq!(style.color, Some((0.0, 0.0, 1.0)));
+    }
+
+    // ── Attribute selector tests ──────────────────────────────
+
+    #[test]
+    fn match_attr_exists() {
+        let sheet = parse_stylesheet("[data-x] { color: red }");
+        let elem = ElementInfo {
+            tag: "p",
+            classes: vec![],
+            id: None,
+            attributes: vec![("data-x", "")],
+            ancestors: vec![],
+        };
+        let style = match_rules(&elem, &sheet);
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn match_attr_equals() {
+        let sheet = parse_stylesheet("[data-role=\"primary\"] { color: red }");
+        let elem = ElementInfo {
+            tag: "p",
+            classes: vec![],
+            id: None,
+            attributes: vec![("data-role", "primary")],
+            ancestors: vec![],
+        };
+        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn match_attr_includes() {
+        let sheet = parse_stylesheet("[class~=\"note\"] { color: red }");
+        let elem_match = ElementInfo {
+            tag: "p",
+            classes: vec!["intro", "note", "main"],
+            id: None,
+            attributes: vec![("class", "intro note main")],
+            ancestors: vec![],
+        };
+        assert_eq!(match_rules(&elem_match, &sheet).color, Some((1.0, 0.0, 0.0)));
+
+        let elem_no = ElementInfo {
+            tag: "p",
+            classes: vec!["notepad"],
+            id: None,
+            attributes: vec![("class", "notepad")],
+            ancestors: vec![],
+        };
+        assert!(match_rules(&elem_no, &sheet).color.is_none());
+    }
+
+    #[test]
+    fn match_attr_dashmatch() {
+        let sheet = parse_stylesheet("[lang|=\"en\"] { color: red }");
+        let a = ElementInfo {
+            tag: "p",
+            classes: vec![],
+            id: None,
+            attributes: vec![("lang", "en")],
+            ancestors: vec![],
+        };
+        let b = ElementInfo {
+            tag: "p",
+            classes: vec![],
+            id: None,
+            attributes: vec![("lang", "en-US")],
+            ancestors: vec![],
+        };
+        let c = ElementInfo {
+            tag: "p",
+            classes: vec![],
+            id: None,
+            attributes: vec![("lang", "english")],
+            ancestors: vec![],
+        };
+        assert_eq!(match_rules(&a, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&b, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert!(match_rules(&c, &sheet).color.is_none());
+    }
+
+    #[test]
+    fn match_attr_prefix_suffix_substring() {
+        let sheet_prefix = parse_stylesheet("[href^=\"http\"] { color: red }");
+        let sheet_suffix = parse_stylesheet("[src$=\".png\"] { color: red }");
+        let sheet_substr = parse_stylesheet("[class*=\"big\"] { color: red }");
+        let a = ElementInfo {
+            tag: "a",
+            classes: vec![],
+            id: None,
+            attributes: vec![("href", "https://example.com")],
+            ancestors: vec![],
+        };
+        let b = ElementInfo {
+            tag: "img",
+            classes: vec![],
+            id: None,
+            attributes: vec![("src", "pic.png")],
+            ancestors: vec![],
+        };
+        let c = ElementInfo {
+            tag: "div",
+            classes: vec!["bigbox"],
+            id: None,
+            attributes: vec![("class", "bigbox")],
+            ancestors: vec![],
+        };
+        assert_eq!(match_rules(&a, &sheet_prefix).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&b, &sheet_suffix).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&c, &sheet_substr).color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn match_attr_compound_with_type() {
+        let sheet = parse_stylesheet("p[class=\"foo\"] { color: red }");
+        let elem = ElementInfo {
+            tag: "p",
+            classes: vec!["foo"],
+            id: None,
+            attributes: vec![("class", "foo")],
+            ancestors: vec![],
+        };
+        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn attr_selector_specificity() {
+        let selectors = parse_selector_list("[data-x]");
+        assert_eq!(selectors[0].specificity, (0, 1, 0));
     }
 
     #[test]

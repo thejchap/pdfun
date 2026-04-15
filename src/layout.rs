@@ -99,6 +99,13 @@ pub struct BlockStyle {
     /// refer to the content area; `BorderBox` makes them include padding
     /// and border.
     pub box_sizing: css::BoxSizing,
+    /// CSS `text-indent`: horizontal indent of the first line of text in a
+    /// block, in points. Positive values shift the first line to the right.
+    pub text_indent: f32,
+    /// CSS `list-style-position`: whether the marker hangs outside the
+    /// principal block (default) or flows inline as the first inline box
+    /// on the first line.
+    pub list_style_position: css::ListStylePosition,
 }
 
 impl BlockStyle {
@@ -205,6 +212,23 @@ pub enum Block {
     Paragraph(Paragraph),
     Table(Table),
     Image(ImageBlock),
+    /// Marks the start of a CSS block container (e.g. a `<div>` wrapping
+    /// block children). Emitted by `html_render` so that the container's
+    /// margins can participate in parent/child collapsing (CSS 2.1 § 8.3.1).
+    /// The container itself does not paint — its background/border/padding
+    /// are currently dropped. Paired LIFO with a matching `ContainerEnd`.
+    ContainerStart(BlockStyle),
+    /// Marks the end of a container opened by `ContainerStart`.
+    ContainerEnd(BlockStyle),
+}
+
+/// Per-frame state tracked for each open container during `finish()`. Only
+/// `has_content` is mutated — it starts false and flips true when any
+/// paragraph, table, or image renders inside the frame. `ContainerEnd` uses
+/// it to decide whether to self-collapse (empty frame) or collapse with its
+/// child's trailing margin (non-empty frame).
+struct OpenContainer {
+    has_content: bool,
 }
 
 // ── Wrapping internals ──────────────────────────────────────
@@ -232,6 +256,29 @@ struct WrappedLine {
     segments: Vec<LineSegment>,
     total_width: f32,
     max_font_size: f32,
+}
+
+/// Collapse two adjoining vertical margins per CSS 2.1 § 8.3.1.
+///
+/// - Both non-negative: max of the two.
+/// - Both negative: min of the two (i.e. the most-negative).
+/// - Mixed sign: their sum (positive + negative).
+fn collapse_margins(a: f32, b: f32) -> f32 {
+    if a >= 0.0 && b >= 0.0 {
+        a.max(b)
+    } else if a < 0.0 && b < 0.0 {
+        a.min(b)
+    } else {
+        a + b
+    }
+}
+
+/// Amount to subtract from `cursor_y` to advance into a block whose
+/// top margin is `curr_top`, given that `pending` of bottom margin from
+/// the previous block has already been consumed. Returns the delta such
+/// that the resulting collapsed advance equals `collapse(pending, curr_top)`.
+fn collapsed_top_delta(pending: f32, curr_top: f32) -> f32 {
+    collapse_margins(pending, curr_top) - pending
 }
 
 /// Extra per-line spacing applied during wrapping. `letter_spacing` is
@@ -546,6 +593,19 @@ impl LayoutInner {
         self.blocks.push(Block::Image(img));
     }
 
+    /// Emit a container-start sentinel. Paired LIFO with `push_container_end`
+    /// by `html_render` — the box tree refactor Stage 1 uses this to record
+    /// a `<div>`'s margins so they can participate in parent/child collapse
+    /// (CSS 2.1 § 8.3.1). The container itself does not paint; its padding,
+    /// border, and background are currently dropped per the Stage 1 scope.
+    pub fn push_container_start(&mut self, style: BlockStyle) {
+        self.blocks.push(Block::ContainerStart(style));
+    }
+
+    pub fn push_container_end(&mut self, style: BlockStyle) {
+        self.blocks.push(Block::ContainerEnd(style));
+    }
+
     pub fn push_hr(&mut self) {
         self.blocks.push(Block::Paragraph(Paragraph {
             runs: vec![],
@@ -556,6 +616,18 @@ impl LayoutInner {
             is_hr: true,
             preserve_whitespace: false,
         }));
+    }
+
+    /// Stage 0 of the box-tree refactor: accept a `Vec<box_tree::Node>`,
+    /// lower it to the existing flat block list via `flatten_tree`, and
+    /// forward it into `self.blocks`. No production caller uses this yet
+    /// — it exists so Stage 1 can swap `html_render` over to building the
+    /// tree without also needing to rewrite `finish()` in the same commit.
+    /// See `/home/justinchapman/.claude/plans/staged-rolling-leaf.md`.
+    #[allow(dead_code)]
+    pub(crate) fn push_box_tree(&mut self, tree: Vec<crate::box_tree::Node>) {
+        let flat = crate::box_tree::flatten_tree(tree);
+        self.blocks.extend(flat);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -581,6 +653,24 @@ impl LayoutInner {
         let mut current_page = new_page(doc, self.page_width, self.page_height);
         let mut cursor_y = content_top;
         let mut current_col: u32 = 0;
+        // Pending bottom margin from the previous block. When starting the
+        // next block we collapse this against its top margin instead of
+        // summing the two (CSS 2.1 § 8.3.1 adjoining margins). Reset to
+        // zero at any page or column break, since margins do not collapse
+        // across a break in our model.
+        let mut pending_bottom: f32 = 0.0;
+        // Top margin accumulated from `ContainerStart` sentinels that has
+        // not yet been applied to `cursor_y`. When the next paragraph/table/
+        // image renders, its effective `margin_top` is collapsed against
+        // this value so parent/child margins merge (CSS 2.1 § 8.3.1 Stage
+        // B2). When a container closes empty, its `margin_bottom` also
+        // collapses through this path (Stage B3 self-collapse).
+        let mut pending_container_top: f32 = 0.0;
+        // Stack of currently-open container frames. Each paragraph/table/
+        // image marks every open frame as `has_content=true`; `ContainerEnd`
+        // uses that flag to pick between self-collapse (empty frame) and
+        // collapsing its `margin_bottom` into the existing `pending_bottom`.
+        let mut open_containers: Vec<OpenContainer> = Vec::new();
 
         // Helper: x-offset for a given column
         let margin_left = self.margin_left;
@@ -588,10 +678,37 @@ impl LayoutInner {
             margin_left + col as f32 * (col_width + col_gap)
         };
 
+        // Fold any pending container top margin into pending_bottom so the
+        // leaf render path below can use its existing collapse logic
+        // unchanged. Advances cursor by the delta between the old
+        // pending_bottom and the new collapsed value, matching the
+        // "already-spent" invariant that pending_bottom represents.
+        let fold_container_top =
+            |cursor_y: &mut f32, pending_bottom: &mut f32, pending_top: &mut f32| {
+                if *pending_top == 0.0 {
+                    return;
+                }
+                let combined = collapse_margins(*pending_bottom, *pending_top);
+                let delta = combined - *pending_bottom;
+                if delta > 0.0 {
+                    *cursor_y -= delta;
+                }
+                *pending_bottom = combined;
+                *pending_top = 0.0;
+            };
+
         for block_enum in &blocks {
             let block = match block_enum {
                 Block::Paragraph(p) => p,
                 Block::Table(t) => {
+                    fold_container_top(
+                        &mut cursor_y,
+                        &mut pending_bottom,
+                        &mut pending_container_top,
+                    );
+                    for frame in open_containers.iter_mut() {
+                        frame.has_content = true;
+                    }
                     self.render_table(
                         &mut current_page,
                         doc,
@@ -602,10 +719,19 @@ impl LayoutInner {
                         col_width,
                         col_gap,
                         content_top,
+                        &mut pending_bottom,
                     )?;
                     continue;
                 }
                 Block::Image(img) => {
+                    fold_container_top(
+                        &mut cursor_y,
+                        &mut pending_bottom,
+                        &mut pending_container_top,
+                    );
+                    for frame in open_containers.iter_mut() {
+                        frame.has_content = true;
+                    }
                     self.render_image(
                         &mut current_page,
                         doc,
@@ -616,11 +742,94 @@ impl LayoutInner {
                         col_width,
                         col_gap,
                         content_top,
+                        &mut pending_bottom,
                     );
+                    continue;
+                }
+                Block::ContainerStart(style) => {
+                    // Apply page-break-before: flush any pending margin and
+                    // advance past the current page before recording the
+                    // container's margin_top. (Matches the paragraph path:
+                    // break-before is honored only when we're not already
+                    // at the top of the content area.)
+                    if matches!(style.page_break_before, Some(css::PageBreak::Always))
+                        && cursor_y < content_top
+                    {
+                        self.advance_column_or_page(
+                            &mut current_page,
+                            doc,
+                            &mut cursor_y,
+                            &mut current_col,
+                            col_count,
+                            col_width,
+                            col_gap,
+                            content_top,
+                        );
+                        pending_bottom = 0.0;
+                        pending_container_top = 0.0;
+                    }
+                    // Container's margin_top joins the pending pre-content
+                    // margin buffer. It will collapse with the next child's
+                    // margin_top when that child renders.
+                    pending_container_top =
+                        collapse_margins(pending_container_top, style.margin_top);
+                    open_containers.push(OpenContainer { has_content: false });
+                    continue;
+                }
+                Block::ContainerEnd(style) => {
+                    let frame = open_containers.pop().expect(
+                        "ContainerEnd without matching ContainerStart — html_render bug",
+                    );
+                    // Compute the "contribution" this container makes to
+                    // the existing pending_bottom. Empty containers (no
+                    // content was ever painted inside them) self-collapse
+                    // top+bottom into a single margin that also folds in
+                    // with the surrounding flow. Non-empty containers just
+                    // have their bottom margin collapse with the child's
+                    // trailing pending_bottom.
+                    let contribution = if frame.has_content {
+                        style.margin_bottom
+                    } else {
+                        let c = collapse_margins(pending_container_top, style.margin_bottom);
+                        pending_container_top = 0.0;
+                        c
+                    };
+                    let new_pending = collapse_margins(pending_bottom, contribution);
+                    // pending_bottom tracks margin already spent from
+                    // cursor_y. If the collapsed value is larger than what
+                    // was already spent, advance cursor by the delta.
+                    let delta = new_pending - pending_bottom;
+                    if delta > 0.0 {
+                        cursor_y -= delta;
+                    }
+                    pending_bottom = new_pending;
+                    // page-break-after on the container: advance now.
+                    if matches!(style.page_break_after, Some(css::PageBreak::Always)) {
+                        self.advance_column_or_page(
+                            &mut current_page,
+                            doc,
+                            &mut cursor_y,
+                            &mut current_col,
+                            col_count,
+                            col_width,
+                            col_gap,
+                            content_top,
+                        );
+                        pending_bottom = 0.0;
+                        pending_container_top = 0.0;
+                    }
                     continue;
                 }
             };
             if block.is_hr {
+                fold_container_top(
+                    &mut cursor_y,
+                    &mut pending_bottom,
+                    &mut pending_container_top,
+                );
+                for frame in open_containers.iter_mut() {
+                    frame.has_content = true;
+                }
                 if cursor_y - 12.0 < self.margin_bottom && cursor_y < content_top {
                     self.advance_column_or_page(
                         &mut current_page,
@@ -668,6 +877,22 @@ impl LayoutInner {
                     col_gap,
                     content_top,
                 );
+                pending_container_top = 0.0;
+            }
+
+            // Fold any container top margin into pending_bottom so the
+            // existing collapse logic below absorbs it without needing
+            // a second variable in its arithmetic.
+            fold_container_top(
+                &mut cursor_y,
+                &mut pending_bottom,
+                &mut pending_container_top,
+            );
+            // Any leaf render marks every currently-open container frame
+            // as "has content" so its matching `ContainerEnd` collapses
+            // child/parent margin_bottom instead of self-collapsing.
+            for frame in open_containers.iter_mut() {
+                frame.has_content = true;
             }
 
             // Available width after margins. CSS `width` sets the content
@@ -700,9 +925,37 @@ impl LayoutInner {
                 letter_spacing: block.style.letter_spacing,
                 word_spacing: block.style.word_spacing,
             };
+            // CSS text-indent reserves space on the first line. We model it
+            // by wrapping against (width - indent) — all lines get the same
+            // narrower width — and then shifting only the first line's
+            // starting x by `indent`. Lines 2+ leave slight extra space on
+            // the right, but nothing overflows.
+            let text_indent = block.style.text_indent.max(0.0);
+            // `list-style-position: inside` flows the marker as the first
+            // inline box on the first line. We model it the same way as
+            // text-indent: narrow wrap_width by (marker_width + gap) and
+            // shift only the first line's starting x by that amount.
+            let marker_gap = 6.0_f32;
+            let marker_width_outside = block
+                .marker
+                .as_ref()
+                .map(|m| {
+                    font_metrics::measure_str(&m.text, &m.font_name, m.font_size).unwrap_or(0.0)
+                })
+                .unwrap_or(0.0);
+            let inside_indent = if matches!(
+                block.style.list_style_position,
+                css::ListStylePosition::Inside
+            ) && block.marker.is_some()
+            {
+                marker_width_outside + marker_gap
+            } else {
+                0.0
+            };
+            let wrap_width = (text_area_width - text_indent - inside_indent).max(0.0);
             let wrapped_lines = wrap_runs_impl(
                 &block.runs,
-                text_area_width,
+                wrap_width,
                 block.preserve_whitespace,
                 spacing,
             )?;
@@ -716,8 +969,8 @@ impl LayoutInner {
             let block_text_height = wrapped_lines.len() as f32 * line_height;
             let box_height =
                 block.style.padding_top + block_text_height + block.style.padding_bottom;
-            let block_total_height =
-                block.style.margin_top + box_height + block.style.margin_bottom;
+            let top_delta = collapsed_top_delta(pending_bottom, block.style.margin_top);
+            let block_total_height = top_delta + box_height + block.style.margin_bottom;
 
             if cursor_y - block_total_height < self.margin_bottom && cursor_y < content_top {
                 self.advance_column_or_page(
@@ -730,13 +983,19 @@ impl LayoutInner {
                     col_gap,
                     content_top,
                 );
+                // A page/column break resets the collapsing context: the
+                // prior block's bottom margin is already "spent" and the
+                // new block starts fresh against the top content edge.
+                pending_bottom = 0.0;
             }
 
             let cx = col_x(current_col);
             // Block box starts after left margin
             let box_x = cx + block.style.margin_left;
-            // Cursor moves past top margin for box content
-            cursor_y -= block.style.margin_top;
+            // Advance past the collapsed top margin. Recompute against the
+            // (possibly reset) pending_bottom so post-break blocks get
+            // their full margin_top.
+            cursor_y -= collapsed_top_delta(pending_bottom, block.style.margin_top);
 
             let needs_state_wrap =
                 block.style.has_any_styling() || block.runs.iter().any(|r| r.color.is_some());
@@ -814,7 +1073,10 @@ impl LayoutInner {
 
             let text_x_base = box_x + block.style.padding_left;
             let mut line_y = cursor_y - block.style.padding_top;
-            let marker_gap = 6.0_f32;
+            let is_inside_marker = matches!(
+                block.style.list_style_position,
+                css::ListStylePosition::Inside
+            ) && block.marker.is_some();
 
             for (line_idx, line) in wrapped_lines.iter().enumerate() {
                 let baseline_y = line_y - line.max_font_size;
@@ -828,7 +1090,11 @@ impl LayoutInner {
                         marker.font_size,
                     )
                     .unwrap_or(0.0);
-                    let marker_x = text_x_base - marker_gap - marker_width;
+                    let marker_x = if is_inside_marker {
+                        text_x_base
+                    } else {
+                        text_x_base - marker_gap - marker_width
+                    };
 
                     if let Some((r, g, b)) = marker.color {
                         page.operations.push(PdfOp::SetFillColor { r, g, b });
@@ -869,9 +1135,15 @@ impl LayoutInner {
                 };
                 let total_word_spacing = block.style.word_spacing + justify_word_spacing;
 
+                let inside_indent_for_line = if line_idx == 0 { inside_indent } else { 0.0 };
+                let indent_for_line =
+                    if line_idx == 0 { text_indent } else { 0.0 } + inside_indent_for_line;
                 let align_offset = match block.style.text_align {
-                    TextAlign::Left | TextAlign::Justify => 0.0,
-                    TextAlign::Center => (text_area_width - line.total_width) / 2.0,
+                    TextAlign::Left | TextAlign::Justify => indent_for_line,
+                    TextAlign::Center => {
+                        indent_for_line + (text_area_width - indent_for_line - line.total_width)
+                            / 2.0
+                    }
                     TextAlign::Right => text_area_width - line.total_width,
                 };
 
@@ -990,7 +1262,13 @@ impl LayoutInner {
             }
 
             drop(page);
+            // Apply bottom margin immediately (still consuming it from
+            // cursor) and record it as `pending_bottom` so the next
+            // block's top margin can collapse against it. `spacing_after`
+            // is content spacing, not a CSS margin, so it is applied
+            // unconditionally and does NOT participate in collapsing.
             cursor_y -= box_height + block.style.margin_bottom + block.spacing_after;
+            pending_bottom = block.style.margin_bottom;
 
             // page-break-after: force advance after rendering
             if matches!(block.style.page_break_after, Some(css::PageBreak::Always)) {
@@ -1004,6 +1282,7 @@ impl LayoutInner {
                     col_gap,
                     content_top,
                 );
+                pending_bottom = 0.0;
             }
         }
 
@@ -1025,6 +1304,7 @@ impl LayoutInner {
         col_width: f32,
         col_gap: f32,
         content_top: f32,
+        pending_bottom: &mut f32,
     ) -> Result<(), String> {
         if table.rows.is_empty() {
             return Ok(());
@@ -1092,7 +1372,8 @@ impl LayoutInner {
         let table_actual_width: f32 = col_widths.iter().sum();
         let _ = table_actual_width;
 
-        *cursor_y -= table.style.margin_top;
+        *cursor_y -= collapsed_top_delta(*pending_bottom, table.style.margin_top);
+        *pending_bottom = 0.0;
 
         for row in &table.rows {
             // Wrap each cell's content at its column width and compute text heights
@@ -1258,7 +1539,11 @@ impl LayoutInner {
             *cursor_y = row_bottom;
         }
 
+        // Record table bottom margin as pending so the following block's
+        // top margin collapses against it. `spacing_after` is applied now
+        // (it is not a CSS margin).
         *cursor_y -= table.style.margin_bottom + table.spacing_after;
+        *pending_bottom = table.style.margin_bottom;
         Ok(())
     }
 
@@ -1274,6 +1559,7 @@ impl LayoutInner {
         col_width: f32,
         col_gap: f32,
         content_top: f32,
+        pending_bottom: &mut f32,
     ) {
         let col_x_for = |col: u32| -> f32 {
             self.margin_left + col as f32 * (col_width + col_gap)
@@ -1290,7 +1576,8 @@ impl LayoutInner {
             (img.width, img.height)
         };
 
-        let total_height = img.style.margin_top + draw_h + img.style.margin_bottom;
+        let top_delta = collapsed_top_delta(*pending_bottom, img.style.margin_top);
+        let total_height = top_delta + draw_h + img.style.margin_bottom;
 
         // Page-break check
         if *cursor_y - total_height < self.margin_bottom && *cursor_y < content_top {
@@ -1304,9 +1591,10 @@ impl LayoutInner {
                 col_gap,
                 content_top,
             );
+            *pending_bottom = 0.0;
         }
 
-        *cursor_y -= img.style.margin_top;
+        *cursor_y -= collapsed_top_delta(*pending_bottom, img.style.margin_top);
         let x = col_x_for(*current_col) + img.style.margin_left;
         let y_bottom = *cursor_y - draw_h;
 
@@ -1324,6 +1612,7 @@ impl LayoutInner {
         drop(page);
 
         *cursor_y = y_bottom - img.style.margin_bottom - img.spacing_after;
+        *pending_bottom = img.style.margin_bottom;
     }
 
     /// Advance to the next column, or if already in the last column,
@@ -1585,5 +1874,43 @@ mod tests {
     fn wrap_text_rejects_unknown_font() {
         let err = wrap_text_impl("hello", 100.0, "NotAFont", 12.0).unwrap_err();
         assert!(err.contains("unknown font"));
+    }
+
+    // ── margin collapse (Stage B1) ──────────────────────────
+    #[test]
+    fn collapse_two_positives_picks_the_larger() {
+        assert!((collapse_margins(10.0, 20.0) - 20.0).abs() < 1e-6);
+        assert!((collapse_margins(20.0, 10.0) - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn collapse_two_negatives_picks_the_most_negative() {
+        assert!((collapse_margins(-5.0, -10.0) + 10.0).abs() < 1e-6);
+        assert!((collapse_margins(-10.0, -5.0) + 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn collapse_mixed_sign_sums() {
+        assert!((collapse_margins(10.0, -4.0) - 6.0).abs() < 1e-6);
+        assert!((collapse_margins(-5.0, 3.0) + 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn collapsed_top_delta_zero_when_pending_dominates() {
+        // A prior bottom of 20 has already been spent. A new top of 10
+        // collapses to max(20,10)=20 — so no additional advance.
+        assert!(collapsed_top_delta(20.0, 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn collapsed_top_delta_is_difference_when_new_top_dominates() {
+        // Prior 5 already spent, new top 12 -> effective 12, need to add 7.
+        assert!((collapsed_top_delta(5.0, 12.0) - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn collapsed_top_delta_handles_negatives() {
+        // Prior -5 spent, new top 3 -> effective -2, need -2-(-5)=+3 more.
+        assert!((collapsed_top_delta(-5.0, 3.0) - 3.0).abs() < 1e-6);
     }
 }

@@ -11,6 +11,7 @@ use pdf_writer::{Content, Filter, Name, Pdf, Rect, Ref, Str};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+mod box_tree;
 mod css;
 mod dom;
 mod font_metrics;

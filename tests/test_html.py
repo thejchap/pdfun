@@ -1812,6 +1812,77 @@ with describe("CSS margins"):
         expect(data).to_contain(b"Text")
 
     @test
+    def adjacent_sibling_margins_collapse_to_max():
+        """Adjacent vertical margins should collapse to the larger value.
+
+        Four paragraphs each with margin-top/bottom: 180pt.
+        - Collapsed: inter-paragraph gap is 180pt, total vertical spend
+          is roughly 4 * 180 + text heights ~= 720pt + content. With top
+          page margin 72pt this fits within a 792pt Letter page.
+        - Additive: gaps would be 360pt, total ~= 1440pt + content,
+          forcing a second page.
+        """
+        html = (
+            '<p style="margin-top: 180pt; margin-bottom: 180pt">A</p>'
+            '<p style="margin-top: 180pt; margin-bottom: 180pt">B</p>'
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # Two short paragraphs with 180pt collapsed margins fit on one page.
+        assert b"/Count 1" in data
+
+    @test
+    def parent_first_child_margin_top_collapses():
+        """Stage B2: a container's margin-top collapses with its first
+        in-flow child's margin-top.
+
+        Total required vertical = 4 * 180pt margins + some text. If B2
+        works, all four 180pt margins collapse to a single 180pt, so
+        everything fits on one page. If they additively summed, the
+        content would overflow to page 2.
+        """
+        html = (
+            '<div style="margin-top: 180pt; margin-bottom: 180pt">'
+            '  <p style="margin-top: 180pt; margin-bottom: 180pt">inside</p>'
+            "</div>"
+            '<p style="margin-top: 180pt">after</p>'
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        assert b"/Count 1" in data
+
+    @test
+    def parent_last_child_margin_bottom_collapses():
+        """Stage B2: a container's margin-bottom collapses with its last
+        in-flow child's margin-bottom, and then with the following sibling.
+        """
+        html = (
+            '<div style="margin-bottom: 300pt">'
+            '  <p style="margin-bottom: 300pt">inside</p>'
+            "</div>"
+            '<p style="margin-top: 300pt">after</p>'
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # Three 300pt margins collapsing to one fit on a single page
+        # alongside two short paragraphs; the additive case (900pt) would
+        # blow past the usable content area and force a page break.
+        assert b"/Count 1" in data
+
+    @test
+    def empty_block_self_collapses():
+        """Stage B3: an empty block with only margin-top and margin-bottom
+        and no border/padding/content self-collapses (its top and bottom
+        margins merge into a single margin that also folds in with the
+        surrounding flow)."""
+        html = (
+            '<p style="margin-bottom: 200pt">before</p>'
+            '<div style="margin-top: 200pt; margin-bottom: 200pt"></div>'
+            '<p style="margin-top: 200pt">after</p>'
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # Four 200pt margins collapse to one → fits on one page.
+        # Additive would require at least 800pt of margin.
+        assert b"/Count 1" in data
+
+    @test
     def margin_left_right_narrows_content():
         """Large left/right margins cause text to wrap at a narrower width."""
         long_text = "word " * 50
@@ -1825,6 +1896,128 @@ with describe("CSS margins"):
         data_narrow = doc_narrow.to_bytes()
         # The narrow version should be longer due to more wrapping
         assert len(data_narrow) > len(data_wide)
+
+
+with describe("hsl colors"):
+
+    @test
+    def hsl_red_renders():
+        """hsl(0, 100%, 50%) is pure red."""
+        html = '<p style="color: hsl(0, 100%, 50%)">red</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"red")
+        # Pure red in PDF fill color op: "1 0 0 rg"
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def hsl_green_renders():
+        """hsl(120, 100%, 50%) is pure green."""
+        html = '<p style="color: hsl(120, 100%, 50%)">green</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 1 0 rg")
+
+    @test
+    def hsla_accepts_alpha_component():
+        """hsla() parses (alpha is currently ignored)."""
+        html = '<p style="color: hsla(240, 100%, 50%, 0.5)">blue</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+
+with describe("semantic block elements"):
+
+    @test
+    def article_renders_as_block():
+        """<article> renders its text content as a block."""
+        doc = HtmlDocument(string="<article>Article text</article>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Article text")
+
+    @test
+    def section_renders_as_block():
+        doc = HtmlDocument(string="<section>Section text</section>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Section text")
+
+    @test
+    def nested_semantic_margins_collapse():
+        """<article><section><p>…</p></section></article> — nested pure
+        containers collapse margins through to the child paragraph, same as
+        <div>."""
+        html = (
+            '<article style="margin-top: 200pt">'
+            '<section style="margin-top: 200pt">'
+            '<p style="margin-top: 200pt">Hello</p>'
+            "</section></article>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hello")
+        # 200pt collapses to 200pt — everything fits on one page
+        expect(data).to_contain(b"/Count 1")
+
+
+with describe("text-indent"):
+
+    @test
+    def text_indent_renders_first_line_shift():
+        """text-indent shifts the first line's x position."""
+        html = (
+            '<p style="text-indent: 24pt; text-align: left">'
+            "First line indented by twenty-four points here.</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"First line indented")
+
+    @test
+    def text_indent_inherits_from_parent():
+        """text-indent is an inherited property."""
+        html = '<div style="text-indent: 24pt"><p>Indented nested text.</p></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Indented nested")
+
+
+with describe("text-transform"):
+
+    @test
+    def uppercase_transforms_text():
+        """text-transform: uppercase converts text to uppercase."""
+        html = '<p style="text-transform: uppercase">hello world</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"HELLO WORLD")
+        assert b"hello world" not in data
+
+    @test
+    def lowercase_transforms_text():
+        """text-transform: lowercase converts text to lowercase."""
+        html = '<p style="text-transform: lowercase">HELLO World</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"hello world")
+        assert b"HELLO World" not in data
+
+    @test
+    def capitalize_transforms_text():
+        """text-transform: capitalize uppercases the first letter of each word."""
+        html = '<p style="text-transform: capitalize">hello world</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hello World")
+
+    @test
+    def text_transform_inherits_from_parent():
+        """text-transform inherits through descendants."""
+        doc = HtmlDocument(
+            string='<div style="text-transform: uppercase"><p>nested</p></div>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"NESTED")
 
 
 with describe("text-decoration"):
@@ -2121,6 +2314,97 @@ with describe("list-style-type"):
         data = doc.to_bytes()
         expect(data).to_contain(b"(iv.)")
         expect(data).to_contain(b"(ix.)")
+
+
+with describe("list-style-position"):
+
+    @test
+    def default_is_outside():
+        """Default list-style-position is outside (marker hangs left of text)."""
+        doc = HtmlDocument(string="<ul><li>Item</li></ul>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Item")
+        expect(data).to_contain(b"(*)")
+
+    @test
+    def inside_renders_marker_and_text():
+        """list-style-position: inside still renders both marker and text."""
+        doc = HtmlDocument(
+            string='<ul style="list-style-position: inside"><li>Item</li></ul>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Item")
+        expect(data).to_contain(b"(*)")
+
+    @test
+    def inside_differs_from_outside():
+        """list-style-position: inside produces different bytes than outside."""
+        doc_outside = HtmlDocument(
+            string='<ul style="list-style-position: outside"><li>Item</li></ul>'
+        )
+        doc_inside = HtmlDocument(
+            string='<ul style="list-style-position: inside"><li>Item</li></ul>'
+        )
+        assert doc_outside.to_bytes() != doc_inside.to_bytes()
+
+    @test
+    def inside_via_stylesheet():
+        """list-style-position set via <style> block applies."""
+        html = (
+            "<html><head><style>"
+            "ul { list-style-position: inside; }"
+            "</style></head><body>"
+            "<ul><li>Item</li></ul>"
+            "</body></html>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Item")
+        expect(data).to_contain(b"(*)")
+
+
+with describe("definition lists and figures"):
+
+    @test
+    def dl_renders_term_and_definition():
+        """<dl><dt><dd> renders both term and definition text."""
+        doc = HtmlDocument(string="<dl><dt>Term</dt><dd>Definition</dd></dl>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Term")
+        expect(data).to_contain(b"Definition")
+
+    @test
+    def dd_is_indented():
+        """<dd> content is indented relative to <dt>."""
+        doc = HtmlDocument(string="<dl><dt>Term</dt><dd>Definition</dd></dl>")
+        # Rendering must succeed and contain the definition text.
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Definition")
+        # A plain paragraph version should differ from the dd-indented one.
+        doc_plain = HtmlDocument(string="<p>Term</p><p>Definition</p>")
+        assert doc_plain.to_bytes() != data
+
+    @test
+    def figure_with_figcaption_renders_both():
+        """<figure><figcaption> renders both the figure body and caption."""
+        doc = HtmlDocument(
+            string="<figure><p>Body</p><figcaption>Caption</figcaption></figure>"
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Body")
+        expect(data).to_contain(b"Caption")
+
+    @test
+    def multiple_dt_dd_pairs():
+        """A <dl> with multiple term/definition pairs renders every entry."""
+        doc = HtmlDocument(
+            string=("<dl><dt>One</dt><dd>First</dd><dt>Two</dt><dd>Second</dd></dl>")
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"One")
+        expect(data).to_contain(b"First")
+        expect(data).to_contain(b"Two")
+        expect(data).to_contain(b"Second")
 
 
 with describe("page-break"):
@@ -2508,3 +2792,130 @@ with describe("images"):
         finally:
             Path(p1).unlink()
             Path(p2).unlink()
+
+
+with describe("attribute selectors"):
+
+    @test
+    def attr_equals_exact():
+        """[name="value"] matches exact attribute equality."""
+        html = (
+            '<style>[data-role="primary"] { color: red }</style>'
+            '<p data-role="primary">X</p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_equals_no_match():
+        """[name="value"] does not match when attribute value differs."""
+        html = (
+            '<style>[data-role="primary"] { color: red }</style>'
+            '<p data-role="secondary">X</p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(b"1 0 0 rg" not in data).to_equal(True)
+
+    @test
+    def attr_includes_whitespace_list():
+        """[class~="note"] matches a whitespace-separated token list member."""
+        html = (
+            '<style>[class~="note"] { color: red }</style>'
+            '<p class="intro note main">X</p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_includes_no_substring_match():
+        """[class~="note"] does not match a bare substring like 'notepad'."""
+        html = '<style>[class~="note"] { color: red }</style><p class="notepad">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(b"1 0 0 rg" not in data).to_equal(True)
+
+    @test
+    def attr_dashmatch_en():
+        """[lang|="en"] matches exact 'en'."""
+        html = '<style>[lang|="en"] { color: red }</style><p lang="en">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_dashmatch_en_us():
+        """[lang|="en"] matches 'en-US' (prefix followed by dash)."""
+        html = '<style>[lang|="en"] { color: red }</style><p lang="en-US">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_dashmatch_english_no_match():
+        """[lang|="en"] does not match 'english' (no dash after prefix)."""
+        html = '<style>[lang|="en"] { color: red }</style><p lang="english">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(b"1 0 0 rg" not in data).to_equal(True)
+
+    @test
+    def attr_exists_any_value():
+        """[data-x] matches any element with that attribute regardless of value."""
+        html = '<style>[data-x] { color: red }</style><p data-x="whatever">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_exists_empty_value():
+        """[data-x] matches even when the attribute value is empty."""
+        html = '<style>[data-x] { color: red }</style><p data-x="">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_compound_with_type():
+        """p[class="foo"] requires both type and attribute to match."""
+        html = '<style>p[class="foo"] { color: red }</style><p class="foo">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_compound_with_type_no_match():
+        """p[class="foo"] does not match a div with class foo."""
+        html = '<style>p[class="foo"] { color: red }</style><div class="foo">X</div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(b"1 0 0 rg" not in data).to_equal(True)
+
+    @test
+    def attr_prefix_match():
+        """[href^="http"] matches values starting with 'http'."""
+        html = (
+            '<style>[href^="http"] { color: red }</style>'
+            '<a href="https://example.com">X</a>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_suffix_match():
+        """[src$=".png"] matches values ending with '.png'."""
+        html = '<style>[src$=".png"] { color: red }</style><p src="picture.png">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def attr_substring_match():
+        """[class*="big"] matches values containing 'big'."""
+        html = '<style>[class*="big"] { color: red }</style><p class="thebigone">X</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
