@@ -1,6 +1,8 @@
 use markup5ever_rcdom::{Handle, NodeData};
 
-use crate::css::{self, ComputedStyle, ElementInfo, FontStyle, Stylesheet, TextTransform};
+use crate::css::{
+    self, ComputedStyle, ElementInfo, FontStyle, SiblingRecord, Stylesheet, TextTransform,
+};
 use crate::layout::{BlockStyle, LayoutInner, Paragraph, TextRun};
 
 // ── Constants ────────────────────────────────────────────────
@@ -215,6 +217,42 @@ fn extract_style_blocks_inner(handle: &Handle, css: &mut String) {
         }
         _ => {}
     }
+}
+
+/// Owned counterpart of `css::SiblingRecord` (strings we hold during the walk).
+#[derive(Clone, Debug)]
+struct OwnedSiblingRecord {
+    tag: String,
+    classes: Vec<String>,
+    id: Option<String>,
+    attributes: Vec<(String, String)>,
+    sibling_index: usize,
+    sibling_count: usize,
+}
+
+fn is_element(handle: &Handle) -> bool {
+    matches!(handle.data, NodeData::Element { .. })
+}
+
+/// Build an owned sibling record for an element handle at `(index, count)`.
+fn build_sibling_record(
+    handle: &Handle,
+    sibling_index: usize,
+    sibling_count: usize,
+) -> Option<OwnedSiblingRecord> {
+    let NodeData::Element { name, .. } = &handle.data else {
+        return None;
+    };
+    let tag = name.local.as_ref().to_string();
+    let (classes, id, attributes) = extract_element_attrs(handle);
+    Some(OwnedSiblingRecord {
+        tag,
+        classes,
+        id,
+        attributes,
+        sibling_index,
+        sibling_count,
+    })
 }
 
 /// Extract class list, id, and all attributes from an element handle.
@@ -487,15 +525,51 @@ impl<'a> HtmlRenderer<'a> {
 
     // ── Tree walk ───────────────────────────────────────────
 
-    fn walk_node(&mut self, handle: &Handle, depth: usize) {
+    /// Walk a node's children, tracking element-sibling position and preceding
+    /// element-sibling records so the selector matcher can reason about
+    /// `:first-child`, `:nth-child(...)`, and `+`/`~` combinators.
+    fn walk_children(&mut self, handle: &Handle, depth: usize) {
+        // Element siblings only (text nodes etc. don't count in CSS).
+        let element_count = handle
+            .children
+            .borrow()
+            .iter()
+            .filter(|c| is_element(c))
+            .count();
+
+        let mut preceding: Vec<OwnedSiblingRecord> = Vec::new();
+        let mut element_idx: usize = 0;
+        // Collect children into a vec to avoid overlapping borrows during recursion.
+        let children: Vec<Handle> = handle.children.borrow().iter().cloned().collect();
+        for child in &children {
+            if is_element(child) {
+                let idx = element_idx;
+                self.walk_node(child, depth + 1, idx, element_count, &preceding);
+                if let Some(rec) = build_sibling_record(child, idx, element_count) {
+                    preceding.push(rec);
+                }
+                element_idx += 1;
+            } else {
+                // Text/comment/etc. — no sibling position needed.
+                self.walk_node(child, depth + 1, 0, 1, &[]);
+            }
+        }
+    }
+
+    fn walk_node(
+        &mut self,
+        handle: &Handle,
+        depth: usize,
+        sibling_index: usize,
+        sibling_count: usize,
+        preceding_siblings: &[OwnedSiblingRecord],
+    ) {
         if depth > MAX_NESTING_DEPTH {
             return;
         }
         match &handle.data {
             NodeData::Document => {
-                for child in handle.children.borrow().iter() {
-                    self.walk_node(child, depth + 1);
-                }
+                self.walk_children(handle, depth);
             }
             NodeData::Element { name, .. } => {
                 let tag = name.local.as_ref();
@@ -521,6 +595,21 @@ impl<'a> HtmlRenderer<'a> {
                                 )
                             })
                             .collect();
+                    let preceding: Vec<SiblingRecord<'_>> = preceding_siblings
+                        .iter()
+                        .map(|s| SiblingRecord {
+                            tag: s.tag.as_str(),
+                            classes: s.classes.iter().map(String::as_str).collect(),
+                            id: s.id.as_deref(),
+                            attributes: s
+                                .attributes
+                                .iter()
+                                .map(|(n, v)| (n.as_str(), v.as_str()))
+                                .collect(),
+                            sibling_index: s.sibling_index,
+                            sibling_count: s.sibling_count,
+                        })
+                        .collect();
                     let elem = ElementInfo {
                         tag,
                         classes: classes.iter().map(String::as_str).collect(),
@@ -530,6 +619,9 @@ impl<'a> HtmlRenderer<'a> {
                             .map(|(n, v)| (n.as_str(), v.as_str()))
                             .collect(),
                         ancestors,
+                        sibling_index,
+                        sibling_count,
+                        preceding_siblings: preceding,
                     };
                     let mut matched = css::match_rules(&elem, &self.stylesheet);
                     if let Some(inline) = &inline_style {
@@ -576,9 +668,7 @@ impl<'a> HtmlRenderer<'a> {
                 }
 
                 self.handle_start_tag(tag, merged_style);
-                for child in handle.children.borrow().iter() {
-                    self.walk_node(child, depth + 1);
-                }
+                self.walk_children(handle, depth);
                 self.handle_end_tag(tag);
 
                 self.inherit_stack.pop();
@@ -1516,7 +1606,7 @@ pub fn render_dom_to_layout(
     let page_style = stylesheet.page_style.clone();
     let mut renderer = HtmlRenderer::new(layout, stylesheet);
     renderer.base_dir = base_dir.map(std::path::Path::to_path_buf);
-    renderer.walk_node(document, 0);
+    renderer.walk_node(document, 0, 0, 1, &[]);
     renderer.flush();
     RenderOutcome {
         page_style,

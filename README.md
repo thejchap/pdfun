@@ -70,9 +70,9 @@ Current burndown, ordered by the work items in flight:
 - [x] Specificity ordering
 - [x] Cascade: UA defaults < `<style>` < inline `style=""`
 - [x] Attribute selectors (`[type="text"]`)
-- [ ] Adjacent sibling combinator (`h1 + p`)
-- [ ] General sibling combinator (`h1 ~ p`)
-- [ ] Pseudo-classes (`:first-child`, `:nth-child()`, `:not()`)
+- [x] Adjacent sibling combinator (`h1 + p`)
+- [x] General sibling combinator (`h1 ~ p`)
+- [x] Pseudo-classes (`:first-child`, `:nth-child()`, `:not()`)
 - [ ] Pseudo-elements (`::before`, `::after`, `::first-line`)
 
 ### CSS Properties
