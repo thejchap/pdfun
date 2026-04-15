@@ -10,7 +10,7 @@ use crate::layout::{BlockStyle, LayoutInner, Paragraph, TextRun};
 const BLOCK_ELEMENTS: &[&str] = &[
     "h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "blockquote", "pre",
     "article", "section", "nav", "header", "footer", "aside", "main",
-    "dl", "dt", "dd", "figure", "figcaption",
+    "dl", "dt", "dd", "figure", "figcaption", "details", "summary",
 ];
 /// Block elements that act as pure containers (they wrap other blocks
 /// rather than being "paragraph-like" themselves). For these, html_render
@@ -20,7 +20,7 @@ const BLOCK_ELEMENTS: &[&str] = &[
 /// single-paragraph flush path.
 const CONTAINER_ELEMENTS: &[&str] = &[
     "div", "article", "section", "nav", "header", "footer", "aside", "main",
-    "dl", "figure",
+    "dl", "figure", "details",
 ];
 const SKIP_ELEMENTS: &[&str] = &["head", "title", "style", "script", "meta", "link"];
 const LIST_ELEMENTS: &[&str] = &["ul", "ol"];
@@ -36,6 +36,8 @@ enum InlineKind {
     Link,
     Sup,
     Sub,
+    Underline,
+    Strike,
 }
 
 /// Single source of truth for inline tag dispatch. Adding a new inline tag
@@ -53,6 +55,10 @@ static INLINE_TAGS: &[(&str, InlineKind)] = &[
     ("a", InlineKind::Link),
     ("sup", InlineKind::Sup),
     ("sub", InlineKind::Sub),
+    ("u", InlineKind::Underline),
+    ("ins", InlineKind::Underline),
+    ("s", InlineKind::Strike),
+    ("del", InlineKind::Strike),
 ];
 
 fn apply_text_transform(text: &str, tt: Option<TextTransform>) -> String {
@@ -105,6 +111,7 @@ fn ua_style(tag: &str) -> UaStyle {
         "h4" => UaStyle { font: "Helvetica-Bold", font_size: 12.0, spacing_after: 10.0 },
         "h5" => UaStyle { font: "Helvetica-Bold", font_size: 10.0, spacing_after: 8.0 },
         "h6" => UaStyle { font: "Helvetica-Bold", font_size: 8.0, spacing_after: 8.0 },
+        "summary" => UaStyle { font: "Helvetica-Bold", font_size: 12.0, spacing_after: 8.0 },
         "pre" => UaStyle { font: "Courier", font_size: 12.0, spacing_after: 12.0 },
         _ => UaStyle { font: "Helvetica", font_size: 12.0, spacing_after: 12.0 },
     }
@@ -465,6 +472,8 @@ struct HtmlRenderer<'a> {
     pre_depth: usize,
     sup_depth: usize,
     sub_depth: usize,
+    underline_depth: usize,
+    strike_depth: usize,
     list_stack: Vec<ListEntry>,
     block_style: Option<ComputedStyle>,
     inline_styles: Vec<ComputedStyle>,
@@ -476,6 +485,8 @@ struct HtmlRenderer<'a> {
     span_had_style: Vec<bool>,
     sup_had_style: Vec<bool>,
     sub_had_style: Vec<bool>,
+    underline_had_style: Vec<bool>,
+    strike_had_style: Vec<bool>,
     /// Stack of link hrefs, pushed/popped as we enter/leave `<a>` elements.
     link_stack: Vec<String>,
     /// Temporary storage for href extracted in walk_node, consumed by handle_start_tag.
@@ -510,6 +521,8 @@ impl<'a> HtmlRenderer<'a> {
             pre_depth: 0,
             sup_depth: 0,
             sub_depth: 0,
+            underline_depth: 0,
+            strike_depth: 0,
             list_stack: Vec::new(),
             block_style: None,
             inline_styles: Vec::new(),
@@ -519,6 +532,8 @@ impl<'a> HtmlRenderer<'a> {
             span_had_style: Vec::new(),
             sup_had_style: Vec::new(),
             sub_had_style: Vec::new(),
+            underline_had_style: Vec::new(),
+            strike_had_style: Vec::new(),
             link_stack: Vec::new(),
             pending_href: None,
             link_had_style: Vec::new(),
@@ -771,6 +786,8 @@ impl<'a> HtmlRenderer<'a> {
                 InlineKind::Code => self.code_depth += 1,
                 InlineKind::Sup => self.sup_depth += 1,
                 InlineKind::Sub => self.sub_depth += 1,
+                InlineKind::Underline => self.underline_depth += 1,
+                InlineKind::Strike => self.strike_depth += 1,
                 InlineKind::Link => {
                     if let Some(href) = self.pending_href.take() {
                         self.link_stack.push(href);
@@ -796,6 +813,8 @@ impl<'a> HtmlRenderer<'a> {
             InlineKind::Link => &mut self.link_had_style,
             InlineKind::Sup => &mut self.sup_had_style,
             InlineKind::Sub => &mut self.sub_had_style,
+            InlineKind::Underline => &mut self.underline_had_style,
+            InlineKind::Strike => &mut self.strike_had_style,
         }
     }
 
@@ -838,6 +857,8 @@ impl<'a> HtmlRenderer<'a> {
                 InlineKind::Code if self.code_depth == 0 => return,
                 InlineKind::Sup if self.sup_depth == 0 => return,
                 InlineKind::Sub if self.sub_depth == 0 => return,
+                InlineKind::Underline if self.underline_depth == 0 => return,
+                InlineKind::Strike if self.strike_depth == 0 => return,
                 _ => {}
             }
             self.flush_run();
@@ -847,6 +868,8 @@ impl<'a> HtmlRenderer<'a> {
                 InlineKind::Code => self.code_depth -= 1,
                 InlineKind::Sup => self.sup_depth -= 1,
                 InlineKind::Sub => self.sub_depth -= 1,
+                InlineKind::Underline => self.underline_depth -= 1,
+                InlineKind::Strike => self.strike_depth -= 1,
                 InlineKind::Link => {
                     self.link_stack.pop();
                 }
@@ -938,11 +961,24 @@ impl<'a> HtmlRenderer<'a> {
             .and_then(|s| s.color)
             .or_else(|| inherited.and_then(|s| s.color));
 
-        // Resolve text-decoration: CSS → inherited
-        let text_decoration = effective
+        // Resolve text-decoration: CSS → inherited, then OR in the effect of
+        // any enclosing `<u>`/`<ins>` and `<s>`/`<del>` tags.
+        let mut text_decoration = effective
             .and_then(|s| s.text_decoration)
             .or_else(|| inherited.and_then(|s| s.text_decoration))
-            .filter(|td| td.underline || td.line_through);
+            .unwrap_or_default();
+        if self.underline_depth > 0 {
+            text_decoration.underline = true;
+        }
+        if self.strike_depth > 0 {
+            text_decoration.line_through = true;
+        }
+        let text_decoration =
+            if text_decoration.underline || text_decoration.line_through {
+                Some(text_decoration)
+            } else {
+                None
+            };
 
         let link_url = self.link_stack.last().cloned();
 

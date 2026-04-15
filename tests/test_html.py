@@ -3196,3 +3196,62 @@ with describe("opacity"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         expect(data).to_contain(b"/Gs1 gs")
+
+
+with describe("inline decoration tags"):
+
+    @test
+    def u_tag_emits_underline_stroke():
+        """<u> text is underlined (stroke line in content stream)."""
+        html = "<p>This is <u>underlined</u> text</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # text_decoration underline draws a line, which uses S (stroke)
+        expect(data).to_contain(b"underlined")
+
+    @test
+    def ins_tag_is_underlined_like_u():
+        """<ins> renders the same way as <u>."""
+        html = "<p>Marked <ins>insertion</ins></p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"insertion")
+
+    @test
+    def del_tag_emits_strikethrough():
+        """<del> text has line-through decoration."""
+        html = "<p>removed <del>crossed out</del> here</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"crossed out")
+
+    @test
+    def s_tag_is_strikethrough_like_del():
+        """<s> is treated as strikethrough."""
+        html = "<p><s>old price</s></p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"old price")
+
+
+with describe("details and summary"):
+
+    @test
+    def summary_renders_as_bold_block():
+        """<summary> inside <details> is rendered as a block with text."""
+        html = (
+            "<details><summary>Click me</summary>"
+            "<p>Hidden by default in a browser, shown in PDF.</p></details>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Click me")
+        expect(data).to_contain(b"Hidden by default")
+
+    @test
+    def details_body_always_visible_in_pdf():
+        """PDF rendering ignores the open attribute — body is always laid out."""
+        html = "<details><summary>S</summary><div>Body text</div></details>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Body text")

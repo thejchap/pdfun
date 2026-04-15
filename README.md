@@ -54,7 +54,7 @@ Current burndown, ordered by the work items in flight:
 - [x] Definition lists (`dl`, `dt`, `dd`)
 - [x] Superscript/subscript (`sup`, `sub`)
 - [x] Figure (`figure`, `figcaption`)
-- [ ] Details/summary (`details`, `summary`)
+- [x] Details/summary (`details`, `summary`)
 - [ ] Form elements (`input`, `select`, `textarea`, `button`)
 
 ### CSS Selectors
