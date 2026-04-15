@@ -118,6 +118,7 @@ pub enum FontStyle {
 pub enum DisplayValue {
     Block,
     Inline,
+    InlineBlock,
     None,
 }
 
@@ -1072,6 +1073,7 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     "none" => self.style.display = Some(DisplayValue::None),
                     "block" => self.style.display = Some(DisplayValue::Block),
                     "inline" => self.style.display = Some(DisplayValue::Inline),
+                    "inline-block" => self.style.display = Some(DisplayValue::InlineBlock),
                     _ => return Err(location.new_custom_error(())),
                 }
             }

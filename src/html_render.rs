@@ -668,6 +668,20 @@ impl<'a> HtmlRenderer<'a> {
                     }
                 }
 
+                // display: inline-block — collect the subtree's text as a
+                // single unbreakable atom with a fixed width and optional
+                // background/border. This is the minimal-but-real form:
+                // inline-blocks flow inline, own their background and
+                // border, and never split across lines.
+                if let Some(ref style) = merged_style {
+                    if style.display == Some(css::DisplayValue::InlineBlock) {
+                        let parent = self.inherit_stack.last().cloned().unwrap_or_default();
+                        let inherited = parent.inherit_into(&merged_style);
+                        self.push_inline_block(handle, &inherited, style);
+                        return;
+                    }
+                }
+
                 // Push inherited style for this element's subtree
                 let parent = self.inherit_stack.last().cloned().unwrap_or_default();
                 let inherited = parent.inherit_into(&merged_style);
@@ -1001,6 +1015,7 @@ impl<'a> HtmlRenderer<'a> {
             text_decoration,
             link_url,
             baseline_shift,
+            ..Default::default()
         });
     }
 
@@ -1064,10 +1079,7 @@ impl<'a> HtmlRenderer<'a> {
                     text: marker_text,
                     font_name: "Helvetica".to_string(),
                     font_size: 12.0,
-                    color: None,
-                    text_decoration: None,
-                    link_url: None,
-                    baseline_shift: 0.0,
+                    ..Default::default()
                 };
 
                 // Resolve list-style-position: entry override → inherited → default
@@ -1185,6 +1197,99 @@ impl<'a> HtmlRenderer<'a> {
             caption,
         };
         self.layout.push_table(table);
+    }
+
+    /// Push an inline-block element into the current paragraph's runs.
+    ///
+    /// The entire subtree of `handle` is flattened to text and emitted as a
+    /// single `TextRun` carrying `inline_block_*` fields. The atom has a
+    /// fixed total width (resolved from the element's `width` or measured
+    /// from the text plus horizontal padding), its own background color,
+    /// and its own border. It flows inline like a single glyph — never
+    /// splits, never merges with adjacent text.
+    fn push_inline_block(
+        &mut self,
+        handle: &Handle,
+        inherited: &ComputedStyle,
+        style: &ComputedStyle,
+    ) {
+        // Font resolution — same logic as flush_run but tailored to an
+        // atom we synthesise outside the normal flow.
+        let ua = ua_style("span");
+        let font_size = style
+            .font_size
+            .or(inherited.font_size)
+            .map_or(ua.font_size, |len| {
+                len.resolve_ctx(&self.length_context())
+            });
+        let css_weight = style.font_weight.or(inherited.font_weight);
+        let css_italic = style.font_style.or(inherited.font_style);
+        let bold = css_weight.is_some_and(|w| w.is_bold());
+        let italic = matches!(css_italic, Some(FontStyle::Italic));
+        let base_font = style
+            .font_family
+            .as_deref()
+            .and_then(map_css_font_family)
+            .or_else(|| {
+                inherited
+                    .font_family
+                    .as_deref()
+                    .and_then(map_css_font_family)
+            })
+            .unwrap_or(ua.font);
+        let resolved_font = resolve_font(base_font, bold, italic);
+
+        let color = style.color.or(inherited.color);
+
+        // Collect text content from the subtree.
+        let mut child_runs: Vec<TextRun> = Vec::new();
+        collect_cell_text(handle, &mut child_runs, resolved_font, font_size, color);
+        let text: String = child_runs.iter().map(|r| r.text.as_str()).collect();
+        let text = text.trim().to_string();
+
+        // Horizontal padding (already flows into the atom box interior).
+        let ctx = self.length_context();
+        let pad_l = style
+            .padding_left
+            .map(|l| l.resolve_ctx(&ctx))
+            .unwrap_or(0.0);
+        let pad_r = style
+            .padding_right
+            .map(|l| l.resolve_ctx(&ctx))
+            .unwrap_or(0.0);
+        let pad_x = pad_l.max(pad_r);
+
+        // Measure the text to get a natural width; use declared width if any.
+        let natural_text_w = crate::font_metrics::measure_str(&text, resolved_font, font_size)
+            .unwrap_or(0.0);
+        let width = if let Some(w) = style.width {
+            w.resolve_ctx(&ctx)
+        } else {
+            natural_text_w + 2.0 * pad_x
+        };
+
+        let bg = style.background_color;
+        let border = style.border_width.map(|bw| {
+            let w = bw.resolve_ctx(&ctx);
+            let c = style.border_color.unwrap_or((0.0, 0.0, 0.0));
+            (w, c)
+        });
+
+        // Flush whatever pending text is in current_text so that it
+        // appears before the atom, then push the atom itself.
+        self.flush_run();
+
+        self.runs.push(TextRun {
+            text,
+            font_name: resolved_font.to_string(),
+            font_size,
+            color,
+            inline_block_width: Some(width),
+            inline_block_bg: bg,
+            inline_block_border: border,
+            inline_block_padding_x: pad_x,
+            ..Default::default()
+        });
     }
 
     fn build_and_push_image(
@@ -1689,9 +1794,7 @@ fn collect_cell_text(
                     font_name: font_name.to_string(),
                     font_size,
                     color,
-                    text_decoration: None,
-                    link_url: None,
-                    baseline_shift: 0.0,
+                    ..Default::default()
                 });
             }
         }
@@ -1703,9 +1806,7 @@ fn collect_cell_text(
                     font_name: font_name.to_string(),
                     font_size,
                     color,
-                    text_decoration: None,
-                    link_url: None,
-                    baseline_shift: 0.0,
+                    ..Default::default()
                 });
                 return;
             }

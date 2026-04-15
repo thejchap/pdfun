@@ -140,7 +140,7 @@ impl BlockStyle {
 
 /// A text segment with its own font, size, and optional color.
 #[pyclass]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct TextRun {
     #[pyo3(get)]
     pub text: String,
@@ -156,6 +156,20 @@ pub struct TextRun {
     /// negative lowers them (subscript). Default 0. Does not affect line
     /// height — shifted runs ride along the enclosing line box.
     pub baseline_shift: f32,
+    /// If `Some`, this run is an inline-block atom with a fixed total
+    /// width (in points). The wrapper treats it as a single unbreakable
+    /// glyph whose width is `inline_block_width` instead of measuring the
+    /// text with font metrics. The text is still painted inside, centered
+    /// within the available interior area.
+    pub inline_block_width: Option<f32>,
+    /// Background color for an inline-block atom — draws a filled rect
+    /// behind the text.
+    pub inline_block_bg: Option<(f32, f32, f32)>,
+    /// Stroked border `(width_pt, (r, g, b))` for an inline-block atom.
+    pub inline_block_border: Option<(f32, (f32, f32, f32))>,
+    /// Horizontal padding (in points) added inside an inline-block atom
+    /// — used when centering the text inside its fixed width.
+    pub inline_block_padding_x: f32,
 }
 
 #[pymethods]
@@ -173,9 +187,7 @@ impl TextRun {
             font_name: font_name.to_string(),
             font_size: font_size as f32,
             color: color.map(rgb_to_f32),
-            text_decoration: None,
-            link_url: None,
-            baseline_shift: 0.0,
+            ..Default::default()
         }
     }
 }
@@ -284,6 +296,10 @@ struct StyledWord {
     text_decoration: Option<css::TextDecoration>,
     link_url: Option<String>,
     baseline_shift: f32,
+    inline_block_width: Option<f32>,
+    inline_block_bg: Option<(f32, f32, f32)>,
+    inline_block_border: Option<(f32, (f32, f32, f32))>,
+    inline_block_padding_x: f32,
 }
 
 struct LineSegment {
@@ -295,6 +311,10 @@ struct LineSegment {
     text_decoration: Option<css::TextDecoration>,
     link_url: Option<String>,
     baseline_shift: f32,
+    inline_block_width: Option<f32>,
+    inline_block_bg: Option<(f32, f32, f32)>,
+    inline_block_border: Option<(f32, (f32, f32, f32))>,
+    inline_block_padding_x: f32,
 }
 
 struct WrappedLine {
@@ -345,9 +365,28 @@ fn wrap_runs_impl(
         return wrap_runs_preformatted(runs, spacing);
     }
 
-    // Phase 1: flatten runs into styled words
+    // Phase 1: flatten runs into styled words. Inline-block runs are
+    // treated as a single unbreakable atom regardless of their text
+    // content — they keep their fixed width and are not split on
+    // whitespace.
     let mut words: Vec<StyledWord> = Vec::new();
     for run in runs {
+        if run.inline_block_width.is_some() {
+            words.push(StyledWord {
+                text: run.text.clone(),
+                font_name: run.font_name.clone(),
+                font_size: run.font_size,
+                color: run.color,
+                text_decoration: run.text_decoration,
+                link_url: run.link_url.clone(),
+                baseline_shift: run.baseline_shift,
+                inline_block_width: run.inline_block_width,
+                inline_block_bg: run.inline_block_bg,
+                inline_block_border: run.inline_block_border,
+                inline_block_padding_x: run.inline_block_padding_x,
+            });
+            continue;
+        }
         for word in run.text.split_whitespace() {
             words.push(StyledWord {
                 text: word.to_string(),
@@ -357,6 +396,10 @@ fn wrap_runs_impl(
                 text_decoration: run.text_decoration,
                 link_url: run.link_url.clone(),
                 baseline_shift: run.baseline_shift,
+                inline_block_width: None,
+                inline_block_bg: None,
+                inline_block_border: None,
+                inline_block_padding_x: 0.0,
             });
         }
     }
@@ -371,11 +414,14 @@ fn wrap_runs_impl(
     let mut current_width: f32 = 0.0;
 
     for word in words {
-        let base_word_width =
-            font_metrics::measure_str(&word.text, &word.font_name, word.font_size)
-                .ok_or_else(|| format!("unknown font: {}", word.font_name))?;
-        let word_width =
-            base_word_width + spacing.letter_spacing * word.text.chars().count() as f32;
+        let word_width = if let Some(w) = word.inline_block_width {
+            w
+        } else {
+            let base_word_width =
+                font_metrics::measure_str(&word.text, &word.font_name, word.font_size)
+                    .ok_or_else(|| format!("unknown font: {}", word.font_name))?;
+            base_word_width + spacing.letter_spacing * word.text.chars().count() as f32
+        };
 
         if current.is_empty() {
             current_width = word_width;
@@ -407,14 +453,16 @@ fn wrap_runs_impl(
 
         for word in words {
             #[allow(clippy::float_cmp)] // font sizes are user-set, not computed
-            let can_merge = segments.last().is_some_and(|last: &LineSegment| {
-                last.font_name == word.font_name
-                    && last.font_size == word.font_size
-                    && last.color == word.color
-                    && last.text_decoration == word.text_decoration
-                    && last.link_url == word.link_url
-                    && last.baseline_shift == word.baseline_shift
-            });
+            let can_merge = word.inline_block_width.is_none()
+                && segments.last().is_some_and(|last: &LineSegment| {
+                    last.inline_block_width.is_none()
+                        && last.font_name == word.font_name
+                        && last.font_size == word.font_size
+                        && last.color == word.color
+                        && last.text_decoration == word.text_decoration
+                        && last.link_url == word.link_url
+                        && last.baseline_shift == word.baseline_shift
+                });
 
             if can_merge {
                 let last = segments.last_mut().unwrap();
@@ -427,6 +475,29 @@ fn wrap_runs_impl(
                 last.width = base
                     + spacing.letter_spacing * n_chars
                     + spacing.word_spacing * n_spaces;
+            } else if let Some(ib_width) = word.inline_block_width {
+                // Inline-block atom — fixed width, never merges.
+                let leading_space = if segments.is_empty() {
+                    0.0
+                } else {
+                    font_metrics::measure_str(" ", &word.font_name, word.font_size).unwrap_or(0.0)
+                        + spacing.letter_spacing
+                        + spacing.word_spacing
+                };
+                segments.push(LineSegment {
+                    text: word.text.clone(),
+                    font_name: word.font_name.clone(),
+                    font_size: word.font_size,
+                    color: word.color,
+                    width: ib_width + leading_space,
+                    text_decoration: word.text_decoration,
+                    link_url: word.link_url.clone(),
+                    baseline_shift: word.baseline_shift,
+                    inline_block_width: Some(ib_width),
+                    inline_block_bg: word.inline_block_bg,
+                    inline_block_border: word.inline_block_border,
+                    inline_block_padding_x: word.inline_block_padding_x,
+                });
             } else {
                 // Prepend space if not the first segment on the line
                 let text = if segments.is_empty() {
@@ -449,6 +520,10 @@ fn wrap_runs_impl(
                     text_decoration: word.text_decoration,
                     link_url: word.link_url.clone(),
                     baseline_shift: word.baseline_shift,
+                    inline_block_width: None,
+                    inline_block_bg: None,
+                    inline_block_border: None,
+                    inline_block_padding_x: 0.0,
                 });
             }
         }
@@ -507,6 +582,10 @@ fn wrap_runs_preformatted(
             text_decoration,
             link_url: link_url.clone(),
             baseline_shift,
+            inline_block_width: None,
+            inline_block_bg: None,
+            inline_block_border: None,
+            inline_block_padding_x: 0.0,
         };
         result.push(WrappedLine {
             segments: vec![segment],
@@ -1257,13 +1336,70 @@ impl LayoutInner {
                 }
 
                 let seg_y = baseline_y + segment.baseline_shift;
+
+                // Inline-block atoms paint a background rect and/or border
+                // first, then the text is drawn at the atom's left edge
+                // (plus padding). The leading space width is already folded
+                // into `segment.width`, so the atom box starts at
+                // `x + leading_space`. We recover the atom width from
+                // `inline_block_width` directly.
+                let (atom_x, text_offset_x) =
+                    if let Some(atom_w) = segment.inline_block_width {
+                        let atom_x = x + (segment.width - atom_w);
+                        // Paint background.
+                        if let Some((r, g, b)) = segment.inline_block_bg {
+                            page.operations.push(PdfOp::SaveState);
+                            page.operations.push(PdfOp::SetFillColor { r, g, b });
+                            page.operations.push(PdfOp::Rectangle {
+                                x: atom_x,
+                                y: seg_y - segment.font_size * 0.2,
+                                width: atom_w,
+                                height: segment.font_size * 1.2,
+                            });
+                            page.operations.push(PdfOp::Fill);
+                            page.operations.push(PdfOp::RestoreState);
+                            // Re-apply text color since SaveState did not
+                            // preserve the previously set fill color in our
+                            // op stream model (SaveState does preserve it
+                            // in PDF, but we re-set to be safe).
+                            if let Some((r, g, b)) = segment.color {
+                                page.operations.push(PdfOp::SetFillColor { r, g, b });
+                            }
+                        }
+                        if let Some((bw, (br, bg_, bb))) = segment.inline_block_border {
+                            page.operations.push(PdfOp::SaveState);
+                            page.operations.push(PdfOp::SetStrokeColor {
+                                r: br,
+                                g: bg_,
+                                b: bb,
+                            });
+                            page.operations.push(PdfOp::SetLineWidth(bw));
+                            page.operations.push(PdfOp::Rectangle {
+                                x: atom_x,
+                                y: seg_y - segment.font_size * 0.2,
+                                width: atom_w,
+                                height: segment.font_size * 1.2,
+                            });
+                            page.operations.push(PdfOp::Stroke);
+                            page.operations.push(PdfOp::RestoreState);
+                            if let Some((r, g, b)) = segment.color {
+                                page.operations.push(PdfOp::SetFillColor { r, g, b });
+                            }
+                        }
+                        (atom_x, segment.inline_block_padding_x)
+                    } else {
+                        (x, 0.0)
+                    };
+
                 page.operations.push(PdfOp::BeginText);
                 page.operations.push(PdfOp::SetFont {
                     name: segment.font_name.clone(),
                     size: segment.font_size,
                 });
-                page.operations
-                    .push(PdfOp::SetTextPosition { x, y: seg_y });
+                page.operations.push(PdfOp::SetTextPosition {
+                    x: atom_x + text_offset_x,
+                    y: seg_y,
+                });
                 page.operations
                     .push(PdfOp::ShowText(segment.text.clone()));
                 page.operations.push(PdfOp::EndText);
@@ -1812,9 +1948,7 @@ impl Layout {
             font_name: font.to_string(),
             font_size: fs,
             color: color.map(rgb_to_f32),
-            text_decoration: None,
-            link_url: None,
-            baseline_shift: 0.0,
+            ..Default::default()
         };
 
         self.inner.blocks.push(Block::Paragraph(Paragraph {

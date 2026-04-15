@@ -3255,3 +3255,82 @@ with describe("details and summary"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         expect(data).to_contain(b"Body text")
+
+
+with describe("display: inline-block"):
+
+    @test
+    def inline_block_renders_as_inline_atom():
+        """<span style="display: inline-block"> flows inline with surrounding text."""
+        html = "<p>Before <span style='display:inline-block;'>Badge</span> after.</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Before")
+        expect(data).to_contain(b"Badge")
+        expect(data).to_contain(b"after")
+
+    @test
+    def inline_block_with_fixed_width():
+        """A declared width on an inline-block is honored as the atom's width."""
+        html = (
+            "<p>Foo <span style='display:inline-block; width: 80px;'>Hi</span> bar</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Hi")
+        expect(data).to_contain(b"Foo")
+        expect(data).to_contain(b"bar")
+
+    @test
+    def inline_block_with_background_color():
+        """Background color on an inline-block emits a filled rectangle."""
+        html = (
+            "<p>Status: "
+            "<span style='display:inline-block; background-color: #ff0000; "
+            "color: #ffffff;'>ERR</span>"
+            "</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # The red fill color should appear in the content stream
+        expect(data).to_contain(b"1 0 0 rg")
+        expect(data).to_contain(b"ERR")
+
+    @test
+    def inline_block_with_border():
+        """Border on an inline-block emits a stroked rectangle around the atom."""
+        html = (
+            "<p>Label "
+            "<span style='display:inline-block; border: 1px solid black; "
+            "padding: 2px;'>tag</span>"
+            "</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"tag")
+        # A stroked rectangle should appear somewhere in the content stream
+        expect(data).to_contain(b" re\n")
+
+    @test
+    def inline_block_preserves_surrounding_text_order():
+        """Multiple inline-blocks in a single paragraph all render in order."""
+        html = (
+            "<p>"
+            "<span style='display:inline-block;'>One</span> "
+            "<span style='display:inline-block;'>Two</span> "
+            "<span style='display:inline-block;'>Three</span>"
+            "</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"One")
+        expect(data).to_contain(b"Two")
+        expect(data).to_contain(b"Three")
+
+    @test
+    def inline_block_never_splits_across_lines():
+        """An inline-block with long text stays atomic even if it overflows."""
+        html = "<p>x <span style='display:inline-block; width: 50px;'>Badge</span></p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Badge")

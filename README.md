@@ -19,10 +19,10 @@ Current burndown, ordered by the work items in flight:
 - [x] B2: parent / first-child and parent / last-child collapse
 - [x] B3: empty-block self-collapse
 
-**Stage C — floats & inline-block** (planned)
+**Stage C — floats & inline-block** (in progress)
 - [ ] C1: `float: left` / `float: right` with line-box intrusion
 - [ ] C2: `clear: left` / `right` / `both`
-- [ ] C3: `display: inline-block`
+- [x] C3: `display: inline-block`
 
 **Later / unscoped**
 - Positioning (`position: absolute` / `relative` / `fixed`)
@@ -97,7 +97,7 @@ Current burndown, ordered by the work items in flight:
 - [x] Margin collapsing (adjacent siblings)
 - [x] Margin collapsing (parent/child, empty blocks)
 - [x] `min-height`, `max-height`
-- [ ] `display` (block, inline, inline-block, none, flex, grid)
+- [x] `display` (block, inline, inline-block, none) — flex/grid not supported
 - [ ] `position` (static, relative, absolute, fixed)
 - [ ] `top`, `right`, `bottom`, `left`
 - [ ] `float`, `clear`
@@ -143,7 +143,7 @@ Current burndown, ordered by the work items in flight:
 - [ ] Absolute/relative positioning
 - [ ] Flexbox
 - [ ] Grid
-- [ ] Inline-block
+- [x] Inline-block
 - [ ] Orphans/widows control
 
 ### Fonts

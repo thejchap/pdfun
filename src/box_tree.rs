@@ -225,10 +225,7 @@ mod tests {
             text: text.to_string(),
             font_name: "Helvetica".to_string(),
             font_size: 12.0,
-            color: None,
-            text_decoration: None,
-            link_url: None,
-            baseline_shift: 0.0,
+            ..Default::default()
         }
     }
 
