@@ -246,6 +246,8 @@ macro_rules! with_style_fields {
             (box_sizing,        copy,  no),
             (text_transform,    copy,  yes),
             (text_indent,       copy,  yes),
+            (border_radius,     copy,  no),
+            (opacity,           copy,  no),
         }
     };
 }
@@ -346,6 +348,16 @@ pub struct ComputedStyle {
     pub box_sizing: Option<BoxSizing>,
     pub text_transform: Option<TextTransform>,
     pub text_indent: Option<CssLength>,
+    /// Per-corner `border-radius` in CSS shorthand order:
+    /// `[top-left, top-right, bottom-right, bottom-left]`. A single value
+    /// populates all four slots; the shorthand 1-4 form follows standard
+    /// CSS rules. Longhands (`border-top-left-radius`, …) override
+    /// individual corners.
+    pub border_radius: Option<[CssLength; 4]>,
+    /// CSS `opacity` in the range [0.0, 1.0]. A value of 1.0 or `None`
+    /// means fully opaque (no alpha state change). Values outside [0, 1]
+    /// are clamped at parse time.
+    pub opacity: Option<f32>,
 }
 
 
@@ -566,6 +578,41 @@ fn parse_box_shorthand<'i>(
         (Some(s), Some(t), None) => Ok((first, s, t, s)),
         (Some(s), Some(t), Some(f)) => Ok((first, s, t, f)),
     }
+}
+
+/// Parse the `border-radius` shorthand into a four-corner array in CSS
+/// order `[top-left, top-right, bottom-right, bottom-left]`.
+///
+/// - `border-radius: a` → `[a, a, a, a]`
+/// - `border-radius: a b` → `[a, b, a, b]` (tl=br, tr=bl)
+/// - `border-radius: a b c` → `[a, b, c, b]`
+/// - `border-radius: a b c d` → `[a, b, c, d]`
+///
+/// The `/` elliptical form (`border-radius: a b / c d`) is not supported —
+/// everything after the first `/` is consumed and ignored, and the corner
+/// values use the circular interpretation of the first length list only.
+fn parse_border_radius_shorthand<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<[CssLength; 4], ParseError<'i, ()>> {
+    let first = parse_non_negative_length(input)?;
+    let second = input.try_parse(parse_non_negative_length).ok();
+    let third = input.try_parse(parse_non_negative_length).ok();
+    let fourth = input.try_parse(parse_non_negative_length).ok();
+    // Consume and ignore any elliptical second set (`/ …`).
+    let _ = input
+        .try_parse(|i: &mut Parser<'i, '_>| -> Result<(), ParseError<'i, ()>> {
+            i.expect_delim('/')?;
+            while i.try_parse(parse_non_negative_length).is_ok() {}
+            Ok(())
+        });
+
+    // CSS spec corner order: [top-left, top-right, bottom-right, bottom-left].
+    Ok(match (second, third, fourth) {
+        (None, _, _) => [first, first, first, first],
+        (Some(s), None, _) => [first, s, first, s],
+        (Some(s), Some(t), None) => [first, s, t, s],
+        (Some(s), Some(t), Some(f)) => [first, s, t, f],
+    })
 }
 
 /// Non-negative variant of `parse_box_shorthand` for padding.
@@ -918,6 +965,43 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
             }
             "text-indent" => {
                 self.style.text_indent = Some(parse_css_length(input)?);
+            }
+            "border-radius" => {
+                self.style.border_radius = Some(parse_border_radius_shorthand(input)?);
+            }
+            "border-top-left-radius" => {
+                let r = parse_non_negative_length(input)?;
+                let mut arr = self.style.border_radius.unwrap_or([CssLength::Px(0.0); 4]);
+                arr[0] = r;
+                self.style.border_radius = Some(arr);
+            }
+            "border-top-right-radius" => {
+                let r = parse_non_negative_length(input)?;
+                let mut arr = self.style.border_radius.unwrap_or([CssLength::Px(0.0); 4]);
+                arr[1] = r;
+                self.style.border_radius = Some(arr);
+            }
+            "border-bottom-right-radius" => {
+                let r = parse_non_negative_length(input)?;
+                let mut arr = self.style.border_radius.unwrap_or([CssLength::Px(0.0); 4]);
+                arr[2] = r;
+                self.style.border_radius = Some(arr);
+            }
+            "border-bottom-left-radius" => {
+                let r = parse_non_negative_length(input)?;
+                let mut arr = self.style.border_radius.unwrap_or([CssLength::Px(0.0); 4]);
+                arr[3] = r;
+                self.style.border_radius = Some(arr);
+            }
+            "opacity" => {
+                let location = input.current_source_location();
+                let token = input.next()?.clone();
+                let alpha = match &token {
+                    Token::Number { value, .. } => *value,
+                    Token::Percentage { unit_value, .. } => *unit_value,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.opacity = Some(alpha.clamp(0.0, 1.0));
             }
             "text-transform" => {
                 let location = input.current_source_location();

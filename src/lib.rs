@@ -53,6 +53,15 @@ pub(crate) enum PdfOp {
     SetStrokeColor { r: f32, g: f32, b: f32 },
     SetLineWidth(f32),
     Rectangle { x: f32, y: f32, width: f32, height: f32 },
+    /// Rounded rectangle path. Radii are [top-left, top-right, bottom-right, bottom-left].
+    /// Each corner is independently clamped to half of the shorter box edge.
+    RoundedRectangle {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radii: [f32; 4],
+    },
     MoveTo { x: f32, y: f32 },
     LineTo { x: f32, y: f32 },
     Stroke,
@@ -71,6 +80,11 @@ pub(crate) enum PdfOp {
         width: f32,
         height: f32,
     },
+    /// Apply a constant opacity (via ExtGState). The emitter allocates an
+    /// ExtGState resource named `/GsN` that sets both `CA` (stroking alpha)
+    /// and `ca` (non-stroking alpha) to `alpha` and references it with
+    /// `/GsN gs`. Same `alpha` reuses the same resource on a given page.
+    SetAlpha { alpha: f32 },
 }
 
 pub(crate) struct LinkAnnotation {
@@ -265,11 +279,108 @@ fn build_custom_font_data(
     Ok(out)
 }
 
+/// Collect the unique opacities referenced by `SetAlpha` ops on this page,
+/// returning them in first-seen order. The index in the returned `Vec` plus 1
+/// becomes the suffix of the `/GsN` ExtGState resource name.
+fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
+    let mut out: Vec<f32> = Vec::new();
+    for op in &page.operations {
+        if let PdfOp::SetAlpha { alpha } = op {
+            if !out.iter().any(|a| (a - alpha).abs() < 1e-6) {
+                out.push(*alpha);
+            }
+        }
+    }
+    out
+}
+
+/// Format a rounded-rectangle path into `content`. `radii` is
+/// `[top-left, top-right, bottom-right, bottom-left]`. Each corner is
+/// clamped to half the shorter edge so adjacent corners never overlap.
+fn emit_rounded_rect_path(
+    content: &mut Content,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radii: [f32; 4],
+) {
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let max_r = (w.min(h)) / 2.0;
+    let r_tl = radii[0].max(0.0).min(max_r);
+    let r_tr = radii[1].max(0.0).min(max_r);
+    let r_br = radii[2].max(0.0).min(max_r);
+    let r_bl = radii[3].max(0.0).min(max_r);
+    // Kappa constant for quarter-circle Bezier approximation.
+    const K: f32 = 0.552_284_77;
+    // In PDF user space y grows upward. We trace clockwise starting at the
+    // top-left corner's horizontal tangent point, i.e. (x + r_tl, y + h).
+    let left = x;
+    let right = x + w;
+    let bottom = y;
+    let top = y + h;
+
+    // Start: top edge, just past the top-left corner.
+    content.move_to(left + r_tl, top);
+    // Top edge to the start of the top-right corner.
+    content.line_to(right - r_tr, top);
+    // Top-right corner: curve to (right, top - r_tr).
+    if r_tr > 0.0 {
+        content.cubic_to(
+            right - r_tr + r_tr * K,
+            top,
+            right,
+            top - r_tr + r_tr * K,
+            right,
+            top - r_tr,
+        );
+    }
+    // Right edge down to bottom-right corner.
+    content.line_to(right, bottom + r_br);
+    if r_br > 0.0 {
+        content.cubic_to(
+            right,
+            bottom + r_br - r_br * K,
+            right - r_br + r_br * K,
+            bottom,
+            right - r_br,
+            bottom,
+        );
+    }
+    // Bottom edge to bottom-left corner.
+    content.line_to(left + r_bl, bottom);
+    if r_bl > 0.0 {
+        content.cubic_to(
+            left + r_bl - r_bl * K,
+            bottom,
+            left,
+            bottom + r_bl - r_bl * K,
+            left,
+            bottom + r_bl,
+        );
+    }
+    // Left edge up to top-left corner.
+    content.line_to(left, top - r_tl);
+    if r_tl > 0.0 {
+        content.cubic_to(
+            left,
+            top - r_tl + r_tl * K,
+            left + r_tl - r_tl * K,
+            top,
+            left + r_tl,
+            top,
+        );
+    }
+}
+
 /// Emit the PDF content stream for a single page, walking its `PdfOp`s.
 fn write_page_content_stream(
     page: &PageContent,
     font_refs: &[FontRefs],
     custom_data: &BTreeMap<String, CustomFontData>,
+    page_alphas: &[f32],
 ) -> Vec<u8> {
     let mut content = Content::new();
     let mut current_font_name: Option<String> = None;
@@ -323,6 +434,9 @@ fn write_page_content_stream(
             PdfOp::Rectangle { x, y, width, height } => {
                 content.rect(*x, *y, *width, *height);
             }
+            PdfOp::RoundedRectangle { x, y, width, height, radii } => {
+                emit_rounded_rect_path(&mut content, *x, *y, *width, *height, *radii);
+            }
             PdfOp::MoveTo { x, y } => {
                 content.move_to(*x, *y);
             }
@@ -359,6 +473,14 @@ fn write_page_content_stream(
                 content.transform([*width, 0.0, 0.0, *height, *x, *y]);
                 content.x_object(Name(resource_name.as_bytes()));
                 content.restore_state();
+            }
+            PdfOp::SetAlpha { alpha } => {
+                let idx = page_alphas
+                    .iter()
+                    .position(|a| (a - alpha).abs() < 1e-6)
+                    .unwrap_or(0);
+                let resource_name = format!("Gs{}", idx + 1);
+                content.set_parameters(Name(resource_name.as_bytes()));
             }
         }
     }
@@ -649,7 +771,13 @@ impl PdfDocument {
             let page = page_arc.lock().unwrap();
             let (page_id, content_id) = page_refs[i];
 
-            let content_bytes = write_page_content_stream(&page, &font_refs, &custom_data);
+            let page_alphas = collect_page_alphas(&page);
+            // Allocate a Ref per unique alpha on this page.
+            let alpha_refs: Vec<Ref> =
+                page_alphas.iter().map(|_| allocator.alloc()).collect();
+
+            let content_bytes =
+                write_page_content_stream(&page, &font_refs, &custom_data, &page_alphas);
             let annot_refs: Vec<Ref> = page.links.iter().map(|_| allocator.alloc()).collect();
 
             {
@@ -679,6 +807,20 @@ impl PdfDocument {
                             .pair(Name(resource_name.as_bytes()), image_refs[img_idx].0);
                     }
                 }
+                if !alpha_refs.is_empty() {
+                    let mut ext_g_states = resources.ext_g_states();
+                    for (idx, r) in alpha_refs.iter().enumerate() {
+                        let resource_name = format!("Gs{}", idx + 1);
+                        ext_g_states.pair(Name(resource_name.as_bytes()), *r);
+                    }
+                }
+            }
+
+            // Emit the per-alpha ExtGState dicts for this page.
+            for (alpha, alpha_ref) in page_alphas.iter().zip(alpha_refs.iter()) {
+                pdf.ext_graphics(*alpha_ref)
+                    .non_stroking_alpha(*alpha)
+                    .stroking_alpha(*alpha);
             }
 
             for (annot_ref, link) in annot_refs.iter().zip(page.links.iter()) {

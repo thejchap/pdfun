@@ -107,6 +107,14 @@ pub struct BlockStyle {
     /// principal block (default) or flows inline as the first inline box
     /// on the first line.
     pub list_style_position: css::ListStylePosition,
+    /// Per-corner `border-radius` resolved to points. CSS order
+    /// `[top-left, top-right, bottom-right, bottom-left]`. `None` means
+    /// draw sharp rectangles (the fast path — no rounded ops emitted).
+    pub border_radius: Option<[f32; 4]>,
+    /// CSS `opacity`. `None` or `Some(1.0)` means fully opaque (no state
+    /// change emitted). Values in `[0.0, 1.0)` wrap the block's content
+    /// emission in SaveState → SetAlpha → … → RestoreState.
+    pub opacity: Option<f32>,
 }
 
 impl BlockStyle {
@@ -118,6 +126,13 @@ impl BlockStyle {
             || self.margin_right > 0.0
             || self.margin_bottom > 0.0
             || self.margin_left > 0.0
+            || self.border_radius.is_some()
+            || self.needs_alpha()
+    }
+
+    /// Does this block need a non-default alpha state (opacity < 1)?
+    pub fn needs_alpha(&self) -> bool {
+        matches!(self.opacity, Some(a) if a < 1.0)
     }
 }
 
@@ -137,6 +152,10 @@ pub struct TextRun {
     pub color: Option<(f32, f32, f32)>,
     pub text_decoration: Option<css::TextDecoration>,
     pub link_url: Option<String>,
+    /// Baseline offset in points. Positive raises the glyphs (superscript),
+    /// negative lowers them (subscript). Default 0. Does not affect line
+    /// height — shifted runs ride along the enclosing line box.
+    pub baseline_shift: f32,
 }
 
 #[pymethods]
@@ -156,6 +175,7 @@ impl TextRun {
             color: color.map(rgb_to_f32),
             text_decoration: None,
             link_url: None,
+            baseline_shift: 0.0,
         }
     }
 }
@@ -199,6 +219,11 @@ pub struct Table {
     pub spacing_after: f32,
     /// Default line-height for cells (resolved from CSS).
     pub default_line_height: Option<f32>,
+    /// Optional `<caption>` laid out above the first row (caption-side: top
+    /// is assumed; `caption-side: bottom` is out of scope for this batch).
+    /// Rendered centered by default; the caller may override via the
+    /// caption paragraph's `style.text_align`.
+    pub caption: Option<Box<Paragraph>>,
 }
 
 pub struct ImageBlock {
@@ -257,6 +282,7 @@ struct StyledWord {
     color: Option<(f32, f32, f32)>,
     text_decoration: Option<css::TextDecoration>,
     link_url: Option<String>,
+    baseline_shift: f32,
 }
 
 struct LineSegment {
@@ -267,6 +293,7 @@ struct LineSegment {
     width: f32,
     text_decoration: Option<css::TextDecoration>,
     link_url: Option<String>,
+    baseline_shift: f32,
 }
 
 struct WrappedLine {
@@ -328,6 +355,7 @@ fn wrap_runs_impl(
                 color: run.color,
                 text_decoration: run.text_decoration,
                 link_url: run.link_url.clone(),
+                baseline_shift: run.baseline_shift,
             });
         }
     }
@@ -384,6 +412,7 @@ fn wrap_runs_impl(
                     && last.color == word.color
                     && last.text_decoration == word.text_decoration
                     && last.link_url == word.link_url
+                    && last.baseline_shift == word.baseline_shift
             });
 
             if can_merge {
@@ -418,6 +447,7 @@ fn wrap_runs_impl(
                     width,
                     text_decoration: word.text_decoration,
                     link_url: word.link_url.clone(),
+                    baseline_shift: word.baseline_shift,
                 });
             }
         }
@@ -448,6 +478,7 @@ fn wrap_runs_preformatted(
     let mut color = None;
     let mut text_decoration = None;
     let mut link_url = None;
+    let mut baseline_shift = 0.0_f32;
 
     for run in runs {
         full_text.push_str(&run.text);
@@ -456,6 +487,7 @@ fn wrap_runs_preformatted(
         color = run.color;
         text_decoration = run.text_decoration;
         link_url = run.link_url.clone();
+        baseline_shift = run.baseline_shift;
     }
 
     let mut result: Vec<WrappedLine> = Vec::new();
@@ -473,6 +505,7 @@ fn wrap_runs_preformatted(
             width,
             text_decoration,
             link_url: link_url.clone(),
+            baseline_shift,
         };
         result.push(WrappedLine {
             segments: vec![segment],
@@ -983,8 +1016,25 @@ impl LayoutInner {
         let line_height = anon.line_height.unwrap_or(max_font_size * 1.2);
 
         let block_text_height = wrapped_lines.len() as f32 * line_height;
-        let box_height =
+        let natural_box_height =
             style.padding_top + block_text_height + style.padding_bottom;
+        // Clamp to min/max-height. The content still top-aligns inside the
+        // padded box — min-height extends the background/border rect down
+        // but does not shift the text. (CSS actually lets height: auto
+        // grow to content, so only min-height ever extends downward; we
+        // still honor max-height by clipping the drawn rect — any text
+        // that would have hung below the clamped edge just spills out.)
+        let mut box_height = natural_box_height;
+        if let Some(min_h) = style.min_height {
+            if box_height < min_h {
+                box_height = min_h;
+            }
+        }
+        if let Some(max_h) = style.max_height {
+            if box_height > max_h {
+                box_height = max_h;
+            }
+        }
         let top_delta = collapsed_top_delta(state.pending_bottom, style.margin_top);
         let block_total_height = top_delta + box_height + style.margin_bottom;
 
@@ -1029,16 +1079,40 @@ impl LayoutInner {
 
         if needs_state_wrap {
             page.operations.push(PdfOp::SaveState);
+            // Apply opacity inside the save/restore so the alpha state is
+            // reverted when the block finishes. Opacity is block-level for
+            // now (no per-run inline opacity), and 1.0 is a no-op.
+            if let Some(alpha) = style.opacity
+                && alpha < 1.0
+            {
+                page.operations.push(PdfOp::SetAlpha { alpha });
+            }
         }
+
+        // Helper for emitting a rectangle path that is either sharp or
+        // rounded depending on `style.border_radius`.
+        let emit_rect_path = |ops: &mut Vec<PdfOp>, x: f32, y: f32, w: f32, h: f32| {
+            match style.border_radius {
+                Some(radii) => ops.push(PdfOp::RoundedRectangle {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    radii,
+                }),
+                None => ops.push(PdfOp::Rectangle { x, y, width: w, height: h }),
+            }
+        };
 
         if let Some((r, g, b)) = style.background_color {
             page.operations.push(PdfOp::SetFillColor { r, g, b });
-            page.operations.push(PdfOp::Rectangle {
-                x: box_x,
-                y: cursor_y - box_height,
-                width: box_width,
-                height: box_height,
-            });
+            emit_rect_path(
+                &mut page.operations,
+                box_x,
+                cursor_y - box_height,
+                box_width,
+                box_height,
+            );
             page.operations.push(PdfOp::Fill);
         }
 
@@ -1069,12 +1143,13 @@ impl LayoutInner {
                 _ => {}
             }
 
-            page.operations.push(PdfOp::Rectangle {
-                x: box_x,
-                y: cursor_y - box_height,
-                width: box_width,
-                height: box_height,
-            });
+            emit_rect_path(
+                &mut page.operations,
+                box_x,
+                cursor_y - box_height,
+                box_width,
+                box_height,
+            );
             page.operations.push(PdfOp::Stroke);
         }
 
