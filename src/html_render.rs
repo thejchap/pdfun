@@ -34,6 +34,8 @@ enum InlineKind {
     Code,
     Span,
     Link,
+    Sup,
+    Sub,
 }
 
 /// Single source of truth for inline tag dispatch. Adding a new inline tag
@@ -49,6 +51,8 @@ static INLINE_TAGS: &[(&str, InlineKind)] = &[
     ("samp", InlineKind::Code),
     ("span", InlineKind::Span),
     ("a", InlineKind::Link),
+    ("sup", InlineKind::Sup),
+    ("sub", InlineKind::Sub),
 ];
 
 fn apply_text_transform(text: &str, tt: Option<TextTransform>) -> String {
@@ -459,6 +463,8 @@ struct HtmlRenderer<'a> {
     italic_depth: usize,
     code_depth: usize,
     pre_depth: usize,
+    sup_depth: usize,
+    sub_depth: usize,
     list_stack: Vec<ListEntry>,
     block_style: Option<ComputedStyle>,
     inline_styles: Vec<ComputedStyle>,
@@ -468,6 +474,8 @@ struct HtmlRenderer<'a> {
     italic_had_style: Vec<bool>,
     code_had_style: Vec<bool>,
     span_had_style: Vec<bool>,
+    sup_had_style: Vec<bool>,
+    sub_had_style: Vec<bool>,
     /// Stack of link hrefs, pushed/popped as we enter/leave `<a>` elements.
     link_stack: Vec<String>,
     /// Temporary storage for href extracted in walk_node, consumed by handle_start_tag.
@@ -500,6 +508,8 @@ impl<'a> HtmlRenderer<'a> {
             italic_depth: 0,
             code_depth: 0,
             pre_depth: 0,
+            sup_depth: 0,
+            sub_depth: 0,
             list_stack: Vec::new(),
             block_style: None,
             inline_styles: Vec::new(),
@@ -507,6 +517,8 @@ impl<'a> HtmlRenderer<'a> {
             italic_had_style: Vec::new(),
             code_had_style: Vec::new(),
             span_had_style: Vec::new(),
+            sup_had_style: Vec::new(),
+            sub_had_style: Vec::new(),
             link_stack: Vec::new(),
             pending_href: None,
             link_had_style: Vec::new(),
@@ -757,6 +769,8 @@ impl<'a> HtmlRenderer<'a> {
                 InlineKind::Bold => self.bold_depth += 1,
                 InlineKind::Italic => self.italic_depth += 1,
                 InlineKind::Code => self.code_depth += 1,
+                InlineKind::Sup => self.sup_depth += 1,
+                InlineKind::Sub => self.sub_depth += 1,
                 InlineKind::Link => {
                     if let Some(href) = self.pending_href.take() {
                         self.link_stack.push(href);
@@ -780,6 +794,8 @@ impl<'a> HtmlRenderer<'a> {
             InlineKind::Code => &mut self.code_had_style,
             InlineKind::Span => &mut self.span_had_style,
             InlineKind::Link => &mut self.link_had_style,
+            InlineKind::Sup => &mut self.sup_had_style,
+            InlineKind::Sub => &mut self.sub_had_style,
         }
     }
 
@@ -820,6 +836,8 @@ impl<'a> HtmlRenderer<'a> {
                 InlineKind::Bold if self.bold_depth == 0 => return,
                 InlineKind::Italic if self.italic_depth == 0 => return,
                 InlineKind::Code if self.code_depth == 0 => return,
+                InlineKind::Sup if self.sup_depth == 0 => return,
+                InlineKind::Sub if self.sub_depth == 0 => return,
                 _ => {}
             }
             self.flush_run();
@@ -827,6 +845,8 @@ impl<'a> HtmlRenderer<'a> {
                 InlineKind::Bold => self.bold_depth -= 1,
                 InlineKind::Italic => self.italic_depth -= 1,
                 InlineKind::Code => self.code_depth -= 1,
+                InlineKind::Sup => self.sup_depth -= 1,
+                InlineKind::Sub => self.sub_depth -= 1,
                 InlineKind::Link => {
                     self.link_stack.pop();
                 }
@@ -926,6 +946,17 @@ impl<'a> HtmlRenderer<'a> {
 
         let link_url = self.link_stack.last().cloned();
 
+        // sup/sub: scale font-size to 0.8× and offset the baseline by 0.33×
+        // the original size. Nested sup/sub compose naively — the innermost
+        // wins, which is fine for realistic HTML.
+        let (font_size, baseline_shift) = if self.sup_depth > 0 {
+            (font_size * 0.8, font_size * 0.33)
+        } else if self.sub_depth > 0 {
+            (font_size * 0.8, -font_size * 0.33)
+        } else {
+            (font_size, 0.0)
+        };
+
         self.runs.push(TextRun {
             text,
             font_name: resolved_font.to_string(),
@@ -933,6 +964,7 @@ impl<'a> HtmlRenderer<'a> {
             color,
             text_decoration,
             link_url,
+            baseline_shift,
         });
     }
 
@@ -999,6 +1031,7 @@ impl<'a> HtmlRenderer<'a> {
                     color: None,
                     text_decoration: None,
                     link_url: None,
+                    baseline_shift: 0.0,
                 };
 
                 // Resolve list-style-position: entry override → inherited → default
@@ -1094,15 +1127,17 @@ impl<'a> HtmlRenderer<'a> {
             .map(|len| len.resolve_ctx(&ctx));
 
         let mut rows: Vec<TableRow> = Vec::new();
+        let mut caption: Option<Box<crate::layout::Paragraph>> = None;
         collect_table_rows(
             table_handle,
             &inherited_with_table,
             &mut rows,
+            &mut caption,
             &self.stylesheet,
             &[],
         );
 
-        if rows.is_empty() {
+        if rows.is_empty() && caption.is_none() {
             return;
         }
 
@@ -1111,6 +1146,7 @@ impl<'a> HtmlRenderer<'a> {
             style: table_block_style,
             spacing_after,
             default_line_height,
+            caption,
         };
         self.layout.push_table(table);
     }
@@ -1356,6 +1392,17 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(pos) = style.list_style_position {
                 block_style.list_style_position = pos;
             }
+            if let Some(radii) = style.border_radius {
+                block_style.border_radius = Some([
+                    radii[0].resolve_ctx(&ctx),
+                    radii[1].resolve_ctx(&ctx),
+                    radii[2].resolve_ctx(&ctx),
+                    radii[3].resolve_ctx(&ctx),
+                ]);
+            }
+            if let Some(alpha) = style.opacity {
+                block_style.opacity = Some(alpha);
+            }
         }
 
         // Inherit letter/word-spacing and text-indent from ancestor if not
@@ -1406,11 +1453,19 @@ fn collect_table_rows(
     handle: &Handle,
     inherited: &ComputedStyle,
     rows: &mut Vec<crate::layout::TableRow>,
+    caption: &mut Option<Box<crate::layout::Paragraph>>,
     _stylesheet: &Stylesheet,
     _ancestors: &[()],
 ) {
     if let NodeData::Element { name, .. } = &handle.data {
         let tag = name.local.as_ref();
+
+        if tag == "caption" {
+            if caption.is_none() {
+                *caption = Some(Box::new(build_caption_paragraph(handle, inherited)));
+            }
+            return;
+        }
 
         if tag == "tr" {
             let row_inherited = inherited.clone();
@@ -1435,8 +1490,46 @@ fn collect_table_rows(
 
         // Descend into table/thead/tbody/tfoot/etc.
         for child in handle.children.borrow().iter() {
-            collect_table_rows(child, inherited, rows, _stylesheet, &[]);
+            collect_table_rows(child, inherited, rows, caption, _stylesheet, &[]);
         }
+    }
+}
+
+fn build_caption_paragraph(
+    handle: &Handle,
+    inherited: &ComputedStyle,
+) -> crate::layout::Paragraph {
+    use crate::layout::{BlockStyle, Paragraph, TextAlign};
+
+    let ctx = css::LengthContext::fallback();
+    let font_name = inherited
+        .font_family
+        .clone()
+        .unwrap_or_else(|| "Helvetica".to_string());
+    let font_size = inherited
+        .font_size
+        .map(|len| len.resolve_ctx(&ctx))
+        .unwrap_or(12.0);
+    let color = inherited.color;
+
+    let mut runs: Vec<TextRun> = Vec::new();
+    for child in handle.children.borrow().iter() {
+        collect_cell_text(child, &mut runs, &font_name, font_size, color);
+    }
+
+    let block_style = BlockStyle {
+        text_align: TextAlign::Center,
+        ..BlockStyle::default()
+    };
+
+    Paragraph {
+        runs,
+        line_height: inherited.line_height.map(|len| len.resolve_ctx(&ctx)),
+        spacing_after: 6.0,
+        style: block_style,
+        marker: None,
+        is_hr: false,
+        preserve_whitespace: false,
     }
 }
 
@@ -1562,6 +1655,7 @@ fn collect_cell_text(
                     color,
                     text_decoration: None,
                     link_url: None,
+                    baseline_shift: 0.0,
                 });
             }
         }
@@ -1575,6 +1669,7 @@ fn collect_cell_text(
                     color,
                     text_decoration: None,
                     link_url: None,
+                    baseline_shift: 0.0,
                 });
                 return;
             }

@@ -49,10 +49,10 @@ Current burndown, ordered by the work items in flight:
 - [x] Links (`a`) with clickable annotations
 - [x] Images (`img`) — PNG and JPEG embedding
 - [x] Tables (`table`, `tr`, `td`, `th`, `thead`, `tbody`, `tfoot`)
-- [ ] Table `caption`
+- [x] Table `caption`
 - [x] Semantic elements (`article`, `section`, `nav`, `header`, `footer`, `aside`, `main`)
 - [x] Definition lists (`dl`, `dt`, `dd`)
-- [ ] Superscript/subscript (`sup`, `sub`)
+- [x] Superscript/subscript (`sup`, `sub`)
 - [x] Figure (`figure`, `figcaption`)
 - [ ] Details/summary (`details`, `summary`)
 - [ ] Form elements (`input`, `select`, `textarea`, `button`)
@@ -96,14 +96,14 @@ Current burndown, ordered by the work items in flight:
 - [x] `letter-spacing`, `word-spacing`
 - [x] Margin collapsing (adjacent siblings)
 - [x] Margin collapsing (parent/child, empty blocks)
-- [ ] `min-height`, `max-height`
+- [x] `min-height`, `max-height`
 - [ ] `display` (block, inline, inline-block, none, flex, grid)
 - [ ] `position` (static, relative, absolute, fixed)
 - [ ] `top`, `right`, `bottom`, `left`
 - [ ] `float`, `clear`
 - [ ] `overflow`
-- [ ] `opacity`
-- [ ] `border-radius`
+- [x] `opacity`
+- [x] `border-radius`
 - [x] `text-transform` (uppercase, lowercase, capitalize)
 - [x] `text-indent`
 - [ ] `white-space` (via `<pre>` only, not as CSS property)

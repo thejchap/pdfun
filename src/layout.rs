@@ -182,6 +182,7 @@ impl TextRun {
 
 // ── Paragraph ────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct Paragraph {
     pub runs: Vec<TextRun>,
     pub line_height: Option<f32>,
@@ -788,6 +789,14 @@ impl LayoutInner {
         table: &Table,
         state: &mut RenderState,
     ) -> Result<(), String> {
+        if let Some(cap) = &table.caption {
+            let caption_node = crate::box_tree::Node::paragraph_leaf((**cap).clone());
+            if let crate::box_tree::Node::Block(bb) = &caption_node
+                && let Some(anon) = crate::box_tree::paragraph_shape(bb)
+            {
+                self.render_paragraph_node(doc, bb, anon, state)?;
+            }
+        }
         self.render_table(
             &mut state.current_page,
             doc,
@@ -1247,13 +1256,14 @@ impl LayoutInner {
                     page.operations.push(PdfOp::SetFillColor { r, g, b });
                 }
 
+                let seg_y = baseline_y + segment.baseline_shift;
                 page.operations.push(PdfOp::BeginText);
                 page.operations.push(PdfOp::SetFont {
                     name: segment.font_name.clone(),
                     size: segment.font_size,
                 });
                 page.operations
-                    .push(PdfOp::SetTextPosition { x, y: baseline_y });
+                    .push(PdfOp::SetTextPosition { x, y: seg_y });
                 page.operations
                     .push(PdfOp::ShowText(segment.text.clone()));
                 page.operations.push(PdfOp::EndText);
@@ -1261,7 +1271,7 @@ impl LayoutInner {
                 if let Some(url) = &segment.link_url {
                     page.links.push(crate::LinkAnnotation {
                         x,
-                        y: baseline_y - segment.font_size * 0.2,
+                        y: seg_y - segment.font_size * 0.2,
                         width: segment.width,
                         height: segment.font_size * 1.1,
                         url: url.clone(),
@@ -1804,6 +1814,7 @@ impl Layout {
             color: color.map(rgb_to_f32),
             text_decoration: None,
             link_url: None,
+            baseline_shift: 0.0,
         };
 
         self.inner.blocks.push(Block::Paragraph(Paragraph {

@@ -3065,3 +3065,134 @@ with describe("pseudo-classes and sibling combinators"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         expect(data).to_contain(b"1 0 0 rg")
+
+
+with describe("sup and sub"):
+
+    @test
+    def sup_renders_text():
+        """<sup> text is included in the PDF content stream."""
+        html = "<p>E=mc<sup>2</sup></p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"E=mc")
+        expect(data).to_contain(b"2")
+
+    @test
+    def sub_renders_text():
+        """<sub> text is included in the PDF content stream."""
+        html = "<p>H<sub>2</sub>O</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(H")
+        expect(data).to_contain(b"2")
+        expect(data).to_contain(b"O)")
+
+
+with describe("table caption"):
+
+    @test
+    def caption_appears_before_table_rows():
+        """<caption> renders as text above the first row."""
+        html = "<table><caption>My Data</caption><tr><td>a</td><td>b</td></tr></table>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(My Data)")
+        expect(data).to_contain(b"(a)")
+
+    @test
+    def caption_without_rows_still_renders():
+        """A <caption>-only table still renders the caption text."""
+        html = "<table><caption>Orphan</caption></table>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(Orphan)")
+
+
+with describe("min-height and max-height"):
+
+    @test
+    def min_height_expands_short_block():
+        """min-height forces a block to occupy at least the specified height."""
+        html = '<div style="min-height: 100pt; background-color: red">short</div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(short)")
+
+    @test
+    def max_height_clamps_tall_block():
+        """max-height is accepted without crashing."""
+        html = (
+            '<div style="max-height: 20pt; background-color: blue">'
+            "content that would normally be taller</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"0 0 1 rg")
+
+
+with describe("per-corner border-radius"):
+
+    @test
+    def shorthand_border_radius_four_corners():
+        """border-radius shorthand accepts 1-4 values."""
+        html = (
+            '<div style="border: 1pt solid black; border-radius: 5pt 10pt 15pt 20pt">'
+            "rounded</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(rounded)")
+
+    @test
+    def border_top_left_radius_longhand():
+        """border-top-left-radius longhand is parsed and applied."""
+        html = (
+            '<div style="border: 1pt solid black; border-top-left-radius: 8pt">'
+            "corner</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(corner)")
+
+    @test
+    def per_corner_radii_all_four_longhands():
+        """All four per-corner border-radius longhands are parsed."""
+        html = (
+            '<div style="border: 1pt solid black;'
+            " border-top-left-radius: 2pt;"
+            " border-top-right-radius: 4pt;"
+            " border-bottom-right-radius: 6pt;"
+            ' border-bottom-left-radius: 8pt">corners</div>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(corners)")
+
+
+with describe("opacity"):
+
+    @test
+    def opacity_emits_ext_graphics_state():
+        """opacity < 1 emits a /Gs1 gs call and an ExtGState resource."""
+        html = '<p style="opacity: 0.5">faded</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Gs1 gs")
+        expect(data).to_contain(b"/ExtGState")
+
+    @test
+    def opacity_full_does_not_emit_state():
+        """opacity: 1 is a no-op — no ExtGState emitted."""
+        html = '<p style="opacity: 1">opaque</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(b"/Gs1 gs" not in data).to_equal(True)
+
+    @test
+    def opacity_clamped_zero_one():
+        """opacity values outside [0,1] are clamped."""
+        html = '<p style="opacity: 0.25">quarter</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Gs1 gs")

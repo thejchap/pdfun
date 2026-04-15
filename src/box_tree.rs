@@ -228,6 +228,7 @@ mod tests {
             color: None,
             text_decoration: None,
             link_url: None,
+            baseline_shift: 0.0,
         }
     }
 
