@@ -122,6 +122,28 @@ pub enum DisplayValue {
     None,
 }
 
+/// CSS `float` values. `None` is the initial state (not floated); `Left`
+/// and `Right` take the element out of the normal flow and push it to the
+/// corresponding edge of its containing block.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum FloatValue {
+    #[default]
+    None,
+    Left,
+    Right,
+}
+
+/// CSS `clear` values. Controls whether a block-level element is moved
+/// below preceding floats on the matching side(s).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ClearValue {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TextDecoration {
     pub underline: bool,
@@ -249,6 +271,8 @@ macro_rules! with_style_fields {
             (text_indent,       copy,  yes),
             (border_radius,     copy,  no),
             (opacity,           copy,  no),
+            (float,             copy,  no),
+            (clear,             copy,  no),
         }
     };
 }
@@ -359,6 +383,13 @@ pub struct ComputedStyle {
     /// means fully opaque (no alpha state change). Values outside [0, 1]
     /// are clamped at parse time.
     pub opacity: Option<f32>,
+    /// CSS `float`. Floats are taken out of the normal flow and shifted
+    /// to the left or right edge of their containing block; subsequent
+    /// content flows around them.
+    pub float: Option<FloatValue>,
+    /// CSS `clear`. A block with `clear: left` is moved below any
+    /// preceding left-floated elements in its block-formatting context.
+    pub clear: Option<ClearValue>,
 }
 
 
@@ -1074,6 +1105,27 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     "block" => self.style.display = Some(DisplayValue::Block),
                     "inline" => self.style.display = Some(DisplayValue::Inline),
                     "inline-block" => self.style.display = Some(DisplayValue::InlineBlock),
+                    _ => return Err(location.new_custom_error(())),
+                }
+            }
+            "float" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                match ident.to_ascii_lowercase().as_str() {
+                    "none" => self.style.float = Some(FloatValue::None),
+                    "left" => self.style.float = Some(FloatValue::Left),
+                    "right" => self.style.float = Some(FloatValue::Right),
+                    _ => return Err(location.new_custom_error(())),
+                }
+            }
+            "clear" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                match ident.to_ascii_lowercase().as_str() {
+                    "none" => self.style.clear = Some(ClearValue::None),
+                    "left" => self.style.clear = Some(ClearValue::Left),
+                    "right" => self.style.clear = Some(ClearValue::Right),
+                    "both" => self.style.clear = Some(ClearValue::Both),
                     _ => return Err(location.new_custom_error(())),
                 }
             }

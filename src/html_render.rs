@@ -1544,6 +1544,12 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(alpha) = style.opacity {
                 block_style.opacity = Some(alpha);
             }
+            if let Some(f) = style.float {
+                block_style.float = f;
+            }
+            if let Some(c) = style.clear {
+                block_style.clear = c;
+            }
         }
 
         // Inherit letter/word-spacing and text-indent from ancestor if not

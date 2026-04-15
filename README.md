@@ -19,9 +19,9 @@ Current burndown, ordered by the work items in flight:
 - [x] B2: parent / first-child and parent / last-child collapse
 - [x] B3: empty-block self-collapse
 
-**Stage C — floats & inline-block** (in progress)
-- [ ] C1: `float: left` / `float: right` with line-box intrusion
-- [ ] C2: `clear: left` / `right` / `both`
+**Stage C — floats & inline-block** (done)
+- [x] C1: `float: left` / `float: right` with block-level avoidance
+- [x] C2: `clear: left` / `right` / `both`
 - [x] C3: `display: inline-block`
 
 **Later / unscoped**
@@ -100,7 +100,7 @@ Current burndown, ordered by the work items in flight:
 - [x] `display` (block, inline, inline-block, none) — flex/grid not supported
 - [ ] `position` (static, relative, absolute, fixed)
 - [ ] `top`, `right`, `bottom`, `left`
-- [ ] `float`, `clear`
+- [x] `float`, `clear`
 - [ ] `overflow`
 - [x] `opacity`
 - [x] `border-radius`
@@ -139,7 +139,7 @@ Current burndown, ordered by the work items in flight:
 - [x] CSS style inheritance (parent to child)
 - [x] Margin collapsing (adjacent siblings)
 - [x] Margin collapsing (parent/child, empty blocks)
-- [ ] Floats
+- [x] Floats
 - [ ] Absolute/relative positioning
 - [ ] Flexbox
 - [ ] Grid

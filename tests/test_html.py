@@ -3334,3 +3334,80 @@ with describe("display: inline-block"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         expect(data).to_contain(b"Badge")
+
+
+with describe("float and clear"):
+
+    @test
+    def left_float_renders_at_left_edge():
+        """<div style="float:left"> sits at the left edge of its column."""
+        html = (
+            "<div style='float:left; width: 100px; background-color: red;'>"
+            "Floated"
+            "</div>"
+            "<p>Following text flows next to the float.</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Floated")
+        expect(data).to_contain(b"Following text")
+
+    @test
+    def right_float_renders_at_right_edge():
+        """<div style="float:right"> sits at the right edge of its column."""
+        html = (
+            "<div style='float:right; width: 100px;'>Side</div><p>Main body text.</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Side")
+        expect(data).to_contain(b"Main body text")
+
+    @test
+    def float_does_not_advance_cursor():
+        """Subsequent content flows from the float's top, not its bottom."""
+        html = (
+            "<div style='float:left; width: 80px; height: 200px;'>X</div>"
+            "<p>Text next to float</p>"
+            "<p>Second paragraph</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Text next to float")
+        expect(data).to_contain(b"Second paragraph")
+
+    @test
+    def clear_both_drops_below_floats():
+        """A block with clear: both sits below preceding left/right floats."""
+        html = (
+            "<div style='float:left; width: 80px;'>L</div>"
+            "<div style='float:right; width: 80px;'>R</div>"
+            "<p>Inline text</p>"
+            "<p style='clear: both;'>Below both</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Below both")
+
+    @test
+    def clear_left_only_affects_left_floats():
+        """clear: left bypasses left floats but not right floats."""
+        html = (
+            "<div style='float:left; width: 60px;'>L</div>"
+            "<p style='clear: left;'>After clear</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"After clear")
+
+    @test
+    def multiple_floats_stack_on_same_side():
+        """Two left-floats and a flowing paragraph all render without error."""
+        html = (
+            "<div style='float:left; width: 50px;'>A</div>"
+            "<div style='float:left; width: 50px;'>B</div>"
+            "<p>Flowing</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Flowing")

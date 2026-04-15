@@ -115,6 +115,14 @@ pub struct BlockStyle {
     /// change emitted). Values in `[0.0, 1.0)` wrap the block's content
     /// emission in SaveState → SetAlpha → … → RestoreState.
     pub opacity: Option<f32>,
+    /// CSS `float`. A floated block is taken out of the normal flow and
+    /// shifted to the left or right edge of its containing block.
+    /// Subsequent in-flow blocks have their text area narrowed by the
+    /// float's width until `cursor_y` descends past its bottom.
+    pub float: css::FloatValue,
+    /// CSS `clear`. Before rendering, `cursor_y` is advanced past the
+    /// bottom of any matching in-flight floats.
+    pub clear: css::ClearValue,
 }
 
 impl BlockStyle {
@@ -284,6 +292,28 @@ struct RenderState {
     /// first child leaf renders, so parent/child collapsing falls out
     /// naturally without needing a separate stack.
     pending_container_top: f32,
+    /// Active floats in the current block formatting context. Each float
+    /// occupies a rectangle from `top_y` down to `bottom_y`, pinned to
+    /// either the left or right edge of its column. Subsequent in-flow
+    /// blocks whose `cursor_y` falls within that range have their text
+    /// area shifted and narrowed to avoid the float. Floats drop out of
+    /// this list when the cursor advances past their bottom.
+    active_floats: Vec<ActiveFloat>,
+}
+
+/// A float currently affecting the layout in a block formatting context.
+/// Y-coordinates use the same down-is-negative convention as `cursor_y`:
+/// `top_y > bottom_y`.
+#[derive(Clone, Copy, Debug)]
+struct ActiveFloat {
+    side: css::FloatValue,
+    left: f32,
+    right: f32,
+    top_y: f32,
+    bottom_y: f32,
+    /// Column this float belongs to. A float only affects subsequent
+    /// blocks in the same column.
+    column: u32,
 }
 
 // ── Wrapping internals ──────────────────────────────────────
@@ -777,6 +807,7 @@ impl LayoutInner {
             current_col: 0,
             pending_bottom: 0.0,
             pending_container_top: 0.0,
+            active_floats: Vec::new(),
         };
 
         let tree = crate::box_tree::unflatten_blocks(blocks);
@@ -813,6 +844,64 @@ impl LayoutInner {
     /// rendered for this sibling list — used by container close logic to
     /// decide between self-collapse (empty container) and parent/child
     /// margin-bottom collapsing (CSS 2.1 § 8.3.1).
+    /// Width insets applied to a block at `cursor_y` because of active
+    /// floats in the current column. Returns `(left_inset, right_inset)`
+    /// — each in points. A block's usable text area shrinks by the sum
+    /// and shifts right by `left_inset`.
+    fn float_insets(state: &RenderState) -> (f32, f32) {
+        let mut left: f32 = 0.0;
+        let mut right: f32 = 0.0;
+        for f in &state.active_floats {
+            if f.column != state.current_col {
+                continue;
+            }
+            // Active only while cursor is between top and bottom.
+            if state.cursor_y <= f.top_y && state.cursor_y > f.bottom_y {
+                match f.side {
+                    css::FloatValue::Left => {
+                        let w = f.right - f.left;
+                        if w > left {
+                            left = w;
+                        }
+                    }
+                    css::FloatValue::Right => {
+                        let w = f.right - f.left;
+                        if w > right {
+                            right = w;
+                        }
+                    }
+                    css::FloatValue::None => {}
+                }
+            }
+        }
+        (left, right)
+    }
+
+    /// Honor `clear`: advance cursor past the bottom of matching active
+    /// floats before laying out the block.
+    fn apply_clear(state: &mut RenderState, clear: css::ClearValue) {
+        let match_side = |side: css::FloatValue| match clear {
+            css::ClearValue::Left => side == css::FloatValue::Left,
+            css::ClearValue::Right => side == css::FloatValue::Right,
+            css::ClearValue::Both => {
+                side == css::FloatValue::Left || side == css::FloatValue::Right
+            }
+            css::ClearValue::None => false,
+        };
+        let mut target = state.cursor_y;
+        for f in &state.active_floats {
+            if f.column != state.current_col {
+                continue;
+            }
+            if match_side(f.side) && f.bottom_y < target {
+                target = f.bottom_y;
+            }
+        }
+        if target < state.cursor_y {
+            state.cursor_y = target;
+        }
+    }
+
     fn render_nodes(
         &mut self,
         doc: &mut PdfDocument,
@@ -1046,7 +1135,35 @@ impl LayoutInner {
             state.pending_container_top = 0.0;
         }
 
+        // Float sub-path setup:
+        // - A floated block does not interact with surrounding margin
+        //   collapsing and does not consume vertical flow — `cursor_y`
+        //   is restored at the end.
+        // - It positions itself at the left or right edge of its
+        //   column, ignoring any other active floats.
+        // - If no explicit width is given, it defaults to one-third of
+        //   the column so surrounding text actually has room to wrap.
+        let is_float = !matches!(style.float, css::FloatValue::None);
+        let saved_cursor_y = state.cursor_y;
+        let saved_pending_bottom = state.pending_bottom;
+
         Self::fold_container_top(state);
+
+        // Honor `clear` before any float calculations so that the block
+        // starts below any floats it was told to clear past. Floated
+        // blocks still honor `clear` relative to earlier floats.
+        if style.clear != css::ClearValue::None {
+            Self::apply_clear(state, style.clear);
+        }
+
+        // Compute left/right insets from floats active at this `cursor_y`
+        // so in-flow blocks' text areas avoid intruding into them. Floats
+        // themselves bypass this — they sit at the column edge.
+        let (float_left, float_right) = if is_float {
+            (0.0, 0.0)
+        } else {
+            Self::float_insets(state)
+        };
 
         let h_padding = style.padding_left + style.padding_right;
         let h_border = style.border_width * 2.0;
@@ -1054,10 +1171,20 @@ impl LayoutInner {
             css::BoxSizing::ContentBox => 0.0,
             css::BoxSizing::BorderBox => h_padding + h_border,
         };
-        let available_text_width =
-            state.col_width - style.margin_left - style.margin_right - h_padding;
+        let available_text_width = state.col_width
+            - style.margin_left
+            - style.margin_right
+            - h_padding
+            - float_left
+            - float_right;
         let mut text_area_width = match style.width {
             Some(w) => (w - content_adjust).max(0.0),
+            None if is_float => {
+                // Shrink-to-fit — we don't actually have a proper
+                // min-content measurement pass yet, so use a third of
+                // the column as a reasonable default for floats.
+                ((state.col_width / 3.0) - h_padding).max(0.0)
+            }
             None => available_text_width,
         };
         if let Some(max_w) = style.max_width {
@@ -1066,7 +1193,11 @@ impl LayoutInner {
         if let Some(min_w) = style.min_width {
             text_area_width = text_area_width.max((min_w - content_adjust).max(0.0));
         }
-        text_area_width = text_area_width.min(available_text_width).max(0.0);
+        if !is_float {
+            text_area_width = text_area_width.min(available_text_width).max(0.0);
+        } else {
+            text_area_width = text_area_width.max(0.0);
+        }
         let box_width = text_area_width + h_padding;
 
         let spacing = SpacingOpts {
@@ -1143,8 +1274,19 @@ impl LayoutInner {
         }
 
         let cx = self.col_x(state.current_col, state);
-        let box_x = cx + style.margin_left;
-        state.cursor_y -= collapsed_top_delta(state.pending_bottom, style.margin_top);
+        let box_x = if is_float {
+            match style.float {
+                css::FloatValue::Right => {
+                    cx + state.col_width - box_width - style.margin_right
+                }
+                _ => cx + style.margin_left,
+            }
+        } else {
+            cx + style.margin_left + float_left
+        };
+        if !is_float {
+            state.cursor_y -= collapsed_top_delta(state.pending_bottom, style.margin_top);
+        }
 
         let needs_state_wrap =
             style.has_any_styling() || anon.runs.iter().any(|r| r.color.is_some());
@@ -1481,6 +1623,23 @@ impl LayoutInner {
         }
 
         drop(page);
+        if is_float {
+            // Record the float and restore the cursor so subsequent
+            // in-flow content flows past it rather than below it.
+            let top_y = state.cursor_y;
+            let bottom_y = top_y - box_height - style.margin_bottom;
+            state.active_floats.push(ActiveFloat {
+                side: style.float,
+                left: box_x - style.padding_left,
+                right: box_x + box_width + style.padding_right,
+                top_y,
+                bottom_y,
+                column: state.current_col,
+            });
+            state.cursor_y = saved_cursor_y;
+            state.pending_bottom = saved_pending_bottom;
+            return Ok(());
+        }
         state.cursor_y -= box_height + style.margin_bottom + anon.spacing_after;
         state.pending_bottom = style.margin_bottom;
 
