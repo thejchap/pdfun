@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::box_tree::{AnonymousBox, BlockBox, Node};
 use crate::css;
 use crate::font_metrics;
 use crate::{PageContent, PdfDocument, PdfOp, BUILTIN_FONTS};
@@ -222,13 +223,29 @@ pub enum Block {
     ContainerEnd(BlockStyle),
 }
 
-/// Per-frame state tracked for each open container during `finish()`. Only
-/// `has_content` is mutated — it starts false and flips true when any
-/// paragraph, table, or image renders inside the frame. `ContainerEnd` uses
-/// it to decide whether to self-collapse (empty frame) or collapse with its
-/// child's trailing margin (non-empty frame).
-struct OpenContainer {
-    has_content: bool,
+/// Mutable state threaded through the recursive box-tree walker in
+/// `LayoutInner::finish()`. Holds the cursor position, current page, the
+/// pending collapsed margins (parent/child and sibling/sibling), and the
+/// column geometry. Recursion into a child block shares the same
+/// `RenderState` so margin collapsing and page breaks remain correct
+/// across nesting levels.
+struct RenderState {
+    col_count: u32,
+    col_width: f32,
+    col_gap: f32,
+    content_top: f32,
+    current_page: Arc<Mutex<PageContent>>,
+    cursor_y: f32,
+    current_col: u32,
+    /// Pending bottom margin from the previously-rendered sibling. When
+    /// the next block renders, its effective `margin_top` is collapsed
+    /// against this value (CSS 2.1 § 8.3.1).
+    pending_bottom: f32,
+    /// Pending top margin from enclosing containers that have not yet
+    /// committed any child content. Folds into `pending_bottom` when the
+    /// first child leaf renders, so parent/child collapsing falls out
+    /// naturally without needing a separate stack.
+    pending_container_top: f32,
 }
 
 // ── Wrapping internals ──────────────────────────────────────
@@ -618,25 +635,11 @@ impl LayoutInner {
         }));
     }
 
-    /// Stage 0 of the box-tree refactor: accept a `Vec<box_tree::Node>`,
-    /// lower it to the existing flat block list via `flatten_tree`, and
-    /// forward it into `self.blocks`. No production caller uses this yet
-    /// — it exists so Stage 1 can swap `html_render` over to building the
-    /// tree without also needing to rewrite `finish()` in the same commit.
-    /// See `/home/justinchapman/.claude/plans/staged-rolling-leaf.md`.
-    #[allow(dead_code)]
-    pub(crate) fn push_box_tree(&mut self, tree: Vec<crate::box_tree::Node>) {
-        let flat = crate::box_tree::flatten_tree(tree);
-        self.blocks.extend(flat);
-    }
-
-    #[allow(clippy::too_many_lines)]
     pub fn finish(&mut self, doc: &mut PdfDocument) -> Result<(), String> {
         let content_width = self.page_width - self.margin_left - self.margin_right;
         let content_top = self.page_height - self.margin_top;
         let blocks = std::mem::take(&mut self.blocks);
 
-        // Column calculations
         let col_count = self.column_count.max(1);
         let (col_width, col_gap) = if col_count > 1 {
             let gap_total = (col_count - 1) as f32 * self.column_gap;
@@ -650,644 +653,629 @@ impl LayoutInner {
             return Ok(());
         }
 
-        let mut current_page = new_page(doc, self.page_width, self.page_height);
-        let mut cursor_y = content_top;
-        let mut current_col: u32 = 0;
-        // Pending bottom margin from the previous block. When starting the
-        // next block we collapse this against its top margin instead of
-        // summing the two (CSS 2.1 § 8.3.1 adjoining margins). Reset to
-        // zero at any page or column break, since margins do not collapse
-        // across a break in our model.
-        let mut pending_bottom: f32 = 0.0;
-        // Top margin accumulated from `ContainerStart` sentinels that has
-        // not yet been applied to `cursor_y`. When the next paragraph/table/
-        // image renders, its effective `margin_top` is collapsed against
-        // this value so parent/child margins merge (CSS 2.1 § 8.3.1 Stage
-        // B2). When a container closes empty, its `margin_bottom` also
-        // collapses through this path (Stage B3 self-collapse).
-        let mut pending_container_top: f32 = 0.0;
-        // Stack of currently-open container frames. Each paragraph/table/
-        // image marks every open frame as `has_content=true`; `ContainerEnd`
-        // uses that flag to pick between self-collapse (empty frame) and
-        // collapsing its `margin_bottom` into the existing `pending_bottom`.
-        let mut open_containers: Vec<OpenContainer> = Vec::new();
-
-        // Helper: x-offset for a given column
-        let margin_left = self.margin_left;
-        let col_x = |col: u32| -> f32 {
-            margin_left + col as f32 * (col_width + col_gap)
+        let current_page = new_page(doc, self.page_width, self.page_height);
+        let mut state = RenderState {
+            col_count,
+            col_width,
+            col_gap,
+            content_top,
+            current_page,
+            cursor_y: content_top,
+            current_col: 0,
+            pending_bottom: 0.0,
+            pending_container_top: 0.0,
         };
 
-        // Fold any pending container top margin into pending_bottom so the
-        // leaf render path below can use its existing collapse logic
-        // unchanged. Advances cursor by the delta between the old
-        // pending_bottom and the new collapsed value, matching the
-        // "already-spent" invariant that pending_bottom represents.
-        let fold_container_top =
-            |cursor_y: &mut f32, pending_bottom: &mut f32, pending_top: &mut f32| {
-                if *pending_top == 0.0 {
-                    return;
-                }
-                let combined = collapse_margins(*pending_bottom, *pending_top);
-                let delta = combined - *pending_bottom;
-                if delta > 0.0 {
-                    *cursor_y -= delta;
-                }
-                *pending_bottom = combined;
-                *pending_top = 0.0;
-            };
+        let tree = crate::box_tree::unflatten_blocks(blocks);
+        self.render_nodes(doc, &tree, &mut state)?;
 
-        for block_enum in &blocks {
-            let block = match block_enum {
-                Block::Paragraph(p) => p,
-                Block::Table(t) => {
-                    fold_container_top(
-                        &mut cursor_y,
-                        &mut pending_bottom,
-                        &mut pending_container_top,
-                    );
-                    for frame in open_containers.iter_mut() {
-                        frame.has_content = true;
+        self.draw_column_rules(&state.current_page, content_top, col_width, col_gap, col_count);
+
+        Ok(())
+    }
+
+    fn col_x(&self, col: u32, state: &RenderState) -> f32 {
+        self.margin_left + col as f32 * (state.col_width + state.col_gap)
+    }
+
+    /// Fold any pending container top margin into `pending_bottom` so leaf
+    /// render paths see a single collapsed margin value. Advances the
+    /// cursor by the delta between the old `pending_bottom` and the new
+    /// collapsed value — matching the "already-spent" invariant
+    /// `pending_bottom` represents.
+    fn fold_container_top(state: &mut RenderState) {
+        if state.pending_container_top == 0.0 {
+            return;
+        }
+        let combined = collapse_margins(state.pending_bottom, state.pending_container_top);
+        let delta = combined - state.pending_bottom;
+        if delta > 0.0 {
+            state.cursor_y -= delta;
+        }
+        state.pending_bottom = combined;
+        state.pending_container_top = 0.0;
+    }
+
+    /// Recursive box-tree walker. Returns `true` if any leaf content was
+    /// rendered for this sibling list — used by container close logic to
+    /// decide between self-collapse (empty container) and parent/child
+    /// margin-bottom collapsing (CSS 2.1 § 8.3.1).
+    fn render_nodes(
+        &mut self,
+        doc: &mut PdfDocument,
+        nodes: &[Node],
+        state: &mut RenderState,
+    ) -> Result<bool, String> {
+        let mut any_content = false;
+        for node in nodes {
+            match node {
+                Node::Block(bb) => {
+                    if bb.is_hr {
+                        self.render_hr_node(doc, bb, state);
+                        any_content = true;
+                        continue;
                     }
-                    self.render_table(
-                        &mut current_page,
-                        doc,
-                        t,
-                        &mut cursor_y,
-                        &mut current_col,
-                        col_count,
-                        col_width,
-                        col_gap,
-                        content_top,
-                        &mut pending_bottom,
-                    )?;
-                    continue;
-                }
-                Block::Image(img) => {
-                    fold_container_top(
-                        &mut cursor_y,
-                        &mut pending_bottom,
-                        &mut pending_container_top,
-                    );
-                    for frame in open_containers.iter_mut() {
-                        frame.has_content = true;
+                    if let Some(anon) = crate::box_tree::paragraph_shape(bb) {
+                        self.render_paragraph_node(doc, bb, anon, state)?;
+                        any_content = true;
+                        continue;
                     }
-                    self.render_image(
-                        &mut current_page,
-                        doc,
-                        img,
-                        &mut cursor_y,
-                        &mut current_col,
-                        col_count,
-                        col_width,
-                        col_gap,
-                        content_top,
-                        &mut pending_bottom,
-                    );
-                    continue;
-                }
-                Block::ContainerStart(style) => {
-                    // Apply page-break-before: flush any pending margin and
-                    // advance past the current page before recording the
-                    // container's margin_top. (Matches the paragraph path:
-                    // break-before is honored only when we're not already
-                    // at the top of the content area.)
-                    if matches!(style.page_break_before, Some(css::PageBreak::Always))
-                        && cursor_y < content_top
-                    {
-                        self.advance_column_or_page(
-                            &mut current_page,
-                            doc,
-                            &mut cursor_y,
-                            &mut current_col,
-                            col_count,
-                            col_width,
-                            col_gap,
-                            content_top,
-                        );
-                        pending_bottom = 0.0;
-                        pending_container_top = 0.0;
+                    // Real container — recurse into children.
+                    self.enter_container_node(doc, bb, state);
+                    let child_rendered = self.render_nodes(doc, &bb.children, state)?;
+                    self.exit_container_node(doc, bb, child_rendered, state);
+                    if child_rendered {
+                        any_content = true;
                     }
-                    // Container's margin_top joins the pending pre-content
-                    // margin buffer. It will collapse with the next child's
-                    // margin_top when that child renders.
-                    pending_container_top =
-                        collapse_margins(pending_container_top, style.margin_top);
-                    open_containers.push(OpenContainer { has_content: false });
-                    continue;
                 }
-                Block::ContainerEnd(style) => {
-                    let frame = open_containers.pop().expect(
-                        "ContainerEnd without matching ContainerStart — html_render bug",
-                    );
-                    // Compute the "contribution" this container makes to
-                    // the existing pending_bottom. Empty containers (no
-                    // content was ever painted inside them) self-collapse
-                    // top+bottom into a single margin that also folds in
-                    // with the surrounding flow. Non-empty containers just
-                    // have their bottom margin collapse with the child's
-                    // trailing pending_bottom.
-                    let contribution = if frame.has_content {
-                        style.margin_bottom
-                    } else {
-                        let c = collapse_margins(pending_container_top, style.margin_bottom);
-                        pending_container_top = 0.0;
-                        c
-                    };
-                    let new_pending = collapse_margins(pending_bottom, contribution);
-                    // pending_bottom tracks margin already spent from
-                    // cursor_y. If the collapsed value is larger than what
-                    // was already spent, advance cursor by the delta.
-                    let delta = new_pending - pending_bottom;
-                    if delta > 0.0 {
-                        cursor_y -= delta;
-                    }
-                    pending_bottom = new_pending;
-                    // page-break-after on the container: advance now.
-                    if matches!(style.page_break_after, Some(css::PageBreak::Always)) {
-                        self.advance_column_or_page(
-                            &mut current_page,
-                            doc,
-                            &mut cursor_y,
-                            &mut current_col,
-                            col_count,
-                            col_width,
-                            col_gap,
-                            content_top,
-                        );
-                        pending_bottom = 0.0;
-                        pending_container_top = 0.0;
-                    }
-                    continue;
+                Node::Anonymous(_) => {
+                    // Top-level anonymous boxes shouldn't exist with today's
+                    // tree construction (paragraph_leaf always wraps them in
+                    // a BlockBox). Nothing to do.
                 }
-            };
-            if block.is_hr {
-                fold_container_top(
-                    &mut cursor_y,
-                    &mut pending_bottom,
-                    &mut pending_container_top,
-                );
-                for frame in open_containers.iter_mut() {
-                    frame.has_content = true;
+                Node::Table(t) => {
+                    Self::fold_container_top(state);
+                    self.render_table_to_state(doc, &t.table, state)?;
+                    any_content = true;
                 }
-                if cursor_y - 12.0 < self.margin_bottom && cursor_y < content_top {
-                    self.advance_column_or_page(
-                        &mut current_page,
-                        doc,
-                        &mut cursor_y,
-                        &mut current_col,
-                        col_count,
-                        col_width,
-                        col_gap,
-                        content_top,
-                    );
+                Node::Image(i) => {
+                    Self::fold_container_top(state);
+                    self.render_image_to_state(doc, &i.image, state);
+                    any_content = true;
                 }
-                let cx = col_x(current_col);
-                let mut page = current_page.lock().unwrap();
-                page.operations.push(PdfOp::SaveState);
-                page.operations
-                    .push(PdfOp::SetStrokeColor { r: 0.75, g: 0.75, b: 0.75 });
-                page.operations.push(PdfOp::SetLineWidth(0.5));
-                page.operations.push(PdfOp::MoveTo {
-                    x: cx,
-                    y: cursor_y,
-                });
-                page.operations.push(PdfOp::LineTo {
-                    x: cx + col_width,
-                    y: cursor_y,
-                });
-                page.operations.push(PdfOp::Stroke);
-                page.operations.push(PdfOp::RestoreState);
-                drop(page);
-                cursor_y -= block.spacing_after;
-                continue;
             }
+        }
+        Ok(any_content)
+    }
 
-            // page-break-before: force advance before rendering (unless already at top)
-            if matches!(block.style.page_break_before, Some(css::PageBreak::Always))
-                && cursor_y < content_top
-            {
-                self.advance_column_or_page(
-                    &mut current_page,
-                    doc,
-                    &mut cursor_y,
-                    &mut current_col,
-                    col_count,
-                    col_width,
-                    col_gap,
-                    content_top,
-                );
-                pending_container_top = 0.0;
-            }
+    /// Thin adapter from `RenderState` to the legacy `render_table` args.
+    fn render_table_to_state(
+        &mut self,
+        doc: &mut PdfDocument,
+        table: &Table,
+        state: &mut RenderState,
+    ) -> Result<(), String> {
+        self.render_table(
+            &mut state.current_page,
+            doc,
+            table,
+            &mut state.cursor_y,
+            &mut state.current_col,
+            state.col_count,
+            state.col_width,
+            state.col_gap,
+            state.content_top,
+            &mut state.pending_bottom,
+        )
+    }
 
-            // Fold any container top margin into pending_bottom so the
-            // existing collapse logic below absorbs it without needing
-            // a second variable in its arithmetic.
-            fold_container_top(
-                &mut cursor_y,
-                &mut pending_bottom,
-                &mut pending_container_top,
+    /// Thin adapter from `RenderState` to the legacy `render_image` args.
+    fn render_image_to_state(
+        &mut self,
+        doc: &mut PdfDocument,
+        img: &ImageBlock,
+        state: &mut RenderState,
+    ) {
+        self.render_image(
+            &mut state.current_page,
+            doc,
+            img,
+            &mut state.cursor_y,
+            &mut state.current_col,
+            state.col_count,
+            state.col_width,
+            state.col_gap,
+            state.content_top,
+            &mut state.pending_bottom,
+        );
+    }
+
+    fn render_hr_node(
+        &mut self,
+        doc: &mut PdfDocument,
+        bb: &BlockBox,
+        state: &mut RenderState,
+    ) {
+        Self::fold_container_top(state);
+        if state.cursor_y - 12.0 < self.margin_bottom && state.cursor_y < state.content_top {
+            self.advance_column_or_page(
+                &mut state.current_page,
+                doc,
+                &mut state.cursor_y,
+                &mut state.current_col,
+                state.col_count,
+                state.col_width,
+                state.col_gap,
+                state.content_top,
             );
-            // Any leaf render marks every currently-open container frame
-            // as "has content" so its matching `ContainerEnd` collapses
-            // child/parent margin_bottom instead of self-collapsing.
-            for frame in open_containers.iter_mut() {
-                frame.has_content = true;
-            }
+        }
+        let cx = self.col_x(state.current_col, state);
+        let cursor_y = state.cursor_y;
+        let col_width = state.col_width;
+        let mut page = state.current_page.lock().unwrap();
+        page.operations.push(PdfOp::SaveState);
+        page.operations
+            .push(PdfOp::SetStrokeColor { r: 0.75, g: 0.75, b: 0.75 });
+        page.operations.push(PdfOp::SetLineWidth(0.5));
+        page.operations.push(PdfOp::MoveTo {
+            x: cx,
+            y: cursor_y,
+        });
+        page.operations.push(PdfOp::LineTo {
+            x: cx + col_width,
+            y: cursor_y,
+        });
+        page.operations.push(PdfOp::Stroke);
+        page.operations.push(PdfOp::RestoreState);
+        drop(page);
+        state.cursor_y -= bb.spacing_after;
+    }
 
-            // Available width after margins. CSS `width` sets the content
-            // (text-area) width under `content-box`, or the full box under
-            // `border-box`; we subtract padding + border in that case to
-            // recover the content width. `max-width`/`min-width` clamp
-            // under the same sizing model.
-            let h_padding = block.style.padding_left + block.style.padding_right;
-            let h_border = block.style.border_width * 2.0;
-            let content_adjust = match block.style.box_sizing {
-                css::BoxSizing::ContentBox => 0.0,
-                css::BoxSizing::BorderBox => h_padding + h_border,
-            };
-            let available_text_width =
-                col_width - block.style.margin_left - block.style.margin_right - h_padding;
-            let mut text_area_width = match block.style.width {
-                Some(w) => (w - content_adjust).max(0.0),
-                None => available_text_width,
-            };
-            if let Some(max_w) = block.style.max_width {
-                text_area_width = text_area_width.min((max_w - content_adjust).max(0.0));
-            }
-            if let Some(min_w) = block.style.min_width {
-                text_area_width = text_area_width.max((min_w - content_adjust).max(0.0));
-            }
-            text_area_width = text_area_width.min(available_text_width).max(0.0);
-            let box_width = text_area_width + h_padding;
+    fn enter_container_node(
+        &mut self,
+        doc: &mut PdfDocument,
+        bb: &BlockBox,
+        state: &mut RenderState,
+    ) {
+        if matches!(bb.page_break_before, Some(css::PageBreak::Always))
+            && state.cursor_y < state.content_top
+        {
+            self.advance_column_or_page(
+                &mut state.current_page,
+                doc,
+                &mut state.cursor_y,
+                &mut state.current_col,
+                state.col_count,
+                state.col_width,
+                state.col_gap,
+                state.content_top,
+            );
+            state.pending_bottom = 0.0;
+            state.pending_container_top = 0.0;
+        }
+        state.pending_container_top =
+            collapse_margins(state.pending_container_top, bb.style.margin_top);
+    }
 
-            let spacing = SpacingOpts {
-                letter_spacing: block.style.letter_spacing,
-                word_spacing: block.style.word_spacing,
-            };
-            // CSS text-indent reserves space on the first line. We model it
-            // by wrapping against (width - indent) — all lines get the same
-            // narrower width — and then shifting only the first line's
-            // starting x by `indent`. Lines 2+ leave slight extra space on
-            // the right, but nothing overflows.
-            let text_indent = block.style.text_indent.max(0.0);
-            // `list-style-position: inside` flows the marker as the first
-            // inline box on the first line. We model it the same way as
-            // text-indent: narrow wrap_width by (marker_width + gap) and
-            // shift only the first line's starting x by that amount.
-            let marker_gap = 6.0_f32;
-            let marker_width_outside = block
-                .marker
-                .as_ref()
-                .map(|m| {
-                    font_metrics::measure_str(&m.text, &m.font_name, m.font_size).unwrap_or(0.0)
-                })
-                .unwrap_or(0.0);
-            let inside_indent = if matches!(
-                block.style.list_style_position,
-                css::ListStylePosition::Inside
-            ) && block.marker.is_some()
-            {
-                marker_width_outside + marker_gap
-            } else {
-                0.0
-            };
-            let wrap_width = (text_area_width - text_indent - inside_indent).max(0.0);
-            let wrapped_lines = wrap_runs_impl(
-                &block.runs,
-                wrap_width,
-                block.preserve_whitespace,
-                spacing,
-            )?;
+    fn exit_container_node(
+        &mut self,
+        doc: &mut PdfDocument,
+        bb: &BlockBox,
+        child_rendered: bool,
+        state: &mut RenderState,
+    ) {
+        // Non-empty containers: the child/parent margin_bottom collapse is
+        // already partially accounted for by pending_bottom (the child's
+        // trailing margin). Empty containers self-collapse top+bottom into
+        // a single value that also folds with the surrounding flow.
+        let contribution = if child_rendered {
+            bb.style.margin_bottom
+        } else {
+            let c = collapse_margins(state.pending_container_top, bb.style.margin_bottom);
+            state.pending_container_top = 0.0;
+            c
+        };
+        let new_pending = collapse_margins(state.pending_bottom, contribution);
+        let delta = new_pending - state.pending_bottom;
+        if delta > 0.0 {
+            state.cursor_y -= delta;
+        }
+        state.pending_bottom = new_pending;
 
-            let max_font_size = wrapped_lines
-                .iter()
-                .map(|l| l.max_font_size)
-                .fold(0.0_f32, f32::max);
-            let line_height = block.line_height.unwrap_or(max_font_size * 1.2);
+        if matches!(bb.page_break_after, Some(css::PageBreak::Always)) {
+            self.advance_column_or_page(
+                &mut state.current_page,
+                doc,
+                &mut state.cursor_y,
+                &mut state.current_col,
+                state.col_count,
+                state.col_width,
+                state.col_gap,
+                state.content_top,
+            );
+            state.pending_bottom = 0.0;
+            state.pending_container_top = 0.0;
+        }
+    }
 
-            let block_text_height = wrapped_lines.len() as f32 * line_height;
-            let box_height =
-                block.style.padding_top + block_text_height + block.style.padding_bottom;
-            let top_delta = collapsed_top_delta(pending_bottom, block.style.margin_top);
-            let block_total_height = top_delta + box_height + block.style.margin_bottom;
+    #[allow(clippy::too_many_lines)]
+    fn render_paragraph_node(
+        &mut self,
+        doc: &mut PdfDocument,
+        bb: &BlockBox,
+        anon: &AnonymousBox,
+        state: &mut RenderState,
+    ) -> Result<(), String> {
+        let style = &bb.style;
+        let marker = bb.marker.as_ref();
 
-            if cursor_y - block_total_height < self.margin_bottom && cursor_y < content_top {
-                self.advance_column_or_page(
-                    &mut current_page,
-                    doc,
-                    &mut cursor_y,
-                    &mut current_col,
-                    col_count,
-                    col_width,
-                    col_gap,
-                    content_top,
-                );
-                // A page/column break resets the collapsing context: the
-                // prior block's bottom margin is already "spent" and the
-                // new block starts fresh against the top content edge.
-                pending_bottom = 0.0;
-            }
+        if matches!(style.page_break_before, Some(css::PageBreak::Always))
+            && state.cursor_y < state.content_top
+        {
+            self.advance_column_or_page(
+                &mut state.current_page,
+                doc,
+                &mut state.cursor_y,
+                &mut state.current_col,
+                state.col_count,
+                state.col_width,
+                state.col_gap,
+                state.content_top,
+            );
+            state.pending_container_top = 0.0;
+        }
 
-            let cx = col_x(current_col);
-            // Block box starts after left margin
-            let box_x = cx + block.style.margin_left;
-            // Advance past the collapsed top margin. Recompute against the
-            // (possibly reset) pending_bottom so post-break blocks get
-            // their full margin_top.
-            cursor_y -= collapsed_top_delta(pending_bottom, block.style.margin_top);
+        Self::fold_container_top(state);
 
-            let needs_state_wrap =
-                block.style.has_any_styling() || block.runs.iter().any(|r| r.color.is_some());
-            let mut page = current_page.lock().unwrap();
+        let h_padding = style.padding_left + style.padding_right;
+        let h_border = style.border_width * 2.0;
+        let content_adjust = match style.box_sizing {
+            css::BoxSizing::ContentBox => 0.0,
+            css::BoxSizing::BorderBox => h_padding + h_border,
+        };
+        let available_text_width =
+            state.col_width - style.margin_left - style.margin_right - h_padding;
+        let mut text_area_width = match style.width {
+            Some(w) => (w - content_adjust).max(0.0),
+            None => available_text_width,
+        };
+        if let Some(max_w) = style.max_width {
+            text_area_width = text_area_width.min((max_w - content_adjust).max(0.0));
+        }
+        if let Some(min_w) = style.min_width {
+            text_area_width = text_area_width.max((min_w - content_adjust).max(0.0));
+        }
+        text_area_width = text_area_width.min(available_text_width).max(0.0);
+        let box_width = text_area_width + h_padding;
 
-            for line in &wrapped_lines {
-                for seg in &line.segments {
-                    if !page.fonts_used.contains(&seg.font_name) {
-                        page.fonts_used.push(seg.font_name.clone());
-                    }
+        let spacing = SpacingOpts {
+            letter_spacing: style.letter_spacing,
+            word_spacing: style.word_spacing,
+        };
+        let text_indent = style.text_indent.max(0.0);
+        let marker_gap = 6.0_f32;
+        let marker_width_outside = marker
+            .map(|m| {
+                font_metrics::measure_str(&m.text, &m.font_name, m.font_size).unwrap_or(0.0)
+            })
+            .unwrap_or(0.0);
+        let inside_indent = if matches!(
+            style.list_style_position,
+            css::ListStylePosition::Inside
+        ) && marker.is_some()
+        {
+            marker_width_outside + marker_gap
+        } else {
+            0.0
+        };
+        let wrap_width = (text_area_width - text_indent - inside_indent).max(0.0);
+        let wrapped_lines = wrap_runs_impl(
+            &anon.runs,
+            wrap_width,
+            anon.preserve_whitespace,
+            spacing,
+        )?;
+
+        let max_font_size = wrapped_lines
+            .iter()
+            .map(|l| l.max_font_size)
+            .fold(0.0_f32, f32::max);
+        let line_height = anon.line_height.unwrap_or(max_font_size * 1.2);
+
+        let block_text_height = wrapped_lines.len() as f32 * line_height;
+        let box_height =
+            style.padding_top + block_text_height + style.padding_bottom;
+        let top_delta = collapsed_top_delta(state.pending_bottom, style.margin_top);
+        let block_total_height = top_delta + box_height + style.margin_bottom;
+
+        if state.cursor_y - block_total_height < self.margin_bottom
+            && state.cursor_y < state.content_top
+        {
+            self.advance_column_or_page(
+                &mut state.current_page,
+                doc,
+                &mut state.cursor_y,
+                &mut state.current_col,
+                state.col_count,
+                state.col_width,
+                state.col_gap,
+                state.content_top,
+            );
+            state.pending_bottom = 0.0;
+        }
+
+        let cx = self.col_x(state.current_col, state);
+        let box_x = cx + style.margin_left;
+        state.cursor_y -= collapsed_top_delta(state.pending_bottom, style.margin_top);
+
+        let needs_state_wrap =
+            style.has_any_styling() || anon.runs.iter().any(|r| r.color.is_some());
+        let cursor_y = state.cursor_y;
+        let mut page = state.current_page.lock().unwrap();
+
+        for line in &wrapped_lines {
+            for seg in &line.segments {
+                if !page.fonts_used.contains(&seg.font_name) {
+                    page.fonts_used.push(seg.font_name.clone());
                 }
-            }
-
-            if let Some(marker) = &block.marker
-                && !page.fonts_used.contains(&marker.font_name)
-            {
-                page.fonts_used.push(marker.font_name.clone());
-            }
-
-            if needs_state_wrap {
-                page.operations.push(PdfOp::SaveState);
-            }
-
-            if let Some((r, g, b)) = block.style.background_color {
-                page.operations.push(PdfOp::SetFillColor { r, g, b });
-                page.operations.push(PdfOp::Rectangle {
-                    x: box_x,
-                    y: cursor_y - box_height,
-                    width: box_width,
-                    height: box_height,
-                });
-                page.operations.push(PdfOp::Fill);
-            }
-
-            if block.style.border_width > 0.0
-                && !matches!(block.style.border_style, Some(css::BorderStyle::None))
-            {
-                let (r, g, b) = block.style.border_color.unwrap_or((0.0, 0.0, 0.0));
-                page.operations.push(PdfOp::SetStrokeColor { r, g, b });
-                page.operations
-                    .push(PdfOp::SetLineWidth(block.style.border_width));
-
-                // Apply dash pattern based on border-style
-                match block.style.border_style {
-                    Some(css::BorderStyle::Dashed) => {
-                        let dash = block.style.border_width * 3.0;
-                        let gap = block.style.border_width * 2.0;
-                        page.operations.push(PdfOp::SetDashPattern {
-                            array: vec![dash, gap],
-                            phase: 0.0,
-                        });
-                    }
-                    Some(css::BorderStyle::Dotted) => {
-                        let dot = block.style.border_width;
-                        page.operations.push(PdfOp::SetDashPattern {
-                            array: vec![dot, dot * 2.0],
-                            phase: 0.0,
-                        });
-                    }
-                    _ => {} // Solid or unset — no dash pattern needed
-                }
-
-                page.operations.push(PdfOp::Rectangle {
-                    x: box_x,
-                    y: cursor_y - box_height,
-                    width: box_width,
-                    height: box_height,
-                });
-                page.operations.push(PdfOp::Stroke);
-            }
-
-            if let Some((r, g, b)) = block.style.color {
-                page.operations.push(PdfOp::SetFillColor { r, g, b });
-            }
-
-            let text_x_base = box_x + block.style.padding_left;
-            let mut line_y = cursor_y - block.style.padding_top;
-            let is_inside_marker = matches!(
-                block.style.list_style_position,
-                css::ListStylePosition::Inside
-            ) && block.marker.is_some();
-
-            for (line_idx, line) in wrapped_lines.iter().enumerate() {
-                let baseline_y = line_y - line.max_font_size;
-
-                if line_idx == 0
-                    && let Some(marker) = &block.marker
-                {
-                    let marker_width = font_metrics::measure_str(
-                        &marker.text,
-                        &marker.font_name,
-                        marker.font_size,
-                    )
-                    .unwrap_or(0.0);
-                    let marker_x = if is_inside_marker {
-                        text_x_base
-                    } else {
-                        text_x_base - marker_gap - marker_width
-                    };
-
-                    if let Some((r, g, b)) = marker.color {
-                        page.operations.push(PdfOp::SetFillColor { r, g, b });
-                    }
-                    page.operations.push(PdfOp::BeginText);
-                    page.operations.push(PdfOp::SetFont {
-                        name: marker.font_name.clone(),
-                        size: marker.font_size,
-                    });
-                    page.operations.push(PdfOp::SetTextPosition {
-                        x: marker_x,
-                        y: baseline_y,
-                    });
-                    page.operations
-                        .push(PdfOp::ShowText(marker.text.clone()));
-                    page.operations.push(PdfOp::EndText);
-                }
-
-                // For justify: all but the last line get word-spacing widening
-                let is_justified_line = matches!(block.style.text_align, TextAlign::Justify)
-                    && line_idx + 1 < wrapped_lines.len();
-
-                // CSS word-spacing is already baked into `line.total_width`
-                // (see wrap_runs_impl) and justification adds on top of it.
-                let justify_word_spacing = if is_justified_line {
-                    let space_count: usize = line
-                        .segments
-                        .iter()
-                        .map(|s| s.text.matches(' ').count())
-                        .sum();
-                    if space_count > 0 {
-                        (text_area_width - line.total_width) / space_count as f32
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
-                let total_word_spacing = block.style.word_spacing + justify_word_spacing;
-
-                let inside_indent_for_line = if line_idx == 0 { inside_indent } else { 0.0 };
-                let indent_for_line =
-                    if line_idx == 0 { text_indent } else { 0.0 } + inside_indent_for_line;
-                let align_offset = match block.style.text_align {
-                    TextAlign::Left | TextAlign::Justify => indent_for_line,
-                    TextAlign::Center => {
-                        indent_for_line + (text_area_width - indent_for_line - line.total_width)
-                            / 2.0
-                    }
-                    TextAlign::Right => text_area_width - line.total_width,
-                };
-
-                // Apply Tw/Tc for this line if either spacing is non-zero.
-                // We unconditionally reset after the line so the PDF state
-                // doesn't leak into marker glyphs or neighbouring paragraphs.
-                let needs_tw = total_word_spacing != 0.0;
-                let needs_tc = block.style.letter_spacing != 0.0;
-                if needs_tw {
-                    page.operations.push(PdfOp::SetWordSpacing(total_word_spacing));
-                }
-                if needs_tc {
-                    page.operations
-                        .push(PdfOp::SetCharacterSpacing(block.style.letter_spacing));
-                }
-
-                let mut x = text_x_base + align_offset;
-
-                for segment in &line.segments {
-                    if let Some((r, g, b)) = segment.color {
-                        page.operations.push(PdfOp::SetFillColor { r, g, b });
-                    }
-
-                    page.operations.push(PdfOp::BeginText);
-                    page.operations.push(PdfOp::SetFont {
-                        name: segment.font_name.clone(),
-                        size: segment.font_size,
-                    });
-                    page.operations
-                        .push(PdfOp::SetTextPosition { x, y: baseline_y });
-                    page.operations
-                        .push(PdfOp::ShowText(segment.text.clone()));
-                    page.operations.push(PdfOp::EndText);
-
-                    // Record link annotation rect if this segment is part of an <a>
-                    if let Some(url) = &segment.link_url {
-                        page.links.push(crate::LinkAnnotation {
-                            x,
-                            y: baseline_y - segment.font_size * 0.2,
-                            width: segment.width,
-                            height: segment.font_size * 1.1,
-                            url: url.clone(),
-                        });
-                    }
-
-                    // Draw text-decoration lines (underline and/or line-through)
-                    if let Some(td) = segment.text_decoration {
-                        if td.underline || td.line_through {
-                            let metrics =
-                                font_metrics::get_builtin_metrics(&segment.font_name);
-                            let scale = segment.font_size / 1000.0;
-                            let stroke_width = (segment.font_size * 0.05).max(0.5);
-
-                            page.operations.push(PdfOp::SaveState);
-                            if let Some((r, g, b)) = segment.color {
-                                page.operations
-                                    .push(PdfOp::SetStrokeColor { r, g, b });
-                            }
-                            page.operations.push(PdfOp::SetLineWidth(stroke_width));
-
-                            if td.underline {
-                                let descent = metrics
-                                    .map_or(-207.0, |m| m.descent as f32);
-                                let underline_y = baseline_y + descent * scale / 3.0;
-                                page.operations.push(PdfOp::MoveTo {
-                                    x,
-                                    y: underline_y,
-                                });
-                                page.operations.push(PdfOp::LineTo {
-                                    x: x + segment.width,
-                                    y: underline_y,
-                                });
-                                page.operations.push(PdfOp::Stroke);
-                            }
-
-                            if td.line_through {
-                                let ascent =
-                                    metrics.map_or(718.0, |m| m.ascent as f32);
-                                let strike_y = baseline_y + ascent * scale / 3.0;
-                                page.operations.push(PdfOp::MoveTo {
-                                    x,
-                                    y: strike_y,
-                                });
-                                page.operations.push(PdfOp::LineTo {
-                                    x: x + segment.width,
-                                    y: strike_y,
-                                });
-                                page.operations.push(PdfOp::Stroke);
-                            }
-
-                            page.operations.push(PdfOp::RestoreState);
-                        }
-                    }
-
-                    // Advance x. The segment's `width` already includes
-                    // baked-in letter/word spacing (see wrap_runs_impl), so
-                    // we only add the *justification* extra per space.
-                    let spaces_in_segment = segment.text.matches(' ').count() as f32;
-                    x += segment.width + spaces_in_segment * justify_word_spacing;
-                }
-
-                // Reset Tw/Tc after the line so downstream operations
-                // start from a clean text state.
-                if needs_tw {
-                    page.operations.push(PdfOp::SetWordSpacing(0.0));
-                }
-                if needs_tc {
-                    page.operations.push(PdfOp::SetCharacterSpacing(0.0));
-                }
-
-                line_y -= line_height;
-            }
-
-            if needs_state_wrap {
-                page.operations.push(PdfOp::RestoreState);
-            }
-
-            drop(page);
-            // Apply bottom margin immediately (still consuming it from
-            // cursor) and record it as `pending_bottom` so the next
-            // block's top margin can collapse against it. `spacing_after`
-            // is content spacing, not a CSS margin, so it is applied
-            // unconditionally and does NOT participate in collapsing.
-            cursor_y -= box_height + block.style.margin_bottom + block.spacing_after;
-            pending_bottom = block.style.margin_bottom;
-
-            // page-break-after: force advance after rendering
-            if matches!(block.style.page_break_after, Some(css::PageBreak::Always)) {
-                self.advance_column_or_page(
-                    &mut current_page,
-                    doc,
-                    &mut cursor_y,
-                    &mut current_col,
-                    col_count,
-                    col_width,
-                    col_gap,
-                    content_top,
-                );
-                pending_bottom = 0.0;
             }
         }
 
-        // Draw column rules on the last page
-        self.draw_column_rules(&current_page, content_top, col_width, col_gap, col_count);
+        if let Some(marker) = marker
+            && !page.fonts_used.contains(&marker.font_name)
+        {
+            page.fonts_used.push(marker.font_name.clone());
+        }
+
+        if needs_state_wrap {
+            page.operations.push(PdfOp::SaveState);
+        }
+
+        if let Some((r, g, b)) = style.background_color {
+            page.operations.push(PdfOp::SetFillColor { r, g, b });
+            page.operations.push(PdfOp::Rectangle {
+                x: box_x,
+                y: cursor_y - box_height,
+                width: box_width,
+                height: box_height,
+            });
+            page.operations.push(PdfOp::Fill);
+        }
+
+        if style.border_width > 0.0
+            && !matches!(style.border_style, Some(css::BorderStyle::None))
+        {
+            let (r, g, b) = style.border_color.unwrap_or((0.0, 0.0, 0.0));
+            page.operations.push(PdfOp::SetStrokeColor { r, g, b });
+            page.operations
+                .push(PdfOp::SetLineWidth(style.border_width));
+
+            match style.border_style {
+                Some(css::BorderStyle::Dashed) => {
+                    let dash = style.border_width * 3.0;
+                    let gap = style.border_width * 2.0;
+                    page.operations.push(PdfOp::SetDashPattern {
+                        array: vec![dash, gap],
+                        phase: 0.0,
+                    });
+                }
+                Some(css::BorderStyle::Dotted) => {
+                    let dot = style.border_width;
+                    page.operations.push(PdfOp::SetDashPattern {
+                        array: vec![dot, dot * 2.0],
+                        phase: 0.0,
+                    });
+                }
+                _ => {}
+            }
+
+            page.operations.push(PdfOp::Rectangle {
+                x: box_x,
+                y: cursor_y - box_height,
+                width: box_width,
+                height: box_height,
+            });
+            page.operations.push(PdfOp::Stroke);
+        }
+
+        if let Some((r, g, b)) = style.color {
+            page.operations.push(PdfOp::SetFillColor { r, g, b });
+        }
+
+        let text_x_base = box_x + style.padding_left;
+        let mut line_y = cursor_y - style.padding_top;
+        let is_inside_marker = matches!(
+            style.list_style_position,
+            css::ListStylePosition::Inside
+        ) && marker.is_some();
+
+        for (line_idx, line) in wrapped_lines.iter().enumerate() {
+            let baseline_y = line_y - line.max_font_size;
+
+            if line_idx == 0
+                && let Some(marker) = marker
+            {
+                let marker_width = font_metrics::measure_str(
+                    &marker.text,
+                    &marker.font_name,
+                    marker.font_size,
+                )
+                .unwrap_or(0.0);
+                let marker_x = if is_inside_marker {
+                    text_x_base
+                } else {
+                    text_x_base - marker_gap - marker_width
+                };
+
+                if let Some((r, g, b)) = marker.color {
+                    page.operations.push(PdfOp::SetFillColor { r, g, b });
+                }
+                page.operations.push(PdfOp::BeginText);
+                page.operations.push(PdfOp::SetFont {
+                    name: marker.font_name.clone(),
+                    size: marker.font_size,
+                });
+                page.operations.push(PdfOp::SetTextPosition {
+                    x: marker_x,
+                    y: baseline_y,
+                });
+                page.operations
+                    .push(PdfOp::ShowText(marker.text.clone()));
+                page.operations.push(PdfOp::EndText);
+            }
+
+            let is_justified_line = matches!(style.text_align, TextAlign::Justify)
+                && line_idx + 1 < wrapped_lines.len();
+
+            let justify_word_spacing = if is_justified_line {
+                let space_count: usize = line
+                    .segments
+                    .iter()
+                    .map(|s| s.text.matches(' ').count())
+                    .sum();
+                if space_count > 0 {
+                    (text_area_width - line.total_width) / space_count as f32
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let total_word_spacing = style.word_spacing + justify_word_spacing;
+
+            let inside_indent_for_line = if line_idx == 0 { inside_indent } else { 0.0 };
+            let indent_for_line =
+                if line_idx == 0 { text_indent } else { 0.0 } + inside_indent_for_line;
+            let align_offset = match style.text_align {
+                TextAlign::Left | TextAlign::Justify => indent_for_line,
+                TextAlign::Center => {
+                    indent_for_line + (text_area_width - indent_for_line - line.total_width)
+                        / 2.0
+                }
+                TextAlign::Right => text_area_width - line.total_width,
+            };
+
+            let needs_tw = total_word_spacing != 0.0;
+            let needs_tc = style.letter_spacing != 0.0;
+            if needs_tw {
+                page.operations.push(PdfOp::SetWordSpacing(total_word_spacing));
+            }
+            if needs_tc {
+                page.operations
+                    .push(PdfOp::SetCharacterSpacing(style.letter_spacing));
+            }
+
+            let mut x = text_x_base + align_offset;
+
+            for segment in &line.segments {
+                if let Some((r, g, b)) = segment.color {
+                    page.operations.push(PdfOp::SetFillColor { r, g, b });
+                }
+
+                page.operations.push(PdfOp::BeginText);
+                page.operations.push(PdfOp::SetFont {
+                    name: segment.font_name.clone(),
+                    size: segment.font_size,
+                });
+                page.operations
+                    .push(PdfOp::SetTextPosition { x, y: baseline_y });
+                page.operations
+                    .push(PdfOp::ShowText(segment.text.clone()));
+                page.operations.push(PdfOp::EndText);
+
+                if let Some(url) = &segment.link_url {
+                    page.links.push(crate::LinkAnnotation {
+                        x,
+                        y: baseline_y - segment.font_size * 0.2,
+                        width: segment.width,
+                        height: segment.font_size * 1.1,
+                        url: url.clone(),
+                    });
+                }
+
+                if let Some(td) = segment.text_decoration {
+                    if td.underline || td.line_through {
+                        let metrics =
+                            font_metrics::get_builtin_metrics(&segment.font_name);
+                        let scale = segment.font_size / 1000.0;
+                        let stroke_width = (segment.font_size * 0.05).max(0.5);
+
+                        page.operations.push(PdfOp::SaveState);
+                        if let Some((r, g, b)) = segment.color {
+                            page.operations
+                                .push(PdfOp::SetStrokeColor { r, g, b });
+                        }
+                        page.operations.push(PdfOp::SetLineWidth(stroke_width));
+
+                        if td.underline {
+                            let descent = metrics
+                                .map_or(-207.0, |m| m.descent as f32);
+                            let underline_y = baseline_y + descent * scale / 3.0;
+                            page.operations.push(PdfOp::MoveTo {
+                                x,
+                                y: underline_y,
+                            });
+                            page.operations.push(PdfOp::LineTo {
+                                x: x + segment.width,
+                                y: underline_y,
+                            });
+                            page.operations.push(PdfOp::Stroke);
+                        }
+
+                        if td.line_through {
+                            let ascent =
+                                metrics.map_or(718.0, |m| m.ascent as f32);
+                            let strike_y = baseline_y + ascent * scale / 3.0;
+                            page.operations.push(PdfOp::MoveTo {
+                                x,
+                                y: strike_y,
+                            });
+                            page.operations.push(PdfOp::LineTo {
+                                x: x + segment.width,
+                                y: strike_y,
+                            });
+                            page.operations.push(PdfOp::Stroke);
+                        }
+
+                        page.operations.push(PdfOp::RestoreState);
+                    }
+                }
+
+                let spaces_in_segment = segment.text.matches(' ').count() as f32;
+                x += segment.width + spaces_in_segment * justify_word_spacing;
+            }
+
+            if needs_tw {
+                page.operations.push(PdfOp::SetWordSpacing(0.0));
+            }
+            if needs_tc {
+                page.operations.push(PdfOp::SetCharacterSpacing(0.0));
+            }
+
+            line_y -= line_height;
+        }
+
+        if needs_state_wrap {
+            page.operations.push(PdfOp::RestoreState);
+        }
+
+        drop(page);
+        state.cursor_y -= box_height + style.margin_bottom + anon.spacing_after;
+        state.pending_bottom = style.margin_bottom;
+
+        if matches!(style.page_break_after, Some(css::PageBreak::Always)) {
+            self.advance_column_or_page(
+                &mut state.current_page,
+                doc,
+                &mut state.cursor_y,
+                &mut state.current_col,
+                state.col_count,
+                state.col_width,
+                state.col_gap,
+                state.content_top,
+            );
+            state.pending_bottom = 0.0;
+        }
 
         Ok(())
     }

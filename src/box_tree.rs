@@ -1,22 +1,10 @@
-// Stage 0 of the box-tree refactor lands the types with no production
-// caller — they are exercised only by unit tests in this module and by
-// `LayoutInner::push_box_tree` in layout.rs. The dead-code lint fires
-// without this allow. Stage 1 switches html_render over and this allow
-// gets deleted.
-#![allow(dead_code)]
-
-//! CSS box tree — Stage 0 scaffolding.
+//! CSS box tree — Stage 1 substrate for `LayoutInner::finish()`.
 //!
-//! This module introduces a typed tree of boxes that will eventually replace
-//! the flat `Vec<Block>` model in `layout.rs`. Stage 0 only adds the types
-//! and a `flatten_tree` helper that lowers the tree back into today's flat
-//! `Block` list — no production code path uses the tree yet, so behavior is
-//! unchanged. The point of this stage is to land the types, wire them into
-//! the module graph, and pin their semantics with unit tests so Stage 1 can
-//! cut `html_render` and `finish()` over without also debating shapes.
-//!
-//! See `/home/justinchapman/.claude/plans/staged-rolling-leaf.md` for the
-//! full refactor plan.
+//! `html_render` still emits a flat `Vec<Block>` with `ContainerStart`/
+//! `ContainerEnd` sentinels (legacy streaming API). `LayoutInner::finish()`
+//! calls `unflatten_blocks` to reconstruct a proper tree of `Node`s and
+//! then walks it recursively. The tree representation is what Stage C's
+//! float and inline-block work will read from.
 
 use crate::css;
 use crate::layout::{
@@ -109,89 +97,122 @@ impl Node {
     }
 }
 
-/// Lower a box tree to today's flat `Vec<Block>` list.
+/// Reconstruct a box tree from a flat `Vec<Block>` stream.
 ///
-/// Stage 0 uses this exclusively for unit testing: the scaffolded tree can
-/// round-trip through the helper and the flattening preserves every leaf's
-/// content. Container-level styling (a `<div>` with its own margin/border)
-/// is intentionally dropped during flattening — the flat model has no place
-/// to put it. Stage 1 will delete this helper once `finish()` consumes the
-/// tree directly.
-pub fn flatten_tree(tree: Vec<Node>) -> Vec<Block> {
-    let mut out = Vec::new();
-    for node in tree {
-        flatten_node(node, &mut out);
+/// `html_render` still uses the legacy streaming API (`push_paragraph`,
+/// `push_container_start`, etc.) which produces a flat list with
+/// `ContainerStart(style)` / `ContainerEnd(style)` sentinels around each
+/// block container. This helper parses those sentinels into nested
+/// `BlockBox`es so `LayoutInner::finish()` can walk the tree recursively.
+///
+/// Input shape:
+/// - `Block::Paragraph` → `Node::Block(BlockBox { children: [Anonymous] })`
+///   (or `is_hr=true` for horizontal rules).
+/// - `Block::Table` → `Node::Table(TableLeaf)`.
+/// - `Block::Image` → `Node::Image(ImageLeaf)`.
+/// - `Block::ContainerStart(style)` opens a new frame; subsequent blocks
+///   become its children until the matching `Block::ContainerEnd`, which
+///   pops the frame and wraps it in a `BlockBox` with that style.
+pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
+    // Each open frame is (container_style, children_so_far). The root
+    // frame has no style — it represents the top-level tree.
+    let mut frames: Vec<(Option<BlockStyle>, Vec<Node>)> = vec![(None, Vec::new())];
+
+    for block in blocks {
+        match block {
+            Block::Paragraph(p) => {
+                let node = if p.is_hr {
+                    Node::Block(BlockBox {
+                        style: p.style,
+                        children: Vec::new(),
+                        tag: Some("hr"),
+                        marker: None,
+                        spacing_after: p.spacing_after,
+                        page_break_before: None,
+                        page_break_after: None,
+                        is_hr: true,
+                    })
+                } else {
+                    Node::paragraph_leaf(p)
+                };
+                frames.last_mut().unwrap().1.push(node);
+            }
+            Block::Table(t) => {
+                frames
+                    .last_mut()
+                    .unwrap()
+                    .1
+                    .push(Node::Table(TableLeaf { table: t }));
+            }
+            Block::Image(i) => {
+                frames
+                    .last_mut()
+                    .unwrap()
+                    .1
+                    .push(Node::Image(ImageLeaf { image: i }));
+            }
+            Block::ContainerStart(style) => {
+                frames.push((Some(style), Vec::new()));
+            }
+            Block::ContainerEnd(_end_style) => {
+                // The start and end sentinels currently carry the same
+                // style — we use the one recorded at start time for
+                // consistency.
+                let (start_style, children) = frames
+                    .pop()
+                    .expect("ContainerEnd without matching ContainerStart");
+                let style =
+                    start_style.expect("non-root frame must have recorded style");
+                let page_break_before = style.page_break_before;
+                let page_break_after = style.page_break_after;
+                let bb = BlockBox {
+                    style,
+                    children,
+                    tag: None,
+                    marker: None,
+                    spacing_after: 0.0,
+                    page_break_before,
+                    page_break_after,
+                    is_hr: false,
+                };
+                frames.last_mut().unwrap().1.push(Node::Block(bb));
+            }
+        }
     }
-    out
+
+    // Implicit close for any containers left open by a malformed flat
+    // stream. html_render's own nesting guarantees this shouldn't happen,
+    // but closing them defensively keeps `finish()` from panicking.
+    while frames.len() > 1 {
+        let (start_style, children) = frames.pop().unwrap();
+        let style = start_style.unwrap_or_default();
+        let bb = BlockBox {
+            style,
+            children,
+            tag: None,
+            marker: None,
+            spacing_after: 0.0,
+            page_break_before: None,
+            page_break_after: None,
+            is_hr: false,
+        };
+        frames.last_mut().unwrap().1.push(Node::Block(bb));
+    }
+
+    frames.pop().unwrap().1
 }
 
-fn flatten_node(node: Node, out: &mut Vec<Block>) {
-    match node {
-        Node::Block(b) => {
-            // Special case: a block containing exactly one anonymous child
-            // is today's `Paragraph`. We reconstruct it so the flat output
-            // is byte-identical to what `html_render` would push directly.
-            if b.children.len() == 1
-                && matches!(b.children[0], Node::Anonymous(_))
-                && !b.is_hr
-            {
-                let mut children = b.children;
-                let Node::Anonymous(anon) = children.remove(0) else {
-                    unreachable!("matched above");
-                };
-                out.push(Block::Paragraph(Paragraph {
-                    runs: anon.runs,
-                    line_height: anon.line_height,
-                    spacing_after: anon.spacing_after,
-                    style: b.style,
-                    marker: b.marker,
-                    is_hr: false,
-                    preserve_whitespace: anon.preserve_whitespace,
-                }));
-                return;
-            }
-
-            // Horizontal-rule leaf: the flat model represents it as a
-            // Paragraph with `is_hr = true` and empty runs.
-            if b.is_hr {
-                out.push(Block::Paragraph(Paragraph {
-                    runs: vec![],
-                    line_height: None,
-                    spacing_after: 12.0,
-                    style: b.style,
-                    marker: None,
-                    is_hr: true,
-                    preserve_whitespace: false,
-                }));
-                return;
-            }
-
-            // General case: recurse into children. Container-level styling
-            // (the block's own margin/border) is dropped — the flat model
-            // cannot represent it. Stage 1 removes this limitation.
-            for child in b.children {
-                flatten_node(child, out);
-            }
-        }
-        Node::Anonymous(anon) => {
-            // A free-standing anonymous box flattens to a paragraph with
-            // default style.
-            let mut style = BlockStyle::default();
-            style.text_align = anon.text_align;
-            style.letter_spacing = anon.letter_spacing;
-            style.word_spacing = anon.word_spacing;
-            out.push(Block::Paragraph(Paragraph {
-                runs: anon.runs,
-                line_height: anon.line_height,
-                spacing_after: anon.spacing_after,
-                style,
-                marker: None,
-                is_hr: false,
-                preserve_whitespace: anon.preserve_whitespace,
-            }));
-        }
-        Node::Table(t) => out.push(Block::Table(t.table)),
-        Node::Image(i) => out.push(Block::Image(i.image)),
+/// Returns `Some(&AnonymousBox)` if this `BlockBox` is the "paragraph
+/// shape" produced by `paragraph_leaf` — exactly one anonymous child,
+/// not an HR. Used by the recursive renderer to dispatch paragraph
+/// rendering vs. generic container walking.
+pub fn paragraph_shape(bb: &BlockBox) -> Option<&AnonymousBox> {
+    if bb.is_hr || bb.children.len() != 1 {
+        return None;
+    }
+    match &bb.children[0] {
+        Node::Anonymous(anon) => Some(anon),
+        _ => None,
     }
 }
 
@@ -223,132 +244,122 @@ mod tests {
     }
 
     #[test]
-    fn paragraph_leaf_round_trips_through_flatten() {
-        let tree = vec![Node::paragraph_leaf(sample_paragraph("hello"))];
-        let flat = flatten_tree(tree);
-        assert_eq!(flat.len(), 1);
-        let Block::Paragraph(p) = &flat[0] else {
-            panic!("expected paragraph");
+    fn unflatten_single_paragraph_produces_paragraph_shape_block() {
+        let flat = vec![Block::Paragraph(sample_paragraph("hello"))];
+        let tree = unflatten_blocks(flat);
+        assert_eq!(tree.len(), 1);
+        let Node::Block(bb) = &tree[0] else {
+            panic!("expected Block");
         };
-        assert_eq!(p.runs.len(), 1);
-        assert_eq!(p.runs[0].text, "hello");
-        assert!(!p.is_hr);
+        let anon = paragraph_shape(bb).expect("should be paragraph shape");
+        assert_eq!(anon.runs.len(), 1);
+        assert_eq!(anon.runs[0].text, "hello");
     }
 
     #[test]
-    fn nested_container_flattens_children_in_order() {
-        // BlockBox with two paragraph children — the outer block has no
-        // direct anonymous child, so it should recurse and emit both paras
-        // in document order.
-        let outer = BlockBox {
-            style: BlockStyle::default(),
-            children: vec![
-                Node::paragraph_leaf(sample_paragraph("first")),
-                Node::paragraph_leaf(sample_paragraph("second")),
-            ],
-            tag: Some("div"),
-            marker: None,
-            spacing_after: 0.0,
-            page_break_before: None,
-            page_break_after: None,
-            is_hr: false,
-        };
-        let flat = flatten_tree(vec![Node::Block(outer)]);
-        assert_eq!(flat.len(), 2);
-        let Block::Paragraph(p0) = &flat[0] else {
-            panic!();
-        };
-        let Block::Paragraph(p1) = &flat[1] else {
-            panic!();
-        };
-        assert_eq!(p0.runs[0].text, "first");
-        assert_eq!(p1.runs[0].text, "second");
-    }
-
-    #[test]
-    fn hr_block_flattens_to_hr_paragraph() {
-        let hr = BlockBox {
-            style: BlockStyle::default(),
-            children: vec![],
-            tag: Some("hr"),
-            marker: None,
-            spacing_after: 0.0,
-            page_break_before: None,
-            page_break_after: None,
-            is_hr: true,
-        };
-        let flat = flatten_tree(vec![Node::Block(hr)]);
-        assert_eq!(flat.len(), 1);
-        let Block::Paragraph(p) = &flat[0] else {
-            panic!();
-        };
-        assert!(p.is_hr);
-        assert!(p.runs.is_empty());
-    }
-
-    #[test]
-    fn freestanding_anonymous_flattens_to_paragraph() {
-        let anon = AnonymousBox {
-            runs: vec![sample_run("loose text")],
+    fn unflatten_hr_produces_hr_block() {
+        let flat = vec![Block::Paragraph(Paragraph {
+            runs: vec![],
             line_height: None,
+            spacing_after: 12.0,
+            style: BlockStyle::default(),
+            marker: None,
+            is_hr: true,
             preserve_whitespace: false,
-            text_align: TextAlign::Center,
-            letter_spacing: 1.5,
-            word_spacing: 2.0,
-            spacing_after: 6.0,
-        };
-        let flat = flatten_tree(vec![Node::Anonymous(anon)]);
-        assert_eq!(flat.len(), 1);
-        let Block::Paragraph(p) = &flat[0] else {
+        })];
+        let tree = unflatten_blocks(flat);
+        assert_eq!(tree.len(), 1);
+        let Node::Block(bb) = &tree[0] else {
             panic!();
         };
-        assert_eq!(p.runs[0].text, "loose text");
-        assert!(matches!(p.style.text_align, TextAlign::Center));
-        assert!((p.style.letter_spacing - 1.5).abs() < 1e-6);
-        assert!((p.style.word_spacing - 2.0).abs() < 1e-6);
-        assert!((p.spacing_after - 6.0).abs() < 1e-6);
+        assert!(bb.is_hr);
+        assert!(bb.children.is_empty());
+        assert!(paragraph_shape(bb).is_none());
     }
 
     #[test]
-    fn mixed_children_preserve_document_order() {
-        // div
-        //   p "intro"
-        //   nested div
-        //     p "deep"
-        //   p "outro"
-        let nested = BlockBox {
-            style: BlockStyle::default(),
-            children: vec![Node::paragraph_leaf(sample_paragraph("deep"))],
-            tag: Some("div"),
-            marker: None,
-            spacing_after: 0.0,
-            page_break_before: None,
-            page_break_after: None,
-            is_hr: false,
+    fn unflatten_container_sentinels_produces_nested_block() {
+        let mut outer_style = BlockStyle::default();
+        outer_style.margin_top = 10.0;
+        outer_style.margin_bottom = 10.0;
+        let flat = vec![
+            Block::ContainerStart(outer_style.clone()),
+            Block::Paragraph(sample_paragraph("inside")),
+            Block::ContainerEnd(outer_style.clone()),
+        ];
+        let tree = unflatten_blocks(flat);
+        assert_eq!(tree.len(), 1);
+        let Node::Block(outer) = &tree[0] else {
+            panic!();
         };
-        let outer = BlockBox {
-            style: BlockStyle::default(),
-            children: vec![
-                Node::paragraph_leaf(sample_paragraph("intro")),
-                Node::Block(nested),
-                Node::paragraph_leaf(sample_paragraph("outro")),
-            ],
-            tag: Some("div"),
-            marker: None,
-            spacing_after: 0.0,
-            page_break_before: None,
-            page_break_after: None,
-            is_hr: false,
+        assert!((outer.style.margin_top - 10.0).abs() < 1e-6);
+        assert!((outer.style.margin_bottom - 10.0).abs() < 1e-6);
+        assert_eq!(outer.children.len(), 1);
+        let Node::Block(inner) = &outer.children[0] else {
+            panic!();
         };
-        let flat = flatten_tree(vec![Node::Block(outer)]);
-        assert_eq!(flat.len(), 3);
-        let texts: Vec<&str> = flat
+        let anon = paragraph_shape(inner).expect("inner should be paragraph shape");
+        assert_eq!(anon.runs[0].text, "inside");
+    }
+
+    #[test]
+    fn unflatten_mixed_children_preserve_document_order() {
+        let outer_style = BlockStyle::default();
+        let inner_style = BlockStyle::default();
+        let flat = vec![
+            Block::ContainerStart(outer_style.clone()),
+            Block::Paragraph(sample_paragraph("intro")),
+            Block::ContainerStart(inner_style.clone()),
+            Block::Paragraph(sample_paragraph("deep")),
+            Block::ContainerEnd(inner_style),
+            Block::Paragraph(sample_paragraph("outro")),
+            Block::ContainerEnd(outer_style),
+        ];
+        let tree = unflatten_blocks(flat);
+        assert_eq!(tree.len(), 1);
+        let Node::Block(outer) = &tree[0] else {
+            panic!();
+        };
+        assert_eq!(outer.children.len(), 3);
+        let texts: Vec<&str> = outer
+            .children
             .iter()
-            .map(|b| match b {
-                Block::Paragraph(p) => p.runs[0].text.as_str(),
-                _ => panic!("expected paragraph"),
+            .map(|n| match n {
+                Node::Block(bb) => {
+                    if let Some(anon) = paragraph_shape(bb) {
+                        anon.runs[0].text.as_str()
+                    } else {
+                        bb.children
+                            .iter()
+                            .find_map(|c| match c {
+                                Node::Block(inner) => {
+                                    paragraph_shape(inner).map(|a| a.runs[0].text.as_str())
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or("?")
+                    }
+                }
+                _ => "?",
             })
             .collect();
         assert_eq!(texts, vec!["intro", "deep", "outro"]);
+    }
+
+    #[test]
+    fn unflatten_container_page_breaks_propagate_to_block_box() {
+        let mut style = BlockStyle::default();
+        style.page_break_before = Some(css::PageBreak::Always);
+        style.page_break_after = Some(css::PageBreak::Always);
+        let flat = vec![
+            Block::ContainerStart(style.clone()),
+            Block::ContainerEnd(style),
+        ];
+        let tree = unflatten_blocks(flat);
+        let Node::Block(bb) = &tree[0] else {
+            panic!();
+        };
+        assert!(matches!(bb.page_break_before, Some(css::PageBreak::Always)));
+        assert!(matches!(bb.page_break_after, Some(css::PageBreak::Always)));
     }
 }
