@@ -169,6 +169,14 @@ pub struct Paragraph {
     pub marker: Option<TextRun>,
     pub is_hr: bool,
     pub preserve_whitespace: bool,
+    /// Source tag name (e.g. "h1", "p"). Only set by `html_render` for
+    /// tags that need to participate in document-level features like the
+    /// heading outline. `None` means "doesn't matter" (list items, etc.).
+    pub tag: Option<&'static str>,
+    /// An id="…" attribute captured during DOM walk. Registered as a
+    /// GoTo destination at render time so `<a href="#id">` links can
+    /// resolve to this block's page and y-position.
+    pub anchor_id: Option<String>,
 }
 
 // ── Tables ───────────────────────────────────────────────────
@@ -497,6 +505,21 @@ fn rgb_to_f32(c: (f64, f64, f64)) -> (f32, f32, f32) {
     (c.0 as f32, c.1 as f32, c.2 as f32)
 }
 
+/// Map a heading tag ("h1".."h6") to its numeric level. Returns `None`
+/// for any other tag, which is how `finish()` skips non-heading blocks
+/// when building the outline.
+fn heading_level(tag: &str) -> Option<u8> {
+    match tag {
+        "h1" => Some(1),
+        "h2" => Some(2),
+        "h3" => Some(3),
+        "h4" => Some(4),
+        "h5" => Some(5),
+        "h6" => Some(6),
+        _ => None,
+    }
+}
+
 fn new_page(doc: &mut PdfDocument, width: f32, height: f32) -> Arc<Mutex<PageContent>> {
     let page = Arc::new(Mutex::new(PageContent::new(f64::from(width), f64::from(height))));
     doc.pages.push(Arc::clone(&page));
@@ -615,6 +638,8 @@ impl LayoutInner {
             marker: None,
             is_hr: true,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         }));
     }
 
@@ -996,6 +1021,39 @@ impl LayoutInner {
             // (possibly reset) pending_bottom so post-break blocks get
             // their full margin_top.
             cursor_y -= collapsed_top_delta(pending_bottom, block.style.margin_top);
+
+            // Register outline entry for headings and anchor entry for any
+            // `id="…"` captured during DOM walk. These run against the block
+            // top edge (cursor_y here), which is what `Destination::fit_horizontal`
+            // expects for a GoTo target. doc.pages.len() is 1-based after
+            // new_page runs, so subtract to get a 0-based index.
+            if !doc.pages.is_empty() {
+                let page_index = doc.pages.len() - 1;
+                if let Some(tag) = block.tag
+                    && let Some(level) = heading_level(tag)
+                {
+                    let text: String = block
+                        .runs
+                        .iter()
+                        .map(|r| r.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        doc.headings.push(crate::HeadingEntry {
+                            level,
+                            text: trimmed,
+                            page_index,
+                            y: cursor_y,
+                        });
+                    }
+                }
+                if let Some(id) = &block.anchor_id {
+                    doc.anchors
+                        .entry(id.clone())
+                        .or_insert((page_index, cursor_y));
+                }
+            }
 
             let needs_state_wrap =
                 block.style.has_any_styling() || block.runs.iter().any(|r| r.color.is_some());
@@ -1761,6 +1819,8 @@ impl Layout {
             marker: None,
             is_hr: false,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         }));
         Ok(())
     }
@@ -1802,6 +1862,8 @@ impl Layout {
             marker,
             is_hr: false,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         });
         Ok(())
     }

@@ -91,6 +91,22 @@ struct UaStyle {
     spacing_after: f32,
 }
 
+/// Map an arbitrary tag string to a `'static` slice for the small set of
+/// tags that need to travel with a paragraph all the way into `LayoutInner`.
+/// Currently only the heading tags need this so the outline builder can
+/// tell headings apart from plain paragraphs.
+fn static_paragraph_tag(tag: &str) -> Option<&'static str> {
+    match tag {
+        "h1" => Some("h1"),
+        "h2" => Some("h2"),
+        "h3" => Some("h3"),
+        "h4" => Some("h4"),
+        "h5" => Some("h5"),
+        "h6" => Some("h6"),
+        _ => None,
+    }
+}
+
 fn ua_style(tag: &str) -> UaStyle {
     match tag {
         "h1" => UaStyle { font: "Helvetica-Bold", font_size: 24.0, spacing_after: 16.0 },
@@ -392,6 +408,22 @@ fn extract_img_attrs(handle: &Handle) -> (Option<String>, Option<f32>, Option<f3
     }
 }
 
+fn extract_id_attr(handle: &Handle) -> Option<String> {
+    if let NodeData::Element { attrs, .. } = &handle.data {
+        let attrs = attrs.borrow();
+        attrs.iter().find_map(|attr| {
+            if attr.name.local.as_ref() == "id" {
+                let id = attr.value.to_string();
+                if id.is_empty() { None } else { Some(id) }
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    }
+}
+
 fn extract_href_attr(handle: &Handle) -> Option<String> {
     if let NodeData::Element { attrs, .. } = &handle.data {
         let attrs = attrs.borrow();
@@ -447,6 +479,13 @@ struct HtmlRenderer<'a> {
     /// is the innermost container. `handle_end_tag` pops the matching entry
     /// and emits `ContainerEnd`. See `push_container_start` in layout.rs.
     container_stack: Vec<(String, BlockStyle)>,
+    /// An id="…" captured during `walk_node` that has not yet been
+    /// attached to a paragraph. `flush()` consumes this and passes it to
+    /// `Paragraph.anchor_id` so internal `<a href="#id">` links can resolve
+    /// to the paragraph's page and y-position. If the element is a pure
+    /// container (`<div id=...>`), the id carries forward to the first
+    /// flushed paragraph inside it.
+    pending_anchor_id: Option<String>,
 }
 
 impl<'a> HtmlRenderer<'a> {
@@ -476,6 +515,7 @@ impl<'a> HtmlRenderer<'a> {
             base_dir: None,
             warnings: Vec::new(),
             container_stack: Vec::new(),
+            pending_anchor_id: None,
         }
     }
 
@@ -573,6 +613,17 @@ impl<'a> HtmlRenderer<'a> {
                 // Extract href for <a> tags before handling
                 if tag == "a" {
                     self.pending_href = extract_href_attr(handle);
+                }
+
+                // Capture id="…" so the next flushed paragraph can register
+                // itself as a named destination. If this element is a pure
+                // container (no text of its own) the id falls through to the
+                // first paragraph inside it. Only overwrite if we do not
+                // already have one pending — an outer `<div id="a"><div
+                // id="b">…</div></div>` keeps the outer id for the first
+                // paragraph, which is "close enough" for the common case.
+                if self.pending_anchor_id.is_none() {
+                    self.pending_anchor_id = extract_id_attr(handle);
                 }
 
                 self.handle_start_tag(tag, merged_style);
@@ -938,6 +989,8 @@ impl<'a> HtmlRenderer<'a> {
                     marker: Some(marker),
                     is_hr: false,
                     preserve_whitespace: false,
+                    tag: None,
+                    anchor_id: self.pending_anchor_id.take(),
                 });
                 return;
             }
@@ -957,6 +1010,8 @@ impl<'a> HtmlRenderer<'a> {
         // Apply CSS block properties
         self.apply_block_css(&mut block_style);
 
+        let paragraph_tag = tag.and_then(static_paragraph_tag);
+
         self.layout.push_paragraph(Paragraph {
             runs,
             line_height: self.resolve_line_height(),
@@ -965,6 +1020,8 @@ impl<'a> HtmlRenderer<'a> {
             marker: None,
             is_hr: false,
             preserve_whitespace: self.pre_depth > 0,
+            tag: paragraph_tag,
+            anchor_id: self.pending_anchor_id.take(),
         });
     }
 

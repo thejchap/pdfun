@@ -147,6 +147,8 @@ fn flatten_node(node: Node, out: &mut Vec<Block>) {
                     marker: b.marker,
                     is_hr: false,
                     preserve_whitespace: anon.preserve_whitespace,
+                    tag: b.tag,
+                    anchor_id: None,
                 }));
                 return;
             }
@@ -162,6 +164,8 @@ fn flatten_node(node: Node, out: &mut Vec<Block>) {
                     marker: None,
                     is_hr: true,
                     preserve_whitespace: false,
+                    tag: b.tag,
+                    anchor_id: None,
                 }));
                 return;
             }
@@ -188,6 +192,8 @@ fn flatten_node(node: Node, out: &mut Vec<Block>) {
                 marker: None,
                 is_hr: false,
                 preserve_whitespace: anon.preserve_whitespace,
+                tag: None,
+                anchor_id: None,
             }));
         }
         Node::Table(t) => out.push(Block::Table(t.table)),
@@ -219,6 +225,8 @@ mod tests {
             marker: None,
             is_hr: false,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         }
     }
 

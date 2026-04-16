@@ -81,6 +81,17 @@ pub(crate) struct LinkAnnotation {
     pub(crate) url: String,
 }
 
+/// A heading captured during layout for the PDF outline (bookmarks).
+/// `level` is 1–6 matching `h1`–`h6`.
+pub(crate) struct HeadingEntry {
+    pub(crate) level: u8,
+    pub(crate) text: String,
+    pub(crate) page_index: usize,
+    /// PDF-space y coordinate of the heading's top edge (post-margin),
+    /// suitable for passing to `Destination::fit_horizontal`.
+    pub(crate) y: f32,
+}
+
 pub(crate) struct PageContent {
     pub(crate) width: f64,
     pub(crate) height: f64,
@@ -366,6 +377,102 @@ fn write_page_content_stream(
     content.finish().to_vec()
 }
 
+/// Build the parent/sibling relationships for a flat list of headings and
+/// write the matching `/Outlines` dictionary plus one `OutlineItem` per
+/// heading.
+///
+/// Hierarchy rule: an h_N becomes a child of the nearest preceding heading
+/// with level < N. If there is no such heading, it becomes a top-level
+/// entry. This is the same "stack of open parents" algorithm Markdown
+/// renderers use for TOCs and matches what a reader's sidebar expects.
+///
+/// Destinations use `/FitH` with the heading's recorded y so clicking a
+/// bookmark scrolls to the heading's top edge at the viewer's current zoom.
+fn write_outline(
+    pdf: &mut Pdf,
+    root_ref: Ref,
+    item_refs: &[Ref],
+    headings: &[HeadingEntry],
+    page_refs: &[(Ref, Ref)],
+) {
+    debug_assert_eq!(item_refs.len(), headings.len());
+
+    // Precompute each item's parent / siblings / first child / last child
+    // without writing PDF yet. `parent[i]` is the index into `headings` of
+    // this item's parent, or `None` if it is a top-level item.
+    let n = headings.len();
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut top_level: Vec<usize> = Vec::new();
+    // Stack of (item index, level) tracking currently-open parents.
+    let mut stack: Vec<(usize, u8)> = Vec::new();
+    for (i, h) in headings.iter().enumerate() {
+        while let Some(&(_, lvl)) = stack.last() {
+            if lvl < h.level {
+                break;
+            }
+            stack.pop();
+        }
+        if let Some(&(p_idx, _)) = stack.last() {
+            parent[i] = Some(p_idx);
+            children[p_idx].push(i);
+        } else {
+            top_level.push(i);
+        }
+        stack.push((i, h.level));
+    }
+
+    // Write the outline dictionary.
+    {
+        let mut outline = pdf.outline(root_ref);
+        if let (Some(&first), Some(&last)) = (top_level.first(), top_level.last()) {
+            outline.first(item_refs[first]);
+            outline.last(item_refs[last]);
+            // Top-level visible count. A negative value would mean
+            // "collapsed" — we always emit the tree expanded.
+            outline.count(top_level.len() as i32);
+        }
+    }
+
+    // Write each OutlineItem.
+    for (i, h) in headings.iter().enumerate() {
+        let siblings = match parent[i] {
+            Some(p) => &children[p][..],
+            None => &top_level[..],
+        };
+        let pos = siblings.iter().position(|&x| x == i).unwrap();
+        let prev = if pos > 0 { Some(siblings[pos - 1]) } else { None };
+        let next = if pos + 1 < siblings.len() {
+            Some(siblings[pos + 1])
+        } else {
+            None
+        };
+
+        let mut item = pdf.outline_item(item_refs[i]);
+        item.title(pdf_writer::TextStr(&h.text));
+        item.parent(match parent[i] {
+            Some(p) => item_refs[p],
+            None => root_ref,
+        });
+        if let Some(p) = prev {
+            item.prev(item_refs[p]);
+        }
+        if let Some(nx) = next {
+            item.next(item_refs[nx]);
+        }
+        if !children[i].is_empty() {
+            item.first(item_refs[*children[i].first().unwrap()]);
+            item.last(item_refs[*children[i].last().unwrap()]);
+            // Always emit child count as positive (tree starts expanded).
+            item.count(children[i].len() as i32);
+        }
+        if h.page_index < page_refs.len() {
+            let page_id = page_refs[h.page_index].0;
+            item.dest().page(page_id).fit_horizontal(h.y);
+        }
+    }
+}
+
 /// Write PDF image XObjects for every image and its optional alpha SMask.
 fn write_image_xobjects(
     pdf: &mut Pdf,
@@ -505,6 +612,13 @@ pub(crate) struct PdfDocument {
     /// load failures. Exposed to Python so callers can decide whether
     /// to surface them to end users.
     pub(crate) warnings: Vec<String>,
+    /// Headings collected during layout, in document order. Used to
+    /// build the PDF `/Outlines` tree at `to_bytes()` time.
+    pub(crate) headings: Vec<HeadingEntry>,
+    /// Map from element `id` to `(page_index, y)` for every anchor the
+    /// layout registered. Internal `<a href="#id">` links are resolved
+    /// against this map at `to_bytes()` time.
+    pub(crate) anchors: std::collections::HashMap<String, (usize, f32)>,
 }
 
 #[pymethods]
@@ -521,6 +635,8 @@ impl PdfDocument {
             keywords: None,
             creator: Some("pdfun".to_string()),
             warnings: Vec::new(),
+            headings: Vec::new(),
+            anchors: std::collections::HashMap::new(),
         })
     }
 
@@ -610,8 +726,25 @@ impl PdfDocument {
         let custom_font_chars = collect_font_chars(&self.pages);
         let custom_data = build_custom_font_data(&self.registered_fonts, &custom_font_chars)?;
 
+        // Allocate outline refs up front so the catalog can reference the
+        // outline dictionary. Skip allocation entirely when there are no
+        // headings — the outline is optional.
+        let outline_refs: Option<(Ref, Vec<Ref>)> = if self.headings.is_empty() {
+            None
+        } else {
+            let root = allocator.alloc();
+            let items = self.headings.iter().map(|_| allocator.alloc()).collect();
+            Some((root, items))
+        };
+
         // Catalog and document metadata.
-        pdf.catalog(catalog_id).pages(page_tree_id);
+        {
+            let mut catalog = pdf.catalog(catalog_id);
+            catalog.pages(page_tree_id);
+            if let Some((root, _)) = &outline_refs {
+                catalog.outlines(*root);
+            }
+        }
 
         let has_info = self.title.is_some()
             || self.author.is_some()
@@ -693,13 +826,39 @@ impl PdfDocument {
                     .subtype(AnnotationType::Link)
                     .rect(rect)
                     .border(0.0, 0.0, 0.0, None);
-                annot
-                    .action()
-                    .action_type(ActionType::Uri)
-                    .uri(Str(link.url.as_bytes()));
+
+                // Internal fragment links (`<a href="#id">`) become GoTo
+                // actions targeting a FitH destination at the anchor's
+                // recorded y. External URLs keep the original URI action.
+                // Unresolved fragment links degrade to a plain Link
+                // annotation with no action — the rect still renders but
+                // clicks are inert, which matches "do not crash" from the
+                // implementation plan.
+                if let Some(fragment) = link.url.strip_prefix('#') {
+                    if let Some((target_page_index, target_y)) =
+                        self.anchors.get(fragment).copied()
+                        && target_page_index < page_refs.len()
+                    {
+                        let target_page_id = page_refs[target_page_index].0;
+                        let mut action = annot.action();
+                        action.action_type(ActionType::GoTo);
+                        action.destination().page(target_page_id).fit_horizontal(target_y);
+                    }
+                    // Unresolved: drop the action silently.
+                } else {
+                    annot
+                        .action()
+                        .action_type(ActionType::Uri)
+                        .uri(Str(link.url.as_bytes()));
+                }
             }
 
             pdf.stream(content_id, &content_bytes);
+        }
+
+        // Emit the outline tree if we collected any headings.
+        if let Some((root_ref, item_refs)) = &outline_refs {
+            write_outline(&mut pdf, *root_ref, item_refs, &self.headings, &page_refs);
         }
 
         write_image_xobjects(&mut pdf, &self.images, &image_refs);
@@ -1072,6 +1231,8 @@ fn html_to_pdf(
         keywords: None,
         creator: Some("pdfun".to_string()),
         warnings: Vec::new(),
+        headings: Vec::new(),
+        anchors: std::collections::HashMap::new(),
     };
     let mut inner = layout::LayoutInner::new(
         margin_top as f32,

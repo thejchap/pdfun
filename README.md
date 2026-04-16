@@ -167,8 +167,8 @@ Current burndown, ordered by the work items in flight:
 - [x] Clickable links (external)
 - [x] Document metadata (title, author, keywords)
 - [x] Image embedding (PNG, JPEG)
-- [ ] Bookmarks/outline (from headings)
-- [ ] Internal link anchors
+- [x] Bookmarks/outline (from headings)
+- [x] Internal link anchors
 - [ ] Table of contents
 - [ ] Page numbers / counters
 - [ ] Headers and footers (`@page` margin boxes)
