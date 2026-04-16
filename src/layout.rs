@@ -654,6 +654,57 @@ fn rgb_to_f32(c: (f64, f64, f64)) -> (f32, f32, f32) {
     (c.0 as f32, c.1 as f32, c.2 as f32)
 }
 
+/// Flatten a `@page` margin-box `content:` value into a concrete string
+/// by substituting `counter(page)` with the 1-indexed page number and
+/// `counter(pages)` with the total page count.
+fn resolve_margin_box_content(
+    items: &[css::ContentItem],
+    page_num: usize,
+    total_pages: usize,
+) -> String {
+    let mut out = String::new();
+    for item in items {
+        match item {
+            css::ContentItem::String(s) => out.push_str(s),
+            css::ContentItem::CounterPage => {
+                out.push_str(&page_num.to_string());
+            }
+            css::ContentItem::CounterPages => {
+                out.push_str(&total_pages.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Resolve a margin box's declared font-family (if any) to a registered
+/// font name. Falls back to `Helvetica` if the family is unknown or
+/// missing.
+fn resolve_margin_box_font(family: Option<&str>) -> String {
+    if let Some(fam) = family {
+        // Take the first comma-separated name, strip quotes / whitespace.
+        let first = fam.split(',').next().unwrap_or(fam).trim();
+        let first = first.trim_matches(|c| c == '"' || c == '\'');
+        // Map common families directly to a base-14 name.
+        let lower = first.to_ascii_lowercase();
+        let resolved = match lower.as_str() {
+            "helvetica" | "arial" | "sans-serif" => "Helvetica",
+            "times" | "times new roman" | "serif" => "Times-Roman",
+            "courier" | "courier new" | "monospace" => "Courier",
+            _ => {
+                // Anything else — try matching against the builtin list
+                // directly, otherwise fall back to Helvetica.
+                if BUILTIN_FONTS.iter().any(|f| f.eq_ignore_ascii_case(first)) {
+                    return first.to_string();
+                }
+                "Helvetica"
+            }
+        };
+        return resolved.to_string();
+    }
+    "Helvetica".to_string()
+}
+
 fn new_page(doc: &mut PdfDocument, width: f32, height: f32) -> Arc<Mutex<PageContent>> {
     let page = Arc::new(Mutex::new(PageContent::new(f64::from(width), f64::from(height))));
     doc.pages.push(Arc::clone(&page));
@@ -705,6 +756,10 @@ pub struct LayoutInner {
     pub column_rule_width: f32,
     pub column_rule_color: Option<(f32, f32, f32)>,
     pub images: Vec<crate::image::ImageData>,
+    /// `@page` margin boxes parsed from the stylesheet. Empty by default.
+    /// Stamped onto every page after the main render loop completes so
+    /// that `counter(pages)` can resolve to the final page count.
+    pub margin_boxes: css::MarginBoxes,
 }
 
 impl LayoutInner {
@@ -729,6 +784,7 @@ impl LayoutInner {
             column_rule_width: 0.0,
             column_rule_color: None,
             images: Vec::new(),
+            margin_boxes: css::MarginBoxes::default(),
         }
     }
 
@@ -1654,7 +1710,136 @@ impl LayoutInner {
             state.pending_bottom = 0.0;
         }
 
+        // Stamp @page margin boxes (headers/footers) onto every page.
+        // We do this after the main loop so `counter(pages)` can resolve
+        // to the final page count.
+        self.stamp_margin_boxes(doc);
+
         Ok(())
+    }
+
+    /// Iterate `doc.pages` and render any `@page` margin boxes onto each
+    /// one. Uses the 1-indexed page number for `counter(page)` and the
+    /// total page count for `counter(pages)`. Each of the six supported
+    /// positions (top/bottom × left/center/right) gets a single baseline
+    /// of text inside the printable margin strip.
+    fn stamp_margin_boxes(&self, doc: &mut PdfDocument) {
+        let boxes = &self.margin_boxes;
+        if !boxes.any() {
+            return;
+        }
+        let total_pages = doc.pages.len();
+        for (idx, page_arc) in doc.pages.iter().enumerate() {
+            let page_num = idx + 1;
+            let mut page = page_arc.lock().unwrap();
+            let positions = [
+                (&boxes.top_left, css::MarginBoxPosition::TopLeft),
+                (&boxes.top_center, css::MarginBoxPosition::TopCenter),
+                (&boxes.top_right, css::MarginBoxPosition::TopRight),
+                (&boxes.bottom_left, css::MarginBoxPosition::BottomLeft),
+                (&boxes.bottom_center, css::MarginBoxPosition::BottomCenter),
+                (&boxes.bottom_right, css::MarginBoxPosition::BottomRight),
+            ];
+            for (slot, pos) in positions {
+                if let Some(mb) = slot.as_ref() {
+                    self.render_margin_box(&mut page, mb, pos, page_num, total_pages);
+                }
+            }
+        }
+    }
+
+    /// Render a single margin box onto `page`. `page_num` is 1-indexed;
+    /// `total_pages` is the total page count. Text is single-line and
+    /// baseline-positioned; overflow is allowed (see the scope note in
+    /// the plan).
+    fn render_margin_box(
+        &self,
+        page: &mut PageContent,
+        mb: &css::MarginBox,
+        pos: css::MarginBoxPosition,
+        page_num: usize,
+        total_pages: usize,
+    ) {
+        // Resolve the content string.
+        let text = resolve_margin_box_content(&mb.content, page_num, total_pages);
+        if text.is_empty() {
+            return;
+        }
+        // Resolve font / size / color with defaults.
+        let font_size = mb.font_size.unwrap_or(10.0);
+        let font_name = resolve_margin_box_font(mb.font_family.as_deref());
+        let color = mb.color.unwrap_or((0.0, 0.0, 0.0));
+
+        // Compute the box's horizontal strip inside the printable area.
+        let printable_left = self.margin_left;
+        let printable_right = self.page_width - self.margin_right;
+        let printable_width = (printable_right - printable_left).max(0.0);
+        let col_w = printable_width / 3.0;
+        let (box_left, default_align) = match pos {
+            css::MarginBoxPosition::TopLeft | css::MarginBoxPosition::BottomLeft => {
+                (printable_left, TextAlign::Left)
+            }
+            css::MarginBoxPosition::TopCenter | css::MarginBoxPosition::BottomCenter => {
+                (printable_left + col_w, TextAlign::Center)
+            }
+            css::MarginBoxPosition::TopRight | css::MarginBoxPosition::BottomRight => {
+                (printable_left + 2.0 * col_w, TextAlign::Right)
+            }
+        };
+        let align = mb.text_align.clone().unwrap_or(default_align);
+
+        // Horizontal position based on alignment.
+        let text_width = font_metrics::measure_str(&text, &font_name, font_size).unwrap_or(0.0);
+        let x = match align {
+            TextAlign::Left | TextAlign::Justify => box_left,
+            TextAlign::Center => box_left + (col_w - text_width) / 2.0,
+            TextAlign::Right => box_left + col_w - text_width,
+        };
+
+        // Vertical baseline. Top boxes sit in the top margin strip with
+        // their baseline at (page_height - margin_top/2 - font_size/3);
+        // this is a rough "centered within the margin" placement that
+        // matches WeasyPrint's default for small headers. Bottom boxes
+        // mirror it from zero.
+        let y = match pos {
+            css::MarginBoxPosition::TopLeft
+            | css::MarginBoxPosition::TopCenter
+            | css::MarginBoxPosition::TopRight => {
+                let strip_center = self.page_height - (self.margin_top / 2.0);
+                strip_center - font_size / 3.0
+            }
+            css::MarginBoxPosition::BottomLeft
+            | css::MarginBoxPosition::BottomCenter
+            | css::MarginBoxPosition::BottomRight => {
+                let strip_center = self.margin_bottom / 2.0;
+                strip_center - font_size / 3.0
+            }
+        };
+
+        // Register the font so the page writer emits the right resource
+        // dictionary entry.
+        if !page.fonts_used.contains(&font_name) {
+            page.fonts_used.push(font_name.clone());
+        }
+
+        page.operations.push(PdfOp::SetFillColor {
+            r: color.0,
+            g: color.1,
+            b: color.2,
+        });
+        page.operations.push(PdfOp::BeginText);
+        page.operations.push(PdfOp::SetFont {
+            name: font_name,
+            size: font_size,
+        });
+        page.operations
+            .push(PdfOp::SetTextPosition { x, y });
+        page.operations.push(PdfOp::ShowText(text));
+        page.operations.push(PdfOp::EndText);
+        // Restore default fill color to black so later ops (if any) see
+        // a predictable state. Since margin boxes are stamped last, this
+        // is mostly defensive.
+        page.operations.push(PdfOp::SetFillColor { r: 0.0, g: 0.0, b: 0.0 });
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

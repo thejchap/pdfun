@@ -234,6 +234,96 @@ pub struct PageStyle {
     pub margin_right: Option<f32>,
     pub margin_bottom: Option<f32>,
     pub margin_left: Option<f32>,
+    pub margin_boxes: MarginBoxes,
+}
+
+/// A single `content:` value item inside a `@page` margin box.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContentItem {
+    /// A plain string literal (e.g. `"Page "`).
+    String(String),
+    /// The `counter(page)` function — replaced at render time with the
+    /// 1-indexed current page number.
+    CounterPage,
+    /// The `counter(pages)` function — replaced at render time with the
+    /// total page count.
+    CounterPages,
+}
+
+/// Position of a `@page` margin box. Only the six most common positions
+/// are supported; the four corner / side boxes from the CSS spec are out
+/// of scope for now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarginBoxPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+/// A single margin box declared inside `@page { ... }`.
+#[derive(Clone, Debug, Default)]
+pub struct MarginBox {
+    /// Parsed `content:` value. Empty = no content (box is effectively
+    /// inert, matching the spec which says the box generates no content).
+    pub content: Vec<ContentItem>,
+    /// Optional font family override. `None` = inherit / Helvetica.
+    pub font_family: Option<String>,
+    /// Optional font-size override in points. `None` = 10pt default.
+    pub font_size: Option<f32>,
+    /// Optional color override. `None` = black.
+    pub color: Option<(f32, f32, f32)>,
+    /// Optional text-align override. `None` = position default
+    /// (left/center/right based on `MarginBoxPosition`).
+    pub text_align: Option<TextAlign>,
+}
+
+/// Holder for the six supported margin-box positions.
+#[derive(Clone, Debug, Default)]
+pub struct MarginBoxes {
+    pub top_left: Option<MarginBox>,
+    pub top_center: Option<MarginBox>,
+    pub top_right: Option<MarginBox>,
+    pub bottom_left: Option<MarginBox>,
+    pub bottom_center: Option<MarginBox>,
+    pub bottom_right: Option<MarginBox>,
+}
+
+impl MarginBoxes {
+    pub fn set(&mut self, pos: MarginBoxPosition, margin_box: MarginBox) {
+        match pos {
+            MarginBoxPosition::TopLeft => self.top_left = Some(margin_box),
+            MarginBoxPosition::TopCenter => self.top_center = Some(margin_box),
+            MarginBoxPosition::TopRight => self.top_right = Some(margin_box),
+            MarginBoxPosition::BottomLeft => self.bottom_left = Some(margin_box),
+            MarginBoxPosition::BottomCenter => self.bottom_center = Some(margin_box),
+            MarginBoxPosition::BottomRight => self.bottom_right = Some(margin_box),
+        }
+    }
+
+    /// Returns true if any margin box is set.
+    pub fn any(&self) -> bool {
+        self.top_left.is_some()
+            || self.top_center.is_some()
+            || self.top_right.is_some()
+            || self.bottom_left.is_some()
+            || self.bottom_center.is_some()
+            || self.bottom_right.is_some()
+    }
+}
+
+fn margin_box_position_for(name: &str) -> Option<MarginBoxPosition> {
+    match name {
+        "top-left" => Some(MarginBoxPosition::TopLeft),
+        "top-center" => Some(MarginBoxPosition::TopCenter),
+        "top-right" => Some(MarginBoxPosition::TopRight),
+        "bottom-left" => Some(MarginBoxPosition::BottomLeft),
+        "bottom-center" => Some(MarginBoxPosition::BottomCenter),
+        "bottom-right" => Some(MarginBoxPosition::BottomRight),
+        _ => None,
+    }
 }
 
 // ── ComputedStyle field table ───────────────────────────────
@@ -1890,11 +1980,19 @@ fn parse_attribute_selector(inner: &str) -> Option<SimpleSelector> {
 // ── @page rule parsing ───────────────────────────────────
 
 fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
-    let mut parser_input = ParserInput::new(declarations);
-    let mut parser = Parser::new(&mut parser_input);
-
-    while !parser.is_exhausted() {
-        let _ = parser.try_parse(|input| -> Result<(), ParseError<'_, ()>> {
+    // Split on top-level `;` and parse each declaration in isolation.
+    // This is more forgiving than feeding the whole block to cssparser
+    // and avoids getting stuck on malformed / unknown declarations
+    // (previous versions of this function used a while-loop around
+    // `try_parse` that could infinite-loop on trailing whitespace).
+    for decl in split_top_level_semicolons(declarations) {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        let mut parser_input = ParserInput::new(decl);
+        let mut parser = Parser::new(&mut parser_input);
+        let _ = parser.parse_entirely(|input| -> Result<(), ParseError<'_, ()>> {
             let name = input.expect_ident()?.clone();
             input.expect_colon()?;
 
@@ -1945,8 +2043,11 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
                 }
                 _ => return Err(input.new_custom_error(())),
             }
-
-            let _ = input.try_parse(|i| i.expect_semicolon());
+            // Drain any stray trailing tokens (e.g. `!important`) so
+            // parse_entirely's exhaustion check succeeds.
+            while !input.is_exhausted() {
+                let _ = input.next();
+            }
             Ok(())
         });
     }
@@ -1962,6 +2063,54 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     Stylesheet { rules, page_style }
 }
 
+/// Find the byte index of the `}` that matches the `{` at position
+/// `after_open_start` in `src`, honoring nesting. Returns the index into
+/// `src` of the closing brace. If unbalanced, returns `None`.
+fn find_matching_close(src: &str) -> Option<usize> {
+    // `src` starts immediately after the opening `{`. We walk forward,
+    // counting nested `{` / `}` pairs. Strings inside CSS declarations
+    // ("..." / '...') are skipped so that braces inside a string literal
+    // don't confuse the counter.
+    let bytes = src.as_bytes();
+    let mut depth: usize = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' | b'\'' => {
+                // Skip a CSS string literal. Honors `\` escapes.
+                let quote = b;
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if c == quote {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Parse stylesheet by manually scanning for `{ }` blocks.
 fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut PageStyle) {
     let mut remaining = css;
@@ -1974,7 +2123,21 @@ fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut
         let selector_text = remaining[..brace_open].trim();
         let after_open = &remaining[brace_open + 1..];
 
-        // Find matching `}` (simple: no nesting support)
+        // Handle @page rule — may contain nested `@top-center { ... }`
+        // blocks, so we need to find the matching close brace honoring
+        // nesting.
+        if selector_text.starts_with("@page") {
+            let Some(brace_close) = find_matching_close(after_open) else {
+                break;
+            };
+            let body = &after_open[..brace_close];
+            remaining = &after_open[brace_close + 1..];
+            parse_page_body(body, page_style);
+            continue;
+        }
+
+        // Non-@page rules: simple scan for the next `}` (we don't yet
+        // support nesting in regular rules).
         let Some(brace_close) = after_open.find('}') else {
             break;
         };
@@ -1982,12 +2145,6 @@ fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut
         remaining = &after_open[brace_close + 1..];
 
         if selector_text.is_empty() {
-            continue;
-        }
-
-        // Handle @page rule
-        if selector_text.starts_with("@page") {
-            parse_page_declarations(declarations_text, page_style);
             continue;
         }
 
@@ -2000,6 +2157,242 @@ fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut
         rules.push(CssRule { selectors, style });
     }
 }
+
+/// Parse the body of an `@page` rule: a mix of plain declarations and
+/// nested margin-box at-rules (`@top-center { ... }` etc.). Declarations
+/// outside any nested block are routed to `parse_page_declarations`;
+/// nested blocks are routed to `parse_margin_box_declarations`.
+fn parse_page_body(body: &str, page_style: &mut PageStyle) {
+    // We walk `body` character-by-character, accumulating the "flat"
+    // declaration text (everything outside nested `@xxx { }` blocks) into
+    // `flat`. When we hit an `@name { ... }`, we dispatch it to the
+    // margin-box parser and then continue scanning after the close brace.
+    let mut flat = String::new();
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'@' {
+            // Read at-rule name up to whitespace or `{`.
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if c.is_ascii_whitespace() || c == b'{' {
+                    break;
+                }
+                j += 1;
+            }
+            let name = &body[start..j];
+            // Skip whitespace up to `{`.
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'{' {
+                let after = &body[j + 1..];
+                if let Some(close_rel) = find_matching_close(after) {
+                    let inner = &after[..close_rel];
+                    if let Some(pos) = margin_box_position_for(&name.to_ascii_lowercase()) {
+                        let mb = parse_margin_box_declarations(inner);
+                        page_style.margin_boxes.set(pos, mb);
+                    }
+                    // advance `i` past the closing brace
+                    i = j + 1 + close_rel + 1;
+                    continue;
+                }
+                // Unbalanced: bail on this at-rule.
+                break;
+            }
+            // No `{` found; treat as a stray `@` and fall through.
+            flat.push('@');
+            i += 1;
+            continue;
+        }
+        flat.push(b as char);
+        i += 1;
+    }
+    parse_page_declarations(&flat, page_style);
+}
+
+/// Parse the declaration list of a `@page` margin box (e.g. the body of
+/// `@top-center { ... }`). Supported properties: `content`, `font-size`,
+/// `font-family`, `color`, `text-align`. Unknown declarations are
+/// silently ignored.
+///
+/// Implementation note: we split the body on `;` ourselves (honoring
+/// string literals) instead of relying on cssparser's declaration list
+/// iterator. This keeps every declaration self-contained and avoids
+/// any risk of a malformed value leaving the parser in a state where
+/// it can't make forward progress.
+fn parse_margin_box_declarations(declarations: &str) -> MarginBox {
+    let mut mb = MarginBox::default();
+    for decl in split_top_level_semicolons(declarations) {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        let mut input = ParserInput::new(decl);
+        let mut parser = Parser::new(&mut input);
+        let _ = parser.parse_entirely(|input| -> Result<(), ParseError<'_, ()>> {
+            let name = input.expect_ident()?.clone();
+            input.expect_colon()?;
+
+            match name.to_ascii_lowercase().as_str() {
+                "content" => {
+                    mb.content = parse_margin_box_content(input)?;
+                }
+                "font-size" => {
+                    let len = parse_non_negative_length(input)?;
+                    mb.font_size = Some(len.resolve(10.0));
+                }
+                "font-family" => {
+                    // Accept a single ident or string as the family name;
+                    // only the first value is honored. Further comma-
+                    // separated fallbacks are consumed but ignored.
+                    let first = if let Ok(s) =
+                        input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string()))
+                    {
+                        s
+                    } else {
+                        input.expect_ident()?.as_ref().to_string()
+                    };
+                    mb.font_family = Some(first);
+                    while input.try_parse(|i| i.expect_comma()).is_ok() {
+                        let _ = input
+                            .try_parse(|i| i.expect_string().map(|_| ()))
+                            .or_else(|_| input.try_parse(|i| i.expect_ident().map(|_| ())));
+                    }
+                }
+                "color" => {
+                    if let Ok(c) = parse_css_color(input) {
+                        mb.color = Some(c);
+                    }
+                }
+                "text-align" => {
+                    let id = input.expect_ident()?.clone();
+                    mb.text_align = Some(match id.to_ascii_lowercase().as_str() {
+                        "left" => TextAlign::Left,
+                        "center" => TextAlign::Center,
+                        "right" => TextAlign::Right,
+                        "justify" => TextAlign::Justify,
+                        _ => return Err(input.new_custom_error(())),
+                    });
+                }
+                _ => return Err(input.new_custom_error(())),
+            }
+            // Drain any leftover tokens inside this declaration — e.g.
+            // trailing `!important`, which we parse but ignore.
+            while !input.is_exhausted() {
+                let _ = input.next();
+            }
+            Ok(())
+        });
+    }
+    mb
+}
+
+/// Split a CSS declaration-list string on top-level `;` characters.
+/// Honors string literals (`"..."` / `'...'`) and parenthesized groups
+/// so that semicolons inside them are not treated as delimiters.
+fn split_top_level_semicolons(src: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = src.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    let mut paren_depth = 0i32;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' | b'\'' => {
+                let quote = b;
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if c == quote {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => {
+                paren_depth += 1;
+                i += 1;
+            }
+            b')' => {
+                if paren_depth > 0 {
+                    paren_depth -= 1;
+                }
+                i += 1;
+            }
+            b';' if paren_depth == 0 => {
+                out.push(&src[start..i]);
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < bytes.len() {
+        out.push(&src[start..]);
+    }
+    out
+}
+
+/// Parse a `content:` value for a margin box: a sequence of string
+/// literals and `counter(page)` / `counter(pages)` function calls,
+/// separated by whitespace (the CSS spec uses whitespace juxtaposition).
+///
+/// `input` is the regular (whitespace-skipping) declaration-body parser;
+/// this function uses only the high-level `try_parse` entry points so
+/// that parser state is always recoverable and we can't accidentally
+/// infinite-loop on stray whitespace.
+fn parse_margin_box_content<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<Vec<ContentItem>, ParseError<'i, ()>> {
+    let mut items = Vec::new();
+    loop {
+        if input.is_exhausted() {
+            break;
+        }
+        // Try a string literal.
+        if let Ok(s) =
+            input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string()))
+        {
+            items.push(ContentItem::String(s));
+            continue;
+        }
+        // Try `counter(ident)`.
+        let counter_result = input.try_parse(|i| -> Result<ContentItem, ParseError<'_, ()>> {
+            let name = i.expect_function()?.clone();
+            if !name.eq_ignore_ascii_case("counter") {
+                return Err(i.new_custom_error(()));
+            }
+            i.parse_nested_block(|nested| -> Result<ContentItem, ParseError<'_, ()>> {
+                let id = nested.expect_ident()?.clone();
+                match id.to_ascii_lowercase().as_str() {
+                    "page" => Ok(ContentItem::CounterPage),
+                    "pages" => Ok(ContentItem::CounterPages),
+                    _ => Err(nested.new_custom_error(())),
+                }
+            })
+        });
+        if let Ok(item) = counter_result {
+            items.push(item);
+            continue;
+        }
+        // Anything else terminates the content value. We intentionally
+        // don't advance `input` here — the outer declaration loop will
+        // see the remaining tokens (typically a semicolon) and recover.
+        break;
+    }
+    Ok(items)
+}
+
 
 // ── Selector matching ─────────────────────────────────────
 
@@ -3187,6 +3580,56 @@ mod tests {
         second.sibling_index = 1;
         second.sibling_count = 2;
         assert!(match_rules(&second, &sheet).color.is_none());
+    }
+
+    #[test]
+    fn page_margin_box_top_center_string() {
+        let css = r#"@page { @top-center { content: "Hello"; } }"#;
+        let sheet = parse_stylesheet(css);
+        let mb = sheet.page_style.margin_boxes.top_center.as_ref().unwrap();
+        assert_eq!(mb.content, vec![ContentItem::String("Hello".to_string())]);
+    }
+
+    #[test]
+    fn page_margin_box_counter_page() {
+        let css = r#"@page { @bottom-center { content: counter(page); } }"#;
+        let sheet = parse_stylesheet(css);
+        let mb = sheet.page_style.margin_boxes.bottom_center.as_ref().unwrap();
+        assert_eq!(mb.content, vec![ContentItem::CounterPage]);
+    }
+
+    #[test]
+    fn page_decls_with_trailing_whitespace_do_not_hang() {
+        // Regression: this used to infinite-loop because the old parser
+        // used `while !is_exhausted` around `try_parse` which never
+        // advanced on stray whitespace.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("  size: a4;  margin: 36pt;   ", &mut ps);
+        assert_eq!(ps.width, Some(595.0));
+        assert_eq!(ps.margin_top, Some(36.0));
+    }
+
+    #[test]
+    fn page_margin_box_page_n_of_m() {
+        let css = r#"@page {
+            size: a4;
+            margin: 2cm;
+            @bottom-right {
+                content: "Page " counter(page) " of " counter(pages);
+            }
+        }"#;
+        let sheet = parse_stylesheet(css);
+        assert_eq!(sheet.page_style.width, Some(595.0));
+        let mb = sheet.page_style.margin_boxes.bottom_right.as_ref().unwrap();
+        assert_eq!(
+            mb.content,
+            vec![
+                ContentItem::String("Page ".to_string()),
+                ContentItem::CounterPage,
+                ContentItem::String(" of ".to_string()),
+                ContentItem::CounterPages,
+            ]
+        );
     }
 
     #[test]

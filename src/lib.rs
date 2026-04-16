@@ -1251,6 +1251,7 @@ fn html_to_pdf(
     if let Some(m) = page_style.margin_left {
         inner.margin_left = m;
     }
+    inner.margin_boxes = page_style.margin_boxes;
 
     inner.finish(&mut doc).map_err(PyValueError::new_err)?;
     // Transfer any images collected during rendering to the document
