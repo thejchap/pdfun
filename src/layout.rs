@@ -240,11 +240,8 @@ pub struct Table {
     pub spacing_after: f32,
     /// Default line-height for cells (resolved from CSS).
     pub default_line_height: Option<f32>,
-    /// Optional `<caption>` laid out above the first row (caption-side: top
-    /// is assumed; `caption-side: bottom` is out of scope for this batch).
-    /// Rendered centered by default; the caller may override via the
-    /// caption paragraph's `style.text_align`.
     pub caption: Option<Box<Paragraph>>,
+    pub border_collapse: css::BorderCollapseValue,
 }
 
 pub struct ImageBlock {
@@ -1743,6 +1740,74 @@ impl LayoutInner {
         *cursor_y -= collapsed_top_delta(*pending_bottom, table.style.margin_top);
         *pending_bottom = 0.0;
 
+        let is_collapse =
+            matches!(table.border_collapse, css::BorderCollapseValue::Collapse);
+
+        // In collapse mode we batch internal + outer borders per-band
+        // (a "band" is a contiguous stretch of rows on the same page/column)
+        // and flush them when the band ends — either on a page break or at
+        // the end of the table.
+        struct CollapseBand {
+            x0: f32,
+            top_y: f32,
+            row_bottoms: Vec<f32>,
+            // Max border width and first non-None color encountered in the band.
+            max_border_width: f32,
+            border_color: Option<(f32, f32, f32)>,
+            has_border: bool,
+        }
+        let mut collapse_band: Option<CollapseBand> = None;
+
+        // Flushes the currently accumulated band's collapse borders to `page`.
+        // Draws the outer rectangle once, internal vertical gridlines at each
+        // column boundary, and internal horizontal gridlines at each row
+        // boundary.
+        fn flush_collapse_band(
+            page: &mut PageContent,
+            band: &CollapseBand,
+            col_widths: &[f32],
+        ) {
+            if !band.has_border || band.row_bottoms.is_empty() {
+                return;
+            }
+            let (r, g, b) = band.border_color.unwrap_or((0.0, 0.0, 0.0));
+            let w = band.max_border_width;
+            let total_w: f32 = col_widths.iter().sum();
+            let bottom_y = *band
+                .row_bottoms
+                .last()
+                .expect("row_bottoms non-empty (checked above)");
+            let height = band.top_y - bottom_y;
+            page.operations.push(PdfOp::SetStrokeColor { r, g, b });
+            page.operations.push(PdfOp::SetLineWidth(w));
+            // Outer rectangle
+            page.operations.push(PdfOp::Rectangle {
+                x: band.x0,
+                y: bottom_y,
+                width: total_w,
+                height,
+            });
+            page.operations.push(PdfOp::Stroke);
+            // Internal vertical gridlines (skip the last boundary — that's
+            // the right edge of the outer rectangle)
+            let mut gx = band.x0;
+            for cw in col_widths.iter().take(col_widths.len().saturating_sub(1)) {
+                gx += cw;
+                page.operations.push(PdfOp::MoveTo { x: gx, y: band.top_y });
+                page.operations.push(PdfOp::LineTo { x: gx, y: bottom_y });
+                page.operations.push(PdfOp::Stroke);
+            }
+            // Internal horizontal gridlines — every row boundary except
+            // the band's final bottom edge (already drawn as part of the
+            // outer rectangle).
+            for &rb in &band.row_bottoms[..band.row_bottoms.len() - 1] {
+                page.operations.push(PdfOp::MoveTo { x: band.x0, y: rb });
+                page.operations
+                    .push(PdfOp::LineTo { x: band.x0 + total_w, y: rb });
+                page.operations.push(PdfOp::Stroke);
+            }
+        }
+
         for row in &table.rows {
             // Wrap each cell's content at its column width and compute text heights
             let mut cell_text_heights: Vec<f32> = Vec::with_capacity(row.cells.len());
@@ -1784,6 +1849,13 @@ impl LayoutInner {
 
             // Page-break check: move the entire row to next column/page if it doesn't fit
             if *cursor_y - row_height < self.margin_bottom && *cursor_y < content_top {
+                // Flush any pending collapse band before moving on.
+                if is_collapse {
+                    if let Some(band) = collapse_band.take() {
+                        let mut page = current_page.lock().unwrap();
+                        flush_collapse_band(&mut page, &band, &col_widths);
+                    }
+                }
                 self.advance_column_or_page(
                     current_page,
                     doc,
@@ -1800,6 +1872,7 @@ impl LayoutInner {
             let row_top = *cursor_y;
             let row_bottom = row_top - row_height;
             let mut cell_x = col_x_for(*current_col) + table.style.margin_left;
+            let band_x0 = cell_x;
             if table_actual_width < table_area_width {
                 // tables default to left-aligned at the margin; no centering
             }
@@ -1834,10 +1907,12 @@ impl LayoutInner {
                     page.operations.push(PdfOp::Fill);
                 }
 
-                // Cell border
-                if cell.style.border_width > 0.0
-                    && !matches!(cell.style.border_style, Some(css::BorderStyle::None))
-                {
+                // Cell border — in separate mode each cell strokes its own
+                // rectangle; in collapse mode we accumulate into the band and
+                // draw the outer + internal gridlines once when the band ends.
+                let cell_has_border = cell.style.border_width > 0.0
+                    && !matches!(cell.style.border_style, Some(css::BorderStyle::None));
+                if !is_collapse && cell_has_border {
                     let (r, g, b) = cell.style.border_color.unwrap_or((0.0, 0.0, 0.0));
                     page.operations.push(PdfOp::SetStrokeColor { r, g, b });
                     page.operations
@@ -1904,7 +1979,43 @@ impl LayoutInner {
             }
             drop(page);
 
+            if is_collapse {
+                let band = collapse_band.get_or_insert_with(|| CollapseBand {
+                    x0: band_x0,
+                    top_y: row_top,
+                    row_bottoms: Vec::new(),
+                    max_border_width: 0.0,
+                    border_color: None,
+                    has_border: false,
+                });
+                band.row_bottoms.push(row_bottom);
+                for cell in &row.cells {
+                    let cell_has_border = cell.style.border_width > 0.0
+                        && !matches!(
+                            cell.style.border_style,
+                            Some(css::BorderStyle::None)
+                        );
+                    if cell_has_border {
+                        band.has_border = true;
+                        if cell.style.border_width > band.max_border_width {
+                            band.max_border_width = cell.style.border_width;
+                        }
+                        if band.border_color.is_none() {
+                            band.border_color = cell.style.border_color;
+                        }
+                    }
+                }
+            }
+
             *cursor_y = row_bottom;
+        }
+
+        // Flush any remaining collapse band at the end of the table.
+        if is_collapse {
+            if let Some(band) = collapse_band.take() {
+                let mut page = current_page.lock().unwrap();
+                flush_collapse_band(&mut page, &band, &col_widths);
+            }
         }
 
         // Record table bottom margin as pending so the following block's

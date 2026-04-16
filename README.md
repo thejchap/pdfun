@@ -107,7 +107,8 @@ Current burndown, ordered by the work items in flight:
 - [x] `text-transform` (uppercase, lowercase, capitalize)
 - [x] `text-indent`
 - [ ] `white-space` (via `<pre>` only, not as CSS property)
-- [ ] `vertical-align`
+- [x] `vertical-align` (table cells: top, middle, bottom)
+- [x] `border-collapse` (separate, collapse)
 - [ ] `box-shadow`
 - [ ] `background-image`, `background-repeat`, `background-size`, `background-position`
 - [x] `list-style-position`

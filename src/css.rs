@@ -202,6 +202,28 @@ pub enum ListStylePosition {
     Inside,
 }
 
+/// CSS `vertical-align`. Only the three block-level keywords we support on
+/// table cells — baseline/sub/super/text-top/text-bottom are not modeled here
+/// (super/sub flow through the run-level `baseline_shift` instead).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum VerticalAlignValue {
+    #[default]
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// CSS `border-collapse` for tables.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum BorderCollapseValue {
+    /// Each cell draws its own border; default CSS behavior.
+    #[default]
+    Separate,
+    /// Adjacent borders share a single stroke and the outer border is drawn
+    /// as one rectangle with internal gridlines.
+    Collapse,
+}
+
 // ── PageStyle (@page rule) ──────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -273,6 +295,8 @@ macro_rules! with_style_fields {
             (opacity,           copy,  no),
             (float,             copy,  no),
             (clear,             copy,  no),
+            (vertical_align,    copy,  no),
+            (border_collapse,   copy,  no),
         }
     };
 }
@@ -373,23 +397,12 @@ pub struct ComputedStyle {
     pub box_sizing: Option<BoxSizing>,
     pub text_transform: Option<TextTransform>,
     pub text_indent: Option<CssLength>,
-    /// Per-corner `border-radius` in CSS shorthand order:
-    /// `[top-left, top-right, bottom-right, bottom-left]`. A single value
-    /// populates all four slots; the shorthand 1-4 form follows standard
-    /// CSS rules. Longhands (`border-top-left-radius`, …) override
-    /// individual corners.
     pub border_radius: Option<[CssLength; 4]>,
-    /// CSS `opacity` in the range [0.0, 1.0]. A value of 1.0 or `None`
-    /// means fully opaque (no alpha state change). Values outside [0, 1]
-    /// are clamped at parse time.
     pub opacity: Option<f32>,
-    /// CSS `float`. Floats are taken out of the normal flow and shifted
-    /// to the left or right edge of their containing block; subsequent
-    /// content flows around them.
     pub float: Option<FloatValue>,
-    /// CSS `clear`. A block with `clear: left` is moved below any
-    /// preceding left-floated elements in its block-formatting context.
     pub clear: Option<ClearValue>,
+    pub vertical_align: Option<VerticalAlignValue>,
+    pub border_collapse: Option<BorderCollapseValue>,
 }
 
 
@@ -1128,6 +1141,27 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     "both" => self.style.clear = Some(ClearValue::Both),
                     _ => return Err(location.new_custom_error(())),
                 }
+            }
+            "vertical-align" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let va = match ident.to_ascii_lowercase().as_str() {
+                    "top" => VerticalAlignValue::Top,
+                    "middle" => VerticalAlignValue::Middle,
+                    "bottom" => VerticalAlignValue::Bottom,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.vertical_align = Some(va);
+            }
+            "border-collapse" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let bc = match ident.to_ascii_lowercase().as_str() {
+                    "separate" => BorderCollapseValue::Separate,
+                    "collapse" => BorderCollapseValue::Collapse,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.border_collapse = Some(bc);
             }
             _ => return Err(input.new_custom_error(())),
         }
