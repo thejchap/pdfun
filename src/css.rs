@@ -179,6 +179,28 @@ pub enum ListStylePosition {
     Inside,
 }
 
+/// CSS `vertical-align`. Only the three block-level keywords we support on
+/// table cells — baseline/sub/super/text-top/text-bottom are not modeled here
+/// (super/sub flow through the run-level `baseline_shift` instead).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum VerticalAlignValue {
+    #[default]
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// CSS `border-collapse` for tables.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum BorderCollapseValue {
+    /// Each cell draws its own border; default CSS behavior.
+    #[default]
+    Separate,
+    /// Adjacent borders share a single stroke and the outer border is drawn
+    /// as one rectangle with internal gridlines.
+    Collapse,
+}
+
 // ── PageStyle (@page rule) ──────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -246,6 +268,8 @@ macro_rules! with_style_fields {
             (box_sizing,        copy,  no),
             (text_transform,    copy,  yes),
             (text_indent,       copy,  yes),
+            (vertical_align,    copy,  no),
+            (border_collapse,   copy,  no),
         }
     };
 }
@@ -346,6 +370,8 @@ pub struct ComputedStyle {
     pub box_sizing: Option<BoxSizing>,
     pub text_transform: Option<TextTransform>,
     pub text_indent: Option<CssLength>,
+    pub vertical_align: Option<VerticalAlignValue>,
+    pub border_collapse: Option<BorderCollapseValue>,
 }
 
 
@@ -990,6 +1016,27 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     "inline" => self.style.display = Some(DisplayValue::Inline),
                     _ => return Err(location.new_custom_error(())),
                 }
+            }
+            "vertical-align" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let va = match ident.to_ascii_lowercase().as_str() {
+                    "top" => VerticalAlignValue::Top,
+                    "middle" => VerticalAlignValue::Middle,
+                    "bottom" => VerticalAlignValue::Bottom,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.vertical_align = Some(va);
+            }
+            "border-collapse" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let bc = match ident.to_ascii_lowercase().as_str() {
+                    "separate" => BorderCollapseValue::Separate,
+                    "collapse" => BorderCollapseValue::Collapse,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.border_collapse = Some(bc);
             }
             _ => return Err(input.new_custom_error(())),
         }

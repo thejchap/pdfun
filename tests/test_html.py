@@ -2912,6 +2912,202 @@ with describe("attribute selectors"):
         data = doc.to_bytes()
         expect(data).to_contain(b"1 0 0 rg")
 
+
+def _td_y_for_needle(data: bytes, needle: bytes) -> float:
+    """Return the y coordinate of the Td (next_line) that immediately
+    precedes the given `(needle) Tj` showtext. pdfun writes its content
+    streams uncompressed, so a simple bytes scan recovers baselines.
+    """
+    marker = b"(" + needle + b") Tj"
+    idx = data.find(marker)
+    assert idx >= 0, f"marker {needle!r} not found in PDF content"
+    td_idx = data.rfind(b" Td\n", 0, idx)
+    assert td_idx >= 0, "no Td before showtext"
+    line_start = data.rfind(b"\n", 0, td_idx) + 1
+    parts = data[line_start:td_idx].split()
+    return float(parts[-1])
+
+
+def _all_td_ys(data: bytes) -> list[float]:
+    """All Td y-coordinates in the stream (in document order)."""
+    ys: list[float] = []
+    start = 0
+    while True:
+        idx = data.find(b" Td\n", start)
+        if idx < 0:
+            break
+        line_start = data.rfind(b"\n", 0, idx) + 1
+        parts = data[line_start:idx].split()
+        if len(parts) >= 2:
+            ys.append(float(parts[-1]))
+        start = idx + 4
+    return ys
+
+
+with describe("table vertical-align"):
+    # The "tall" cell is a narrow column filled with enough words to wrap
+    # to several lines, making the row significantly taller than the first
+    # cell's single line of text.
+    _LONG_BLOB = " ".join(f"w{i}" for i in range(40))
+
+    def _two_cell_table(va_for_short: str | None) -> bytes:
+        va_attr = f' style="vertical-align: {va_for_short}"' if va_for_short else ""
+        html = f"<table><tr><td{va_attr}>X</td><td>{_LONG_BLOB}</td></tr></table>"
+        return HtmlDocument(string=html).to_bytes()
+
+    @test
+    def vertical_align_default_is_top():
+        """Without a vertical-align style, the short cell's baseline
+        matches the tall cell's first line (both are top-aligned)."""
+        data = _two_cell_table(None)
+        short_y = _td_y_for_needle(data, b"X")
+        all_ys = _all_td_ys(data)
+        # The tall cell's top line is the maximum y seen in the table.
+        top_y = max(all_ys)
+        assert abs(short_y - top_y) < 1.0
+
+    @test
+    def vertical_align_top_matches_default():
+        """vertical-align: top behaves identically to the default."""
+        data = _two_cell_table("top")
+        short_y = _td_y_for_needle(data, b"X")
+        top_y = max(_all_td_ys(data))
+        assert abs(short_y - top_y) < 1.0
+
+    @test
+    def vertical_align_middle_centers_content():
+        """vertical-align: middle drops the short baseline below the
+        first line and above the last line of the tall cell."""
+        data = _two_cell_table("middle")
+        short_y = _td_y_for_needle(data, b"X")
+        ys = _all_td_ys(data)
+        top_y = max(ys)
+        bot_y = min(ys)
+        assert short_y < top_y - 2.0, (
+            f"middle not below top: short={short_y} top={top_y}"
+        )
+        assert short_y > bot_y + 2.0, (
+            f"middle not above bottom: short={short_y} bot={bot_y}"
+        )
+
+    @test
+    def vertical_align_bottom_drops_to_bottom():
+        """vertical-align: bottom places the short baseline at (or very
+        near) the tall cell's last line."""
+        data = _two_cell_table("bottom")
+        short_y = _td_y_for_needle(data, b"X")
+        bot_y = min(_all_td_ys(data))
+        assert abs(short_y - bot_y) < 2.0, (
+            f"bottom not at bottom: short={short_y} bot={bot_y}"
+        )
+
+    @test
+    def vertical_align_bottom_strictly_below_top():
+        """For the same table, bottom is strictly lower than top."""
+        top = _two_cell_table("top")
+        bot = _two_cell_table("bottom")
+        top_y = _td_y_for_needle(top, b"X")
+        bot_y = _td_y_for_needle(bot, b"X")
+        # The cell is many lines tall, so the gap should be substantial.
+        assert bot_y < top_y - 10.0
+
+    @test
+    def vertical_align_invalid_keyword_is_ignored():
+        """A keyword pdfun doesn't support (e.g. `super`) is dropped by
+        the CSS parser, so the cell stays top-aligned and the PDF still
+        renders."""
+        html = (
+            "<table><tr>"
+            '<td style="vertical-align: super">X</td>'
+            f"<td>{_LONG_BLOB}</td>"
+            "</tr></table>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        assert b"%PDF" in data
+        short_y = _td_y_for_needle(data, b"X")
+        top_y = max(_all_td_ys(data))
+        assert abs(short_y - top_y) < 1.0
+
+
+with describe("table border-collapse"):
+
+    @test
+    def border_collapse_separate_preserves_per_cell_rects():
+        """border-collapse: separate (default) draws one rect per cell."""
+        html = (
+            "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # Each cell emits a `re\nS\n` (rect + stroke) pair for its border.
+        # With 4 cells we expect at least 4 such stroke rectangles.
+        expect(data.count(b" re\nS\n")).to_be_greater_than(3)
+
+    @test
+    def border_collapse_collapse_reduces_stroke_count():
+        """border-collapse: collapse draws one outer rect plus internal
+        grid lines, so the number of stroked rectangles is much smaller
+        than the number of cells."""
+        sep_html = (
+            "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>"
+        )
+        col_html = (
+            '<table style="border-collapse: collapse">'
+            "<tr><td>A</td><td>B</td></tr>"
+            "<tr><td>C</td><td>D</td></tr>"
+            "</table>"
+        )
+        sep = HtmlDocument(string=sep_html).to_bytes()
+        col = HtmlDocument(string=col_html).to_bytes()
+        sep_rects = sep.count(b" re\nS\n")
+        col_rects = col.count(b" re\nS\n")
+        # Separate draws at least 4 bordered cells; collapse draws exactly
+        # one outer rectangle plus `m`/`l`/`S` for internal gridlines.
+        assert sep_rects >= 4, f"expected >=4 stroke rects, got {sep_rects}"
+        assert col_rects == 1, f"expected 1 stroke rect, got {col_rects}"
+
+    @test
+    def border_collapse_collapse_emits_internal_gridlines():
+        """collapse mode emits move/line/stroke triples for each internal
+        vertical and horizontal grid line."""
+        html = (
+            '<table style="border-collapse: collapse">'
+            "<tr><td>A</td><td>B</td><td>C</td></tr>"
+            "<tr><td>D</td><td>E</td><td>F</td></tr>"
+            "<tr><td>G</td><td>H</td><td>I</td></tr>"
+            "</table>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # 3 columns -> 2 internal vertical gridlines
+        # 3 rows -> 2 internal horizontal gridlines
+        # Each gridline emits an `l\nS\n` (line + stroke) pair.
+        expect(data.count(b" l\nS\n")).to_be_greater_than(3)
+        # Text still renders.
+        expect(data).to_contain(b"(A)")
+        expect(data).to_contain(b"(I)")
+
+    @test
+    def border_collapse_separate_explicit_matches_default():
+        """Explicit border-collapse: separate matches the default
+        (both draw one stroked rectangle per cell)."""
+        default_html = "<table><tr><td>A</td><td>B</td></tr></table>"
+        explicit_html = (
+            '<table style="border-collapse: separate">'
+            "<tr><td>A</td><td>B</td></tr></table>"
+        )
+        d1 = HtmlDocument(string=default_html).to_bytes()
+        d2 = HtmlDocument(string=explicit_html).to_bytes()
+        assert d1.count(b" re\nS\n") == d2.count(b" re\nS\n")
+
+    @test
+    def border_collapse_single_row_single_col():
+        """A 1x1 table in collapse mode still renders the outer rectangle
+        and its single cell's content."""
+        html = '<table style="border-collapse: collapse"><tr><td>Solo</td></tr></table>'
+        data = HtmlDocument(string=html).to_bytes()
+        expect(data).to_contain(b"(Solo)")
+        # Exactly one rectangle (the outer border) and no gridlines.
+        assert data.count(b" re\nS\n") == 1
+
     @test
     def attr_substring_match():
         """[class*="big"] matches values containing 'big'."""

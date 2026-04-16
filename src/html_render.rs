@@ -1016,11 +1016,17 @@ impl<'a> HtmlRenderer<'a> {
             return;
         }
 
+        let border_collapse = table_style
+            .as_ref()
+            .and_then(|s| s.border_collapse)
+            .unwrap_or_default();
+
         let table = Table {
             rows,
             style: table_block_style,
             spacing_after,
             default_line_height,
+            border_collapse,
         };
         self.layout.push_table(table);
     }
@@ -1387,6 +1393,13 @@ fn build_table_cell(
         ..BlockStyle::default()
     };
 
+    // Resolve vertical-align from the cell's inline style; default Top.
+    let vertical_align = match cell_style.as_ref().and_then(|s| s.vertical_align) {
+        Some(css::VerticalAlignValue::Middle) => VerticalAlign::Middle,
+        Some(css::VerticalAlignValue::Bottom) => VerticalAlign::Bottom,
+        _ => VerticalAlign::Top,
+    };
+
     if let Some(style) = cell_style.as_ref() {
         if let Some(c) = style.color {
             block_style.color = Some(c);
@@ -1437,7 +1450,7 @@ fn build_table_cell(
         runs,
         line_height: merged_inherited.line_height.map(|len| len.resolve_ctx(&ctx)),
         style: block_style,
-        vertical_align: VerticalAlign::Top,
+        vertical_align,
     }
 }
 
