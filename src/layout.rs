@@ -211,6 +211,14 @@ pub struct Paragraph {
     pub marker: Option<TextRun>,
     pub is_hr: bool,
     pub preserve_whitespace: bool,
+    /// Source tag name (e.g. "h1", "p"). Only set by `html_render` for
+    /// tags that need to participate in document-level features like the
+    /// heading outline. `None` means "doesn't matter" (list items, etc.).
+    pub tag: Option<&'static str>,
+    /// An id="…" attribute captured during DOM walk. Registered as a
+    /// GoTo destination at render time so `<a href="#id">` links can
+    /// resolve to this block's page and y-position.
+    pub anchor_id: Option<String>,
 }
 
 // ── Tables ───────────────────────────────────────────────────
@@ -654,9 +662,6 @@ fn rgb_to_f32(c: (f64, f64, f64)) -> (f32, f32, f32) {
     (c.0 as f32, c.1 as f32, c.2 as f32)
 }
 
-/// Flatten a `@page` margin-box `content:` value into a concrete string
-/// by substituting `counter(page)` with the 1-indexed page number and
-/// `counter(pages)` with the total page count.
 fn resolve_margin_box_content(
     items: &[css::ContentItem],
     page_num: usize,
@@ -677,23 +682,16 @@ fn resolve_margin_box_content(
     out
 }
 
-/// Resolve a margin box's declared font-family (if any) to a registered
-/// font name. Falls back to `Helvetica` if the family is unknown or
-/// missing.
 fn resolve_margin_box_font(family: Option<&str>) -> String {
     if let Some(fam) = family {
-        // Take the first comma-separated name, strip quotes / whitespace.
         let first = fam.split(',').next().unwrap_or(fam).trim();
         let first = first.trim_matches(|c| c == '"' || c == '\'');
-        // Map common families directly to a base-14 name.
         let lower = first.to_ascii_lowercase();
         let resolved = match lower.as_str() {
             "helvetica" | "arial" | "sans-serif" => "Helvetica",
             "times" | "times new roman" | "serif" => "Times-Roman",
             "courier" | "courier new" | "monospace" => "Courier",
             _ => {
-                // Anything else — try matching against the builtin list
-                // directly, otherwise fall back to Helvetica.
                 if BUILTIN_FONTS.iter().any(|f| f.eq_ignore_ascii_case(first)) {
                     return first.to_string();
                 }
@@ -703,6 +701,18 @@ fn resolve_margin_box_font(family: Option<&str>) -> String {
         return resolved.to_string();
     }
     "Helvetica".to_string()
+}
+
+fn heading_level(tag: &str) -> Option<u8> {
+    match tag {
+        "h1" => Some(1),
+        "h2" => Some(2),
+        "h3" => Some(3),
+        "h4" => Some(4),
+        "h5" => Some(5),
+        "h6" => Some(6),
+        _ => None,
+    }
 }
 
 fn new_page(doc: &mut PdfDocument, width: f32, height: f32) -> Arc<Mutex<PageContent>> {
@@ -828,6 +838,8 @@ impl LayoutInner {
             marker: None,
             is_hr: true,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         }));
     }
 
@@ -1188,25 +1200,42 @@ impl LayoutInner {
             state.pending_container_top = 0.0;
         }
 
-        // Float sub-path setup:
-        // - A floated block does not interact with surrounding margin
-        //   collapsing and does not consume vertical flow — `cursor_y`
-        //   is restored at the end.
-        // - It positions itself at the left or right edge of its
-        //   column, ignoring any other active floats.
-        // - If no explicit width is given, it defaults to one-third of
-        //   the column so surrounding text actually has room to wrap.
         let is_float = !matches!(style.float, css::FloatValue::None);
         let saved_cursor_y = state.cursor_y;
         let saved_pending_bottom = state.pending_bottom;
 
         Self::fold_container_top(state);
 
-        // Honor `clear` before any float calculations so that the block
-        // starts below any floats it was told to clear past. Floated
-        // blocks still honor `clear` relative to earlier floats.
         if style.clear != css::ClearValue::None {
             Self::apply_clear(state, style.clear);
+        }
+
+        if !is_float && !doc.pages.is_empty() {
+            let page_index = doc.pages.len() - 1;
+            if let Some(tag) = bb.tag
+                && let Some(level) = heading_level(tag)
+            {
+                let text: String = anon
+                    .runs
+                    .iter()
+                    .map(|r| r.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("");
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    doc.headings.push(crate::HeadingEntry {
+                        level,
+                        text: trimmed,
+                        page_index,
+                        y: state.cursor_y,
+                    });
+                }
+            }
+            if let Some(id) = &bb.anchor_id {
+                doc.anchors
+                    .entry(id.clone())
+                    .or_insert((page_index, state.cursor_y));
+            }
         }
 
         // Compute left/right insets from floats active at this `cursor_y`
@@ -2424,6 +2453,8 @@ impl Layout {
             marker: None,
             is_hr: false,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         }));
         Ok(())
     }
@@ -2465,6 +2496,8 @@ impl Layout {
             marker,
             is_hr: false,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         });
         Ok(())
     }

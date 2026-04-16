@@ -33,6 +33,7 @@ pub struct BlockBox {
     pub style: BlockStyle,
     pub children: Vec<Node>,
     pub tag: Option<&'static str>,
+    pub anchor_id: Option<String>,
     /// List marker (disc, decimal, etc.) painted before the first line of
     /// the first anonymous child. Only set for `<li>`.
     pub marker: Option<TextRun>,
@@ -87,7 +88,8 @@ impl Node {
         Node::Block(BlockBox {
             style: para.style,
             children: vec![Node::Anonymous(anon)],
-            tag: None,
+            tag: para.tag,
+            anchor_id: para.anchor_id,
             marker: para.marker,
             spacing_after: 0.0,
             page_break_before: None,
@@ -126,6 +128,7 @@ pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
                         style: p.style,
                         children: Vec::new(),
                         tag: Some("hr"),
+                        anchor_id: p.anchor_id,
                         marker: None,
                         spacing_after: p.spacing_after,
                         page_break_before: None,
@@ -169,6 +172,7 @@ pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
                     style,
                     children,
                     tag: None,
+                    anchor_id: None,
                     marker: None,
                     spacing_after: 0.0,
                     page_break_before,
@@ -190,6 +194,7 @@ pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
             style,
             children,
             tag: None,
+            anchor_id: None,
             marker: None,
             spacing_after: 0.0,
             page_break_before: None,
@@ -202,10 +207,6 @@ pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
     frames.pop().unwrap().1
 }
 
-/// Returns `Some(&AnonymousBox)` if this `BlockBox` is the "paragraph
-/// shape" produced by `paragraph_leaf` — exactly one anonymous child,
-/// not an HR. Used by the recursive renderer to dispatch paragraph
-/// rendering vs. generic container walking.
 pub fn paragraph_shape(bb: &BlockBox) -> Option<&AnonymousBox> {
     if bb.is_hr || bb.children.len() != 1 {
         return None;
@@ -238,6 +239,8 @@ mod tests {
             marker: None,
             is_hr: false,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         }
     }
 
@@ -264,6 +267,8 @@ mod tests {
             marker: None,
             is_hr: true,
             preserve_whitespace: false,
+            tag: None,
+            anchor_id: None,
         })];
         let tree = unflatten_blocks(flat);
         assert_eq!(tree.len(), 1);

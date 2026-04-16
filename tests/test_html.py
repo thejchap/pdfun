@@ -3758,3 +3758,120 @@ with describe("float and clear"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         expect(data).to_contain(b"Flowing")
+
+
+with describe("bookmarks and internal links"):
+
+    @test
+    def headings_emit_outlines_key():
+        """An h1 heading produces /Outlines in the catalog."""
+        doc = HtmlDocument(string="<h1>Chapter One</h1><p>body</p>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Outlines")
+
+    @test
+    def heading_text_appears_in_outline():
+        """The heading text is emitted in an outline item /Title."""
+        doc = HtmlDocument(string="<h1>Introduction</h1>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Introduction")
+        # Outlines dictionary marker.
+        expect(data).to_contain(b"/Outlines")
+
+    @test
+    def no_headings_no_outline():
+        """A document with no headings does not emit an /Outlines catalog entry."""
+        doc = HtmlDocument(string="<p>just a paragraph</p>")
+        data = doc.to_bytes()
+        assert b"/Outlines" not in data
+
+    @test
+    def nested_hierarchy_links_h2_to_h1_parent():
+        """An h2 following an h1 becomes a child of the h1 (parent reference)."""
+        doc = HtmlDocument(string="<h1>Parent</h1><h2>Child</h2><h2>Sibling</h2>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Parent")
+        expect(data).to_contain(b"Child")
+        expect(data).to_contain(b"Sibling")
+        # The h1 is the outline parent; its item should have /First and /Last
+        # attributes pointing at its two h2 children. We check for the
+        # generic /First and /Last markers on an outline item.
+        expect(data).to_contain(b"/First")
+        expect(data).to_contain(b"/Last")
+        expect(data).to_contain(b"/Parent")
+
+    @test
+    def multiple_top_level_headings():
+        """Two h1s produce two top-level outline items with /Next/Prev siblings."""
+        doc = HtmlDocument(string="<h1>Alpha</h1><h1>Beta</h1>")
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Alpha")
+        expect(data).to_contain(b"Beta")
+        expect(data).to_contain(b"/Next")
+        expect(data).to_contain(b"/Prev")
+
+    @test
+    def internal_link_emits_goto_action():
+        """<a href="#target"> with a matching id becomes a GoTo action."""
+        html = '<h1 id="start">Top</h1><p><a href="#start">jump</a></p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Link")
+        expect(data).to_contain(b"/GoTo")
+        # Destination arrays use /FitH for the vertical-offset fit mode.
+        expect(data).to_contain(b"/FitH")
+        # External URL action type should not appear for a pure internal link.
+        assert b"/URI" not in data
+
+    @test
+    def internal_link_to_paragraph_id():
+        """An id on a <p> is a valid anchor target."""
+        html = (
+            '<p><a href="#ref">see reference</a></p>'
+            '<p id="ref">the reference paragraph</p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Link")
+        expect(data).to_contain(b"/GoTo")
+
+    @test
+    def missing_anchor_does_not_crash():
+        """An href="#nope" with no matching id produces a PDF without a GoTo."""
+        html = '<p><a href="#nope">broken</a></p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data[:5]).to_equal(b"%PDF-")
+        expect(data).to_contain(b"broken")
+        # Annotation is emitted (rect present) but without a GoTo action.
+        expect(data).to_contain(b"/Link")
+        assert b"/GoTo" not in data
+        # And without a URI action — the fragment is internal-only.
+        assert b"/URI" not in data
+
+    @test
+    def external_and_internal_links_coexist():
+        """External URI links and internal GoTo links both appear in the PDF."""
+        html = (
+            '<h1 id="top">Top</h1>'
+            '<p><a href="#top">up</a> or '
+            '<a href="https://example.com">external</a></p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/GoTo")
+        expect(data).to_contain(b"/URI")
+        expect(data).to_contain(b"https://example.com")
+
+    @test
+    def all_heading_levels_in_outline():
+        """h1 through h6 all contribute entries to the outline tree."""
+        html = (
+            "<h1>One</h1><h2>Two</h2><h3>Three</h3>"
+            "<h4>Four</h4><h5>Five</h5><h6>Six</h6>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        for word in (b"One", b"Two", b"Three", b"Four", b"Five", b"Six"):
+            expect(data).to_contain(word)
+        expect(data).to_contain(b"/Outlines")
