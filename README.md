@@ -24,11 +24,17 @@ Current burndown, ordered by the work items in flight:
 - [x] C2: `clear: left` / `right` / `both`
 - [x] C3: `display: inline-block`
 
+**Stage D — document features** (done)
+- [x] D1: `@page` margin boxes (headers / footers)
+- [x] D2: Page numbers / counters (`counter(page)`, `counter(pages)`)
+- [x] D3: Bookmarks / outline (from headings)
+- [x] D4: Internal link anchors (`<a href="#id">`)
+- [x] D5: Table `vertical-align` and `border-collapse`
+
 **Later / unscoped**
 - Positioning (`position: absolute` / `relative` / `fixed`)
 - Flexbox and grid
-- [x] `@page` margin boxes (headers / footers)
-- Bookmarks, internal links, PDF/A, compression, encryption
+- PDF/A, compression, encryption
 
 ## Feature Parity Checklist (vs WeasyPrint)
 
