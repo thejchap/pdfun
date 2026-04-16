@@ -1644,6 +1644,157 @@ with describe("@page rule"):
         expect(data[:5]).to_equal(b"%PDF-")
 
 
+with describe("@page margin boxes"):
+
+    @test
+    def top_center_string_literal():
+        """@top-center renders a plain string literal."""
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 2cm;
+                @top-center { content: "My Document"; }
+            }
+        </style><p>Body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(My Document)")
+
+    @test
+    def bottom_right_string_literal():
+        """@bottom-right renders a plain string literal."""
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 2cm;
+                @bottom-right { content: "Confidential"; }
+            }
+        </style><p>Body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(Confidential)")
+
+    @test
+    def counter_page_renders_1_on_first_page():
+        """counter(page) substitutes 1 on the first (only) page."""
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 2cm;
+                @bottom-center { content: counter(page); }
+            }
+        </style><p>Body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # The shown text is literally "1"
+        expect(data).to_contain(b"(1)")
+
+    @test
+    def counter_pages_renders_total_page_count():
+        """counter(pages) substitutes the final document page count."""
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 2cm;
+                @bottom-center { content: "Total: " counter(pages); }
+            }
+        </style><p>Body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(Total: 1)")
+
+    @test
+    def page_n_of_m_format():
+        """Combined "Page N of M" format works."""
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 2cm;
+                @bottom-right {
+                    content: "Page " counter(page) " of " counter(pages);
+                }
+            }
+        </style><p>Body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # Items are concatenated into a single Tj literal.
+        expect(data).to_contain(b"(Page 1 of 1)")
+
+    @test
+    def multi_page_document_numbers_sequentially():
+        """On a multi-page document, each page shows its own counter."""
+        # Force at least 3 pages by inserting explicit page breaks.
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 2cm;
+                @bottom-center { content: counter(page) " / " counter(pages); }
+            }
+            .pb { page-break-after: always; }
+        </style>
+        <p class="pb">Page one body</p>
+        <p class="pb">Page two body</p>
+        <p>Page three body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # Each page's counter resolves to its own 1-indexed number, and
+        # counter(pages) resolves to the total (3) on every page.
+        expect(data).to_contain(b"(1 / 3)")
+        expect(data).to_contain(b"(2 / 3)")
+        expect(data).to_contain(b"(3 / 3)")
+
+    @test
+    def top_left_and_top_right_coexist():
+        """Multiple margin-box positions can be declared together."""
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 2cm;
+                @top-left { content: "Left"; }
+                @top-right { content: "Right"; }
+            }
+        </style><p>Body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(Left)")
+        expect(data).to_contain(b"(Right)")
+
+    @test
+    def margin_box_with_font_size_and_color():
+        """Margin box honors font-size and color overrides."""
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 2cm;
+                @top-center {
+                    content: "Styled";
+                    font-size: 14pt;
+                    color: #ff0000;
+                }
+            }
+        </style><p>Body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"(Styled)")
+        # Red fill color "1 0 0 rg" emitted before the text.
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def margin_box_does_not_break_other_page_properties():
+        """Nested margin boxes don't prevent size/margin from parsing."""
+        html = """<style>
+            @page {
+                size: a4;
+                margin: 1in;
+                @top-center { content: "Header"; }
+            }
+        </style><p>Body</p>"""
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/MediaBox [0 0 595 842]")
+        expect(data).to_contain(b"(Header)")
+
+
 with describe("multi-column layout"):
 
     @test

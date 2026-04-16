@@ -27,7 +27,7 @@ Current burndown, ordered by the work items in flight:
 **Later / unscoped**
 - Positioning (`position: absolute` / `relative` / `fixed`)
 - Flexbox and grid
-- `@page` margin boxes (headers / footers)
+- [x] `@page` margin boxes (headers / footers)
 - Bookmarks, internal links, PDF/A, compression, encryption
 
 ## Feature Parity Checklist (vs WeasyPrint)
@@ -117,7 +117,7 @@ Current burndown, ordered by the work items in flight:
 ### CSS At-Rules
 
 - [x] `@page` (page size, margins)
-- [ ] `@page` margin boxes (headers/footers)
+- [x] `@page` margin boxes (headers/footers)
 - [ ] `@font-face`
 - [ ] `@media`
 - [ ] `@import`
@@ -170,8 +170,8 @@ Current burndown, ordered by the work items in flight:
 - [ ] Bookmarks/outline (from headings)
 - [ ] Internal link anchors
 - [ ] Table of contents
-- [ ] Page numbers / counters
-- [ ] Headers and footers (`@page` margin boxes)
+- [x] Page numbers / counters
+- [x] Headers and footers (`@page` margin boxes)
 - [ ] SVG rendering
 - [ ] PDF/A compliance
 - [ ] Compression
