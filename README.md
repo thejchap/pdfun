@@ -2,40 +2,6 @@
 
 A pure-Rust HTML/CSS to PDF renderer with Python bindings. An alternative to [WeasyPrint](https://github.com/Kozea/WeasyPrint) with zero system dependencies.
 
-## Roadmap
-
-Current burndown, ordered by the work items in flight:
-
-**Stage A — relative units, spacing, sizing** (done)
-- [x] A1: `em` / `rem` resolution through a threaded `LengthContext`
-- [x] A2: `vw` / `vh` viewport units
-- [x] A3: `@page` size & margins
-- [x] A4: `%` percentages (font-size, width, padding, margin)
-- [x] A5: `letter-spacing`, `word-spacing` (Tc/Tw, negative values)
-- [x] A6: `box-sizing: border-box`
-
-**Stage B — margin collapsing** (done)
-- [x] B1: adjacent siblings collapse to max (positive/positive), min (negative/negative), sum (mixed)
-- [x] B2: parent / first-child and parent / last-child collapse
-- [x] B3: empty-block self-collapse
-
-**Stage C — floats & inline-block** (done)
-- [x] C1: `float: left` / `float: right` with block-level avoidance
-- [x] C2: `clear: left` / `right` / `both`
-- [x] C3: `display: inline-block`
-
-**Stage D — document features** (done)
-- [x] D1: `@page` margin boxes (headers / footers)
-- [x] D2: Page numbers / counters (`counter(page)`, `counter(pages)`)
-- [x] D3: Bookmarks / outline (from headings)
-- [x] D4: Internal link anchors (`<a href="#id">`)
-- [x] D5: Table `vertical-align` and `border-collapse`
-
-**Later / unscoped**
-- Positioning (`position: absolute` / `relative` / `fixed`)
-- Flexbox and grid
-- PDF/A, compression, encryption
-
 ## Feature Parity Checklist (vs WeasyPrint)
 
 ### HTML Elements
