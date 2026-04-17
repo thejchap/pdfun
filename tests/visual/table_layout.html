@@ -1,0 +1,30 @@
+<style>
+  body { margin: 20px; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+  th, td { border: 1px solid #333; padding: 8px; }
+  th { background-color: #e0e0e0; font-weight: bold; }
+  caption { font-weight: bold; margin-bottom: 8px; }
+  .separate { border-collapse: separate; }
+  .separate th, .separate td { border: 2px solid #666; }
+</style>
+<table>
+  <caption>Collapsed borders</caption>
+  <thead>
+    <tr><th>Name</th><th>Value</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Alpha</td><td>100</td><td>Active</td></tr>
+    <tr><td>Beta</td><td>200</td><td>Inactive</td></tr>
+    <tr><td>Gamma</td><td>300</td><td>Active</td></tr>
+  </tbody>
+</table>
+<table class="separate">
+  <caption>Separate borders</caption>
+  <thead>
+    <tr><th>X</th><th>Y</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>1</td><td>2</td></tr>
+    <tr><td>3</td><td>4</td></tr>
+  </tbody>
+</table>

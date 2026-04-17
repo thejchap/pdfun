@@ -13,6 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pymupdf>=1.24",
     "ruff>=0.15.8",
     "tryke",
     "ty>=0.0.26",

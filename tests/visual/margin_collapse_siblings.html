@@ -1,0 +1,8 @@
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  .box { margin: 40px 20px; padding: 10px; background-color: #e0e0e0; }
+  .box.big { margin-top: 60px; margin-bottom: 60px; }
+</style>
+<div class="box">First block (margin 40px)</div>
+<div class="box big">Second block (margin 60px — should collapse to 60px gap, not 100px)</div>
+<div class="box">Third block (margin 40px — should collapse to 60px gap above)</div>
