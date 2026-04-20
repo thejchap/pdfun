@@ -38,6 +38,13 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv run ty check
 
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - run: uv run python tools/parity/generate.py --check
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -56,12 +63,12 @@ jobs:
 
   ci:
     if: always()
-    needs: [clippy, fmt, ruff, ty, test]
+    needs: [clippy, fmt, ruff, ty, parity, test]
     runs-on: ubuntu-latest
     steps:
       - name: check all jobs
         run: |
-          results=("${{ needs.clippy.result }}" "${{ needs.fmt.result }}" "${{ needs.ruff.result }}" "${{ needs.ty.result }}" "${{ needs.test.result }}")
+          results=("${{ needs.clippy.result }}" "${{ needs.fmt.result }}" "${{ needs.ruff.result }}" "${{ needs.ty.result }}" "${{ needs.parity.result }}" "${{ needs.test.result }}")
           for r in "${results[@]}"; do
             if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
               echo "Job failed or was cancelled: $r"
