@@ -1100,7 +1100,7 @@ title = "PDF output features"
   id = "pdf-toc"
   title = "Table of contents"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "pdf-font-embedding"
