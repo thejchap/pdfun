@@ -530,7 +530,12 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
                 let g = input.expect_number()?.clamp(0.0, 255.0);
                 input.expect_comma()?;
                 let b = input.expect_number()?.clamp(0.0, 255.0);
-                // Ignore optional alpha
+                // Optional alpha: ", <number>" — parsed and ignored.
+                let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
+                    i.expect_comma()?;
+                    let _ = i.expect_number()?;
+                    Ok(())
+                });
                 Ok((r / 255.0, g / 255.0, b / 255.0))
             })
         }

@@ -51,6 +51,7 @@ with describe("PdfDocument API"):
         finally:
             path.unlink()
 
+    # spec: PDF; behaviors: pdf-multipage
     @test
     def multi_page_document():
         """Multiple pages can be added to one document."""
@@ -387,6 +388,7 @@ with describe("Font embedding"):
         font_id = db.load_font_file(str(candidates[0]))
         return db, font_id
 
+    # spec: PDF; behaviors: pdf-font-embedding
     @test
     def register_font_returns_name():
         """register_font() returns a font name string."""
@@ -429,6 +431,7 @@ with describe("Font embedding"):
         data = doc.to_bytes()
         expect(data).to_contain(b"/ToUnicode")
 
+    # spec: PDF; behaviors: pdf-font-subsetting
     @test
     def embedded_font_has_widths():
         """Embedded font CIDFont has a /W widths entry."""
@@ -1085,7 +1088,7 @@ with describe("Layout - combined styling"):
 
 
 with describe("Document metadata"):
-
+    # spec: PDF; behaviors: pdf-metadata
     @test
     def set_title_appears_in_pdf():
         """set_title() writes a /Title entry in the PDF info dictionary."""

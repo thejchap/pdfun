@@ -103,7 +103,7 @@ with describe("HtmlDocument - headings"):
 
 
 with describe("HtmlDocument - paragraphs"):
-
+    # spec: HTML; behaviors: html-paragraph
     @test
     def paragraph_renders():
         """<p> renders text."""
@@ -136,7 +136,7 @@ with describe("HtmlDocument - paragraphs"):
 
 
 with describe("HtmlDocument - div"):
-
+    # spec: HTML; behaviors: html-div
     @test
     def div_renders():
         """<div> renders its text content."""
@@ -146,7 +146,7 @@ with describe("HtmlDocument - div"):
 
 
 with describe("HtmlDocument - semantic elements"):
-
+    # spec: HTML; behaviors: html-semantic
     @test
     def article_renders():
         """<article> renders its text content."""
@@ -207,7 +207,7 @@ with describe("HtmlDocument - semantic elements"):
 
 
 with describe("HtmlDocument - br"):
-
+    # spec: HTML; behaviors: html-br
     @test
     def br_splits_text():
         """<br> creates a line break between text."""
@@ -234,6 +234,7 @@ with describe("HtmlDocument - inline elements"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Nested")
 
+    # spec: HTML; behaviors: html-span
     @test
     def span_extracts_text():
         """<span> text content is extracted."""
@@ -251,6 +252,7 @@ with describe("HtmlDocument - inline styling"):
         data = doc.to_bytes()
         expect(data).to_contain(b"/Helvetica-Bold")
 
+    # spec: CSS 2.1 §15.4; behaviors: font-style
     @test
     def italic_tag_applies_italic_font():
         """<i> applies Helvetica-Oblique font."""
@@ -391,7 +393,7 @@ with describe("HtmlDocument - edge cases"):
 
 
 with describe("HtmlDocument - lists"):
-
+    # spec: HTML; behaviors: html-ul
     @test
     def ul_renders_item_text():
         """<ul><li> renders item text in PDF."""
@@ -414,6 +416,7 @@ with describe("HtmlDocument - lists"):
         expect(data).to_contain(b"First")
         expect(data).to_contain(b"Second")
 
+    # spec: HTML; behaviors: html-ol
     @test
     def ol_has_numbered_markers():
         """<ol><li> items have numbered markers."""
@@ -442,6 +445,7 @@ with describe("HtmlDocument - lists"):
         data = doc.to_bytes()
         expect(data.count(b"Td")).to_be_greater_than(1)
 
+    # spec: HTML; behaviors: html-list-nesting
     @test
     def nested_ul():
         """Nested <ul> renders both outer and inner items."""
@@ -589,6 +593,7 @@ with describe("HtmlDocument - unknown and void elements"):
         expect(data).to_contain(b"Line one")
         expect(data).to_contain(b"Line two")
 
+    # spec: HTML; behaviors: html-anchor
     @test
     def anchor_tag_preserves_text():
         """<a> tag text is rendered alongside surrounding text."""
@@ -742,7 +747,7 @@ with describe("HtmlDocument - large documents"):
 
 
 with describe("HtmlDocument - inline styles"):
-
+    # spec: CSS 2.1 §14.1; behaviors: color-named
     @test
     def inline_color_named():
         """style='color: red' sets text color to red."""
@@ -750,6 +755,7 @@ with describe("HtmlDocument - inline styles"):
         data = doc.to_bytes()
         expect(data).to_contain(b"1 0 0 rg")
 
+    # spec: CSS 2.1 §14.1; behaviors: color-hex
     @test
     def inline_color_hex():
         """style='color: #0000ff' sets text color to blue."""
@@ -764,6 +770,7 @@ with describe("HtmlDocument - inline styles"):
         data = doc.to_bytes()
         expect(data).to_contain(b"1 0 0 rg")
 
+    # spec: CSS 2.1 §14.1; behaviors: color-rgb
     @test
     def inline_color_rgb():
         """style='color: rgb(0, 128, 0)' sets text color to green."""
@@ -772,6 +779,7 @@ with describe("HtmlDocument - inline styles"):
         expect(data).to_contain(b"Green")
         expect(data).to_contain(b"0 0.50")
 
+    # spec: CSS 2.1 §15.7; behaviors: font-size
     @test
     def inline_font_size_pt():
         """style='font-size: 18pt' uses 18pt font."""
@@ -786,6 +794,7 @@ with describe("HtmlDocument - inline styles"):
         data = doc.to_bytes()
         expect(data).to_contain(b"18 Tf")
 
+    # spec: CSS 2.1 §15.6; behaviors: font-weight
     @test
     def inline_font_weight_bold():
         """style='font-weight: bold' applies bold font."""
@@ -830,6 +839,7 @@ with describe("HtmlDocument - inline styles"):
         data = doc.to_bytes()
         expect(data).to_contain(b"/Courier")
 
+    # spec: CSS 2.1 §14.2.1; behaviors: bg-color
     @test
     def inline_background_color():
         """style='background-color: yellow' draws yellow background."""
@@ -1197,7 +1207,7 @@ with describe("HtmlDocument - code element"):
 
 
 with describe("HtmlDocument - blockquote element"):
-
+    # spec: HTML; behaviors: html-blockquote
     @test
     def blockquote_renders():
         """<blockquote> renders text."""
@@ -1224,7 +1234,7 @@ with describe("HtmlDocument - blockquote element"):
 
 
 with describe("HtmlDocument - hr element"):
-
+    # spec: HTML; behaviors: html-hr
     @test
     def hr_renders():
         """<hr> between paragraphs doesn't crash."""
@@ -1252,7 +1262,7 @@ with describe("HtmlDocument - hr element"):
 
 
 with describe("HtmlDocument - pre element"):
-
+    # spec: HTML; behaviors: html-pre
     @test
     def pre_preserves_spaces():
         """<pre> preserves multiple spaces."""
@@ -1295,7 +1305,7 @@ with describe("HtmlDocument - pre element"):
 
 
 with describe("HtmlDocument - style blocks"):
-
+    # spec: CSS 2.1 §5.3, §14.1; behaviors: sel-type, color-property
     @test
     def style_type_selector_color():
         """<style>p { color: red }</style> applies red to paragraphs."""
@@ -1312,6 +1322,19 @@ with describe("HtmlDocument - style blocks"):
         data = doc.to_bytes()
         expect(data).to_contain(b"18 Tf")
 
+    # spec: CSS 2.1 §5.3; behaviors: sel-universal
+    @test
+    def universal_selector_matches_all_elements():
+        """`* { color: red }` applies red to arbitrary, unrelated elements."""
+        html = "<style>* { color: red }</style><h1>H</h1><p>P</p><div>D</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # The red fill-color op should be emitted at least once per distinct
+        # element type — we don't need to count, just verify the selector
+        # matched beyond a single element.
+        expect(data.count(b"1 0 0 rg")).to_be_greater_than(1)
+
+    # spec: CSS 2.1 §5.8.3; behaviors: sel-class
     @test
     def style_class_selector():
         """<style>.red { color: red }</style> matches class attribute."""
@@ -1320,6 +1343,7 @@ with describe("HtmlDocument - style blocks"):
         data = doc.to_bytes()
         expect(data).to_contain(b"1 0 0 rg")
 
+    # spec: CSS 2.1 §5.9; behaviors: sel-id
     @test
     def style_id_selector():
         """<style>#title { font-size: 24pt }</style> matches id attribute."""
@@ -1328,6 +1352,7 @@ with describe("HtmlDocument - style blocks"):
         data = doc.to_bytes()
         expect(data).to_contain(b"24 Tf")
 
+    # spec: CSS 2.1 §6.4.1; behaviors: cascade-origin
     @test
     def style_inline_wins_over_style_block():
         """Inline style overrides <style> block rule."""
@@ -1355,6 +1380,7 @@ with describe("HtmlDocument - style blocks"):
         data = doc.to_bytes()
         expect(data).to_contain(b"0 0 1 rg")
 
+    # spec: CSS 2.1 §6.4.3; behaviors: cascade-specificity
     @test
     def style_id_beats_class():
         """ID selector beats class selector (higher specificity)."""
@@ -1366,6 +1392,7 @@ with describe("HtmlDocument - style blocks"):
         data = doc.to_bytes()
         expect(data).to_contain(b"0 0 1 rg")
 
+    # spec: CSS 2.1 §5.2.1; behaviors: sel-selector-list
     @test
     def style_multiple_selectors():
         """Comma-separated selectors apply to all matches."""
@@ -1374,6 +1401,7 @@ with describe("HtmlDocument - style blocks"):
         data = doc.to_bytes()
         expect(data).to_contain(b"1 0 0 rg")
 
+    # spec: CSS 2.1 §5.5; behaviors: sel-descendant
     @test
     def style_descendant_selector():
         """Descendant selector 'div p' matches nested elements."""
@@ -1390,6 +1418,7 @@ with describe("HtmlDocument - style blocks"):
         data = doc.to_bytes()
         expect(b"1 0 0 rg" not in data).to_equal(True)
 
+    # spec: CSS 2.1 §5.6; behaviors: sel-child
     @test
     def style_child_selector():
         """Child selector 'div > p' matches direct children."""
@@ -1409,6 +1438,7 @@ with describe("HtmlDocument - style blocks"):
         data = doc.to_bytes()
         expect(b"1 0 0 rg" not in data).to_equal(True)
 
+    # spec: CSS 2.1 §5.2; behaviors: sel-compound
     @test
     def style_compound_selector():
         """Compound selector 'p.note' matches element with class."""
@@ -1457,7 +1487,7 @@ with describe("HtmlDocument - style blocks"):
 
 
 with describe("body CSS inheritance"):
-
+    # spec: CSS 2.1 §15.3; behaviors: font-family
     @test
     def body_font_family_inherits():
         """font-family on body inherits to child elements."""
@@ -1591,6 +1621,7 @@ with describe("CSS inheritance"):
         data = doc.to_bytes()
         expect(data[:5]).to_equal(b"%PDF-")
 
+    # spec: CSS 2.1 §10.8; behaviors: vfmd-line-height
     @test
     def line_height_inherits_through_div():
         """line-height on a div inherits to child elements."""
@@ -1601,7 +1632,7 @@ with describe("CSS inheritance"):
 
 
 with describe("@page rule"):
-
+    # spec: CSS 2.1 §13.2; behaviors: paged-at-page
     @test
     def at_page_size_letter():
         """@page { size: letter } sets page to 612x792."""
@@ -1674,6 +1705,7 @@ with describe("@page margin boxes"):
         data = doc.to_bytes()
         expect(data).to_contain(b"(Confidential)")
 
+    # spec: CSS Paged Media 3 §4.3; behaviors: paged3-counters
     @test
     def counter_page_renders_1_on_first_page():
         """counter(page) substitutes 1 on the first (only) page."""
@@ -1759,6 +1791,7 @@ with describe("@page margin boxes"):
         expect(data).to_contain(b"(Left)")
         expect(data).to_contain(b"(Right)")
 
+    # spec: CSS Paged Media 3 §5; behaviors: paged3-margin-boxes
     @test
     def margin_box_with_font_size_and_color():
         """Margin box honors font-size and color overrides."""
@@ -1874,6 +1907,7 @@ with describe("display: none"):
         expect(data).to_contain(b"Visible")
         assert b"Hidden" not in data
 
+    # spec: CSS 2.1 §9.2.4; behaviors: vfm-display-none
     @test
     def display_none_hides_children():
         """display:none on a parent hides all descendants."""
@@ -1901,6 +1935,33 @@ with describe("display: none"):
         data = doc.to_bytes()
         expect(data).to_contain(b"Shown")
 
+    # spec: CSS 2.1 §9.3.1; behaviors: vfm-position-static
+    @test
+    def position_static_ignores_offsets():
+        """position:static blocks ignore top/left/right/bottom offsets per spec."""
+        baseline = HtmlDocument(string="<p>plain</p>").to_bytes()
+        with_offsets = HtmlDocument(
+            string='<p style="position: static; top: 500px; left: 500px">plain</p>'
+        ).to_bytes()
+        # Layout must be identical — offsets have no effect on static boxes.
+        expect(baseline).to_equal(with_offsets)
+
+
+with describe("box-sizing"):
+    # spec: CSS 2.1 §10.1; behaviors: vfmd-box-sizing
+    @test
+    def border_box_vs_content_box_differ():
+        """box-sizing: border-box shrinks the content area inside width."""
+        css = "width: 100px; padding: 20px; border: 5px solid red"
+        content_box = HtmlDocument(
+            string=f'<div style="box-sizing: content-box; {css}">x</div>'
+        ).to_bytes()
+        border_box = HtmlDocument(
+            string=f'<div style="box-sizing: border-box; {css}">x</div>'
+        ).to_bytes()
+        # The two sizing modes produce different border rectangles in the PDF.
+        assert content_box != border_box
+
 
 with describe("Document metadata from HTML"):
 
@@ -1926,7 +1987,7 @@ with describe("Document metadata from HTML"):
 
 
 with describe("CSS margins"):
-
+    # spec: CSS 2.1 §8.3; behaviors: box-margin
     @test
     def margin_top_renders():
         """margin-top on an element produces valid PDF output."""
@@ -2017,6 +2078,7 @@ with describe("CSS margins"):
         # blow past the usable content area and force a page break.
         assert b"/Count 1" in data
 
+    # spec: CSS 2.1 §8.3.1; behaviors: box-collapse-empty
     @test
     def empty_block_self_collapses():
         """Stage B3: an empty block with only margin-top and margin-bottom
@@ -2050,7 +2112,7 @@ with describe("CSS margins"):
 
 
 with describe("hsl colors"):
-
+    # spec: CSS Color 3 §4.2.3; behaviors: color-hsl
     @test
     def hsl_red_renders():
         """hsl(0, 100%, 50%) is pure red."""
@@ -2069,6 +2131,7 @@ with describe("hsl colors"):
         data = doc.to_bytes()
         expect(data).to_contain(b"0 1 0 rg")
 
+    # spec: CSS Color 3 §4.2.4; behaviors: color-hsla
     @test
     def hsla_accepts_alpha_component():
         """hsla() parses (alpha is currently ignored)."""
@@ -2076,6 +2139,15 @@ with describe("hsl colors"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         expect(data).to_contain(b"0 0 1 rg")
+
+    # spec: CSS Color 3 §4.2.1; behaviors: color-rgba
+    @test
+    def rgba_accepts_alpha_component():
+        """rgba() parses with an optional alpha (alpha is currently ignored)."""
+        html = '<p style="color: rgba(255, 0, 0, 0.5)">red</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
 
 
 with describe("semantic block elements"):
@@ -2112,7 +2184,7 @@ with describe("semantic block elements"):
 
 
 with describe("text-indent"):
-
+    # spec: CSS 2.1 §16.1; behaviors: text-indent
     @test
     def text_indent_renders_first_line_shift():
         """text-indent shifts the first line's x position."""
@@ -2134,7 +2206,7 @@ with describe("text-indent"):
 
 
 with describe("text-transform"):
-
+    # spec: CSS 2.1 §16.5; behaviors: text-transform
     @test
     def uppercase_transforms_text():
         """text-transform: uppercase converts text to uppercase."""
@@ -2280,7 +2352,7 @@ with describe("border-style"):
 
 
 with describe("clickable links"):
-
+    # spec: PDF; behaviors: pdf-external-links
     @test
     def link_produces_annotation():
         """An <a href> produces a /Link annotation in the PDF."""
@@ -2487,6 +2559,7 @@ with describe("list-style-position"):
         expect(data).to_contain(b"Item")
         expect(data).to_contain(b"(*)")
 
+    # spec: CSS Lists 3 §3; behaviors: lists-style-position
     @test
     def inside_differs_from_outside():
         """list-style-position: inside produces different bytes than outside."""
@@ -2515,7 +2588,7 @@ with describe("list-style-position"):
 
 
 with describe("definition lists and figures"):
-
+    # spec: HTML; behaviors: html-definition-list
     @test
     def dl_renders_term_and_definition():
         """<dl><dt><dd> renders both term and definition text."""
@@ -2535,6 +2608,7 @@ with describe("definition lists and figures"):
         doc_plain = HtmlDocument(string="<p>Term</p><p>Definition</p>")
         assert doc_plain.to_bytes() != data
 
+    # spec: HTML; behaviors: html-figure
     @test
     def figure_with_figcaption_renders_both():
         """<figure><figcaption> renders both the figure body and caption."""
@@ -2624,7 +2698,7 @@ with describe("page-break"):
 
 
 with describe("text-align: justify"):
-
+    # spec: CSS 2.1 §16.4; behaviors: text-word-spacing
     @test
     def justify_emits_word_spacing_op():
         """justified text emits a Tw (word spacing) operator in the stream."""
@@ -2633,6 +2707,16 @@ with describe("text-align: justify"):
         data = doc.to_bytes()
         # Tw is the PDF word spacing operator
         expect(data).to_contain(b" Tw")
+
+    # spec: CSS 2.1 §16.4; behaviors: text-letter-spacing
+    @test
+    def letter_spacing_emits_character_spacing_op():
+        """letter-spacing emits a Tc (character spacing) operator in the stream."""
+        doc = HtmlDocument(string='<p style="letter-spacing: 5px">abc</p>')
+        data = doc.to_bytes()
+        # Tc is the PDF character spacing operator. 5px == 3.75pt.
+        expect(data).to_contain(b" Tc")
+        expect(data).to_contain(b"3.75 Tc")
 
     @test
     def justify_last_line_not_widened():
@@ -2769,6 +2853,7 @@ with describe("tables"):
         # Just a page with no content
         assert b"%PDF" in data
 
+    # spec: CSS 2.1 §17.5; behaviors: table-layout
     @test
     def table_td_inline_style_color():
         """A <td> inline color style applies to cell text."""
@@ -2808,7 +2893,7 @@ with describe("tables"):
 
 
 with describe("images"):
-
+    # spec: HTML; behaviors: html-img-png
     @test
     def png_img_produces_xobject():
         """<img src=...> for a PNG produces an Image XObject in the PDF."""
@@ -2823,6 +2908,28 @@ with describe("images"):
             expect(data).to_contain(b"/Subtype /Image")
             expect(data).to_contain(b"/FlateDecode")
             expect(data).to_contain(b"/DeviceRGB")
+            expect(data).to_contain(b"/Im0 Do")
+        finally:
+            Path(path).unlink()
+
+    # spec: HTML; behaviors: html-img-jpeg
+    @test
+    def jpeg_img_produces_dctdecode_xobject():
+        """<img src=...> for a JPEG produces a DCTDecode-filtered Image XObject."""
+        import fitz
+
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 2, 2), 0)
+        pix.set_rect(fitz.IRect(0, 0, 2, 2), (255, 128, 64))
+        jpg = pix.tobytes("jpg")
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            f.write(jpg)
+            path = f.name
+        try:
+            doc = HtmlDocument(string=f'<img src="{path}" width="50" height="50">')
+            data = doc.to_bytes()
+            expect(data).to_contain(b"/XObject")
+            expect(data).to_contain(b"/Subtype /Image")
+            expect(data).to_contain(b"/DCTDecode")
             expect(data).to_contain(b"/Im0 Do")
         finally:
             Path(path).unlink()
@@ -2880,6 +2987,7 @@ with describe("images"):
         finally:
             Path(path).unlink()
 
+    # spec: CSS 2.1 §10.2; behaviors: vfmd-width
     @test
     def img_width_preserves_aspect_ratio():
         """Setting only width preserves aspect ratio for height."""
@@ -3044,6 +3152,7 @@ with describe("attribute selectors"):
         data = doc.to_bytes()
         expect(b"1 0 0 rg" not in data).to_equal(True)
 
+    # spec: CSS 2.1 §5.8; behaviors: sel-attribute
     @test
     def attr_prefix_match():
         """[href^="http"] matches values starting with 'http'."""
@@ -3117,6 +3226,7 @@ with describe("table vertical-align"):
         top_y = max(all_ys)
         assert abs(short_y - top_y) < 1.0
 
+    # spec: CSS 2.1 §10.8; behaviors: vfmd-vertical-align
     @test
     def vertical_align_top_matches_default():
         """vertical-align: top behaves identically to the default."""
@@ -3269,7 +3379,7 @@ with describe("table border-collapse"):
 
 
 with describe("pseudo-classes and sibling combinators"):
-
+    # spec: CSS 2.1 §5.11.3; behaviors: sel-pseudo-first-child
     @test
     def first_child_matches_first_p():
         """p:first-child matches only the first p in a div."""
@@ -3322,6 +3432,7 @@ with describe("pseudo-classes and sibling combinators"):
         data = doc.to_bytes()
         expect(b"1 0 0 rg" not in data).to_equal(True)
 
+    # spec: CSS 2.1 §5.11.3; behaviors: sel-pseudo-nth-child
     @test
     def nth_child_even_hits_even_positions():
         """li:nth-child(2n) matches the even-indexed children."""
@@ -3355,6 +3466,7 @@ with describe("pseudo-classes and sibling combinators"):
         data = doc.to_bytes()
         expect(data).to_contain(b"1 0 0 rg")
 
+    # spec: CSS 2.1 §5.11.4; behaviors: sel-pseudo-not
     @test
     def not_pseudo_excludes_class():
         """p:not(.skip) matches plain p but not p.skip."""
@@ -3369,6 +3481,7 @@ with describe("pseudo-classes and sibling combinators"):
         # Count red-set ops: exactly one fill-color set should appear for the
         # matching p. (The second paragraph falls back to default color.)
 
+    # spec: CSS 2.1 §5.7; behaviors: sel-adjacent-sibling
     @test
     def adjacent_sibling_matches_immediate_p():
         """h1 + p styles the p immediately following an h1."""
@@ -3391,6 +3504,7 @@ with describe("pseudo-classes and sibling combinators"):
         data = doc.to_bytes()
         expect(b"1 0 0 rg" not in data).to_equal(True)
 
+    # spec: CSS 2.1 §5.7; behaviors: sel-general-sibling
     @test
     def general_sibling_matches_all_following_p():
         """h1 ~ p styles all p elements following an h1 in document order."""
@@ -3457,7 +3571,7 @@ with describe("table caption"):
 
 
 with describe("min-height and max-height"):
-
+    # spec: CSS 2.1 §10.5; behaviors: vfmd-height
     @test
     def min_height_expands_short_block():
         """min-height forces a block to occupy at least the specified height."""
@@ -3582,7 +3696,7 @@ with describe("inline decoration tags"):
 
 
 with describe("details and summary"):
-
+    # spec: HTML; behaviors: html-details
     @test
     def summary_renders_as_bold_block():
         """<summary> inside <details> is rendered as a block with text."""
@@ -3605,7 +3719,7 @@ with describe("details and summary"):
 
 
 with describe("display: inline-block"):
-
+    # spec: CSS 2.1 §9.2.2; behaviors: vfm-display-inline
     @test
     def inline_block_renders_as_inline_atom():
         """<span style="display: inline-block"> flows inline with surrounding text."""
@@ -3616,6 +3730,7 @@ with describe("display: inline-block"):
         expect(data).to_contain(b"Badge")
         expect(data).to_contain(b"after")
 
+    # spec: CSS 2.1 §9.2.4; behaviors: vfm-display-inline-block
     @test
     def inline_block_with_fixed_width():
         """A declared width on an inline-block is honored as the atom's width."""
@@ -3723,6 +3838,7 @@ with describe("float and clear"):
         expect(data).to_contain(b"Text next to float")
         expect(data).to_contain(b"Second paragraph")
 
+    # spec: CSS 2.1 §9.5.2; behaviors: vfm-clear
     @test
     def clear_both_drops_below_floats():
         """A block with clear: both sits below preceding left/right floats."""
@@ -3761,7 +3877,7 @@ with describe("float and clear"):
 
 
 with describe("bookmarks and internal links"):
-
+    # spec: PDF; behaviors: pdf-bookmarks
     @test
     def headings_emit_outlines_key():
         """An h1 heading produces /Outlines in the catalog."""
@@ -3810,6 +3926,7 @@ with describe("bookmarks and internal links"):
         expect(data).to_contain(b"/Next")
         expect(data).to_contain(b"/Prev")
 
+    # spec: PDF; behaviors: pdf-internal-anchors
     @test
     def internal_link_emits_goto_action():
         """<a href="#target"> with a matching id becomes a GoTo action."""
