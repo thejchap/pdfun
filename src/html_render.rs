@@ -1609,6 +1609,15 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(pb) = style.page_break_after {
                 block_style.page_break_after = Some(pb);
             }
+            if let Some(pbi) = style.page_break_inside {
+                block_style.page_break_inside = Some(pbi);
+            }
+            if let Some(n) = style.orphans {
+                block_style.orphans = n;
+            }
+            if let Some(n) = style.widows {
+                block_style.widows = n;
+            }
             if let Some(len) = style.width {
                 block_style.width = Some(resolve(len));
             }
