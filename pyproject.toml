@@ -13,6 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "maturin>=1.0,<2.0",
     "pymupdf>=1.24",
     "ruff>=0.15.8",
     "tryke",
@@ -36,7 +37,7 @@ tryke = { git = "https://github.com/thejchap/tryke", branch = "main" }
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = ["FBT", "D203", "D213", "COM812"]
-per-file-ignores = { "tests/*" = ["D", "ANN201", "PLR2004", "PLC0415", "S101"], "src/pdfun/html.py" = ["N802"] }
+per-file-ignores = { "tests/*" = ["D", "ANN201", "PLR2004", "PLC0415", "S101"], "src/pdfun/html.py" = ["N802"], "tools/*" = ["T201"] }
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]

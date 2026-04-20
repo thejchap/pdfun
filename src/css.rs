@@ -393,10 +393,14 @@ macro_rules! with_style_fields {
 
 macro_rules! merge_one {
     (copy, $t:ident, $s:ident, $f:ident) => {
-        if $s.$f.is_some() { $t.$f = $s.$f; }
+        if $s.$f.is_some() {
+            $t.$f = $s.$f;
+        }
     };
     (clone, $t:ident, $s:ident, $f:ident) => {
-        if $s.$f.is_some() { $t.$f.clone_from(&$s.$f); }
+        if $s.$f.is_some() {
+            $t.$f.clone_from(&$s.$f);
+        }
     };
 }
 
@@ -430,10 +434,9 @@ macro_rules! gen_style_impl {
             /// Build inherited style for a child element. Inheritable
             /// properties fall back to parent's value when the child
             /// leaves them unset; non-inheritable properties reset.
-            pub fn inherit_into(&self, child: &Option<ComputedStyle>) -> ComputedStyle {
+            pub fn inherit_into(&self, child: Option<&ComputedStyle>) -> ComputedStyle {
                 let mut result = ComputedStyle::default();
-                let c = child.as_ref();
-                $( inherit_one!($kind, $inh, result, c, self, $name); )*
+                $( inherit_one!($kind, $inh, result, child, self, $name); )*
                 result
             }
         }
@@ -494,7 +497,6 @@ pub struct ComputedStyle {
     pub vertical_align: Option<VerticalAlignValue>,
     pub border_collapse: Option<BorderCollapseValue>,
 }
-
 
 // ── Color parsing ───────────────────────────────────────────
 
@@ -734,12 +736,11 @@ fn parse_border_radius_shorthand<'i>(
     let third = input.try_parse(parse_non_negative_length).ok();
     let fourth = input.try_parse(parse_non_negative_length).ok();
     // Consume and ignore any elliptical second set (`/ …`).
-    let _ = input
-        .try_parse(|i: &mut Parser<'i, '_>| -> Result<(), ParseError<'i, ()>> {
-            i.expect_delim('/')?;
-            while i.try_parse(parse_non_negative_length).is_ok() {}
-            Ok(())
-        });
+    let _ = input.try_parse(|i: &mut Parser<'i, '_>| -> Result<(), ParseError<'i, ()>> {
+        i.expect_delim('/')?;
+        while i.try_parse(parse_non_negative_length).is_ok() {}
+        Ok(())
+    });
 
     // CSS spec corner order: [top-left, top-right, bottom-right, bottom-left].
     Ok(match (second, third, fourth) {
@@ -850,7 +851,7 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                         Token::QuotedString(s) => families.push(s.to_string()),
                         _ => break,
                     }
-                    if input.try_parse(|i| i.expect_comma()).is_err() {
+                    if input.try_parse(cssparser::Parser::expect_comma).is_err() {
                         break;
                     }
                 }
@@ -972,10 +973,9 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
             }
             "column-count" => {
                 let n = input.expect_integer()?;
-                if n >= 1 {
-                    self.style.column_count = Some(n as u32);
-                } else {
-                    return Err(input.new_custom_error(()));
+                match u32::try_from(n) {
+                    Ok(n) if n >= 1 => self.style.column_count = Some(n),
+                    _ => return Err(input.new_custom_error(())),
                 }
             }
             "column-gap" => {
@@ -1038,8 +1038,10 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                         _ => {} // ignore overline, etc.
                     }
                 }
-                self.style.text_decoration =
-                    Some(TextDecoration { underline, line_through });
+                self.style.text_decoration = Some(TextDecoration {
+                    underline,
+                    line_through,
+                });
             }
             "page-break-before" | "break-before" => {
                 let location = input.current_source_location();
@@ -1344,7 +1346,7 @@ pub struct AnB {
 
 impl AnB {
     /// Does this formula match a 1-based position `n`?
-    pub fn matches(&self, n: i32) -> bool {
+    pub fn matches(self, n: i32) -> bool {
         if n < 1 {
             return false;
         }
@@ -1422,68 +1424,58 @@ impl CompoundSelector {
             SimpleSelector::Class(c) => classes.iter().any(|cl| cl.eq_ignore_ascii_case(c)),
             SimpleSelector::Id(i) => id.is_some_and(|elem_id| elem_id.eq_ignore_ascii_case(i)),
             SimpleSelector::Universal => true,
-            SimpleSelector::PseudoClass(pc) => {
-                match pc {
-                    PseudoClass::FirstChild => sibling_pos == Some(0),
-                    PseudoClass::LastChild => match (sibling_pos, sibling_count) {
-                        (Some(i), Some(n)) => i + 1 == n,
-                        _ => false,
-                    },
-                    PseudoClass::OnlyChild => match (sibling_pos, sibling_count) {
-                        (Some(i), Some(n)) => i == 0 && n == 1,
-                        _ => false,
-                    },
-                    PseudoClass::NthChild(anb) => match sibling_pos {
-                        Some(i) => anb.matches(i as i32 + 1),
-                        None => false,
-                    },
-                    PseudoClass::Not(inner) => !inner.matches_full(
-                        tag,
-                        classes,
-                        id,
-                        attributes,
-                        sibling_pos,
-                        sibling_count,
-                    ),
+            SimpleSelector::PseudoClass(pc) => match pc {
+                PseudoClass::FirstChild => sibling_pos == Some(0),
+                PseudoClass::LastChild => match (sibling_pos, sibling_count) {
+                    (Some(i), Some(n)) => i + 1 == n,
+                    _ => false,
+                },
+                PseudoClass::OnlyChild => match (sibling_pos, sibling_count) {
+                    (Some(i), Some(n)) => i == 0 && n == 1,
+                    _ => false,
+                },
+                PseudoClass::NthChild(anb) => match sibling_pos {
+                    Some(i) => anb.matches(i as i32 + 1),
+                    None => false,
+                },
+                PseudoClass::Not(inner) => {
+                    !inner.matches_full(tag, classes, id, attributes, sibling_pos, sibling_count)
                 }
-            }
+            },
             SimpleSelector::Attribute { name, op, value } => {
                 let attr_value = attributes
                     .iter()
                     .find(|(n, _)| n.eq_ignore_ascii_case(name))
                     .map(|(_, v)| *v);
                 match (op, value) {
-                    (AttrOp::Exists, _) => attr_value.is_some(),
-                    (_, None) => attr_value.is_some(),
+                    (AttrOp::Exists, _) | (_, None) => attr_value.is_some(),
                     (AttrOp::Equals, Some(v)) => attr_value == Some(v.as_str()),
                     (AttrOp::Includes, Some(v)) => {
                         if v.is_empty() || v.contains(char::is_whitespace) {
                             return false;
                         }
-                        attr_value
-                            .map(|av| av.split_whitespace().any(|tok| tok == v))
-                            .unwrap_or(false)
+                        attr_value.is_some_and(|av| av.split_whitespace().any(|tok| tok == v))
                     }
-                    (AttrOp::DashMatch, Some(v)) => attr_value
-                        .map(|av| av == v || av.starts_with(&format!("{}-", v)))
-                        .unwrap_or(false),
+                    (AttrOp::DashMatch, Some(v)) => {
+                        attr_value.is_some_and(|av| av == v || av.starts_with(&format!("{v}-")))
+                    }
                     (AttrOp::Prefix, Some(v)) => {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value.map(|av| av.starts_with(v.as_str())).unwrap_or(false)
+                        attr_value.is_some_and(|av| av.starts_with(v.as_str()))
                     }
                     (AttrOp::Suffix, Some(v)) => {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value.map(|av| av.ends_with(v.as_str())).unwrap_or(false)
+                        attr_value.is_some_and(|av| av.ends_with(v.as_str()))
                     }
                     (AttrOp::Substring, Some(v)) => {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value.map(|av| av.contains(v.as_str())).unwrap_or(false)
+                        attr_value.is_some_and(|av| av.contains(v.as_str()))
                     }
                 }
             }
@@ -1577,8 +1569,7 @@ fn parse_one_selector_from_text(text: &str) -> Option<SelectorChain> {
                     continue;
                 }
                 if !first {
-                    combinators
-                        .push(pending_combinator.unwrap_or(Combinator::Descendant));
+                    combinators.push(pending_combinator.unwrap_or(Combinator::Descendant));
                 }
                 pending_combinator = None;
                 compounds.push(compound);
@@ -1648,10 +1639,11 @@ fn tokenize_selector(text: &str) -> Vec<SelectorToken> {
         let mut depth_paren: i32 = 0;
         while i < chars.len() {
             let ch = chars[i];
-            if depth_brack == 0 && depth_paren == 0 {
-                if ch.is_whitespace() || ch == '>' || ch == '+' || ch == '~' {
-                    break;
-                }
+            if depth_brack == 0
+                && depth_paren == 0
+                && (ch.is_whitespace() || ch == '>' || ch == '+' || ch == '~')
+            {
+                break;
             }
             if ch == '[' {
                 depth_brack += 1;
@@ -1680,13 +1672,13 @@ fn parse_compound_from_text(
     class_count: &mut u16,
     type_count: &mut u16,
 ) -> CompoundSelector {
-    let mut parts: Vec<SimpleSelector> = Vec::new();
-    let mut chars = text.char_indices().peekable();
-
     // Stop characters for ident-like runs.
     fn is_boundary(c: char) -> bool {
         c == '.' || c == '#' || c == '[' || c == ':' || c == '('
     }
+
+    let mut parts: Vec<SimpleSelector> = Vec::new();
+    let mut chars = text.char_indices().peekable();
 
     while let Some(&(pos, ch)) = chars.peek() {
         match ch {
@@ -1834,10 +1826,7 @@ fn parse_compound_from_text(
 
 /// Parse a pseudo-class by name (lowercased) and optional argument text.
 /// Returns `(pseudo, specificity_delta)` on success or `None` to skip.
-fn parse_pseudo_class(
-    name: &str,
-    arg: Option<&str>,
-) -> Option<(PseudoClass, (u16, u16, u16))> {
+fn parse_pseudo_class(name: &str, arg: Option<&str>) -> Option<(PseudoClass, (u16, u16, u16))> {
     match name {
         "first-child" => Some((PseudoClass::FirstChild, (0, 1, 0))),
         "last-child" => Some((PseudoClass::LastChild, (0, 1, 0))),
@@ -1857,10 +1846,7 @@ fn parse_pseudo_class(
             if compound.parts.is_empty() {
                 return None;
             }
-            Some((
-                PseudoClass::Not(Box::new(compound)),
-                (id_c, cls_c, typ_c),
-            ))
+            Some((PseudoClass::Not(Box::new(compound)), (id_c, cls_c, typ_c)))
         }
         _ => None,
     }
@@ -1910,13 +1896,13 @@ pub(crate) fn parse_an_b(arg: &str) -> Option<AnB> {
 
 /// Parse the contents inside `[` ... `]` into an attribute selector.
 fn parse_attribute_selector(inner: &str) -> Option<SimpleSelector> {
+    fn is_name_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    }
+
     let inner = inner.trim();
     if inner.is_empty() {
         return None;
-    }
-
-    fn is_name_char(c: char) -> bool {
-        c.is_ascii_alphanumeric() || c == '-' || c == '_'
     }
 
     // Scan for end of attribute name.
@@ -2030,16 +2016,14 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
                     page_style.margin_top = Some(parse_non_negative_length(input)?.resolve(12.0));
                 }
                 "margin-right" => {
-                    page_style.margin_right =
-                        Some(parse_non_negative_length(input)?.resolve(12.0));
+                    page_style.margin_right = Some(parse_non_negative_length(input)?.resolve(12.0));
                 }
                 "margin-bottom" => {
                     page_style.margin_bottom =
                         Some(parse_non_negative_length(input)?.resolve(12.0));
                 }
                 "margin-left" => {
-                    page_style.margin_left =
-                        Some(parse_non_negative_length(input)?.resolve(12.0));
+                    page_style.margin_left = Some(parse_non_negative_length(input)?.resolve(12.0));
                 }
                 _ => return Err(input.new_custom_error(())),
             }
@@ -2257,7 +2241,7 @@ fn parse_margin_box_declarations(declarations: &str) -> MarginBox {
                         input.expect_ident()?.as_ref().to_string()
                     };
                     mb.font_family = Some(first);
-                    while input.try_parse(|i| i.expect_comma()).is_ok() {
+                    while input.try_parse(cssparser::Parser::expect_comma).is_ok() {
                         let _ = input
                             .try_parse(|i| i.expect_string().map(|_| ()))
                             .or_else(|_| input.try_parse(|i| i.expect_ident().map(|_| ())));
@@ -2360,9 +2344,7 @@ fn parse_margin_box_content<'i>(
             break;
         }
         // Try a string literal.
-        if let Ok(s) =
-            input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string()))
-        {
+        if let Ok(s) = input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string())) {
             items.push(ContentItem::String(s));
             continue;
         }
@@ -2393,7 +2375,6 @@ fn parse_margin_box_content<'i>(
     Ok(items)
 }
 
-
 // ── Selector matching ─────────────────────────────────────
 
 /// A minimal record for preceding element siblings used by sibling combinators.
@@ -2409,6 +2390,14 @@ pub struct SiblingRecord<'a> {
     pub sibling_count: usize,
 }
 
+/// Ancestor record for selector matching: (tag, classes, id, attributes).
+pub type AncestorInfo<'a> = (
+    &'a str,
+    Vec<&'a str>,
+    Option<&'a str>,
+    Vec<(&'a str, &'a str)>,
+);
+
 /// Information about an element needed for selector matching.
 pub struct ElementInfo<'a> {
     pub tag: &'a str,
@@ -2417,13 +2406,7 @@ pub struct ElementInfo<'a> {
     /// All attributes on the element (name, value).
     pub attributes: Vec<(&'a str, &'a str)>,
     /// Ancestor chain from parent to root.
-    /// Each entry: (tag, classes, id, attributes).
-    pub ancestors: Vec<(
-        &'a str,
-        Vec<&'a str>,
-        Option<&'a str>,
-        Vec<(&'a str, &'a str)>,
-    )>,
+    pub ancestors: Vec<AncestorInfo<'a>>,
     /// 0-based index of this element among its element siblings.
     pub sibling_index: usize,
     /// Total number of element siblings on the shared parent (including self).
@@ -2431,7 +2414,6 @@ pub struct ElementInfo<'a> {
     /// Preceding element siblings in document order.
     pub preceding_siblings: Vec<SiblingRecord<'a>>,
 }
-
 
 /// Match all rules in a stylesheet against an element, returning the
 /// merged `ComputedStyle` from all matching rules (respecting specificity).
@@ -2579,7 +2561,6 @@ fn selector_matches(selector: &SelectorChain, element: &ElementInfo<'_>) -> bool
     }
     true
 }
-
 
 // ── Tests ──────────────────────────────────────────────────
 
@@ -3072,21 +3053,30 @@ mod tests {
         let selectors = parse_selector_list("p");
         assert_eq!(selectors.len(), 1);
         assert_eq!(selectors[0].compounds.len(), 1);
-        assert_eq!(selectors[0].compounds[0].parts, vec![SimpleSelector::Type("p".into())]);
+        assert_eq!(
+            selectors[0].compounds[0].parts,
+            vec![SimpleSelector::Type("p".into())]
+        );
     }
 
     #[test]
     fn selector_class() {
         let selectors = parse_selector_list(".highlight");
         assert_eq!(selectors.len(), 1);
-        assert_eq!(selectors[0].compounds[0].parts, vec![SimpleSelector::Class("highlight".into())]);
+        assert_eq!(
+            selectors[0].compounds[0].parts,
+            vec![SimpleSelector::Class("highlight".into())]
+        );
     }
 
     #[test]
     fn selector_id() {
         let selectors = parse_selector_list("#header");
         assert_eq!(selectors.len(), 1);
-        assert_eq!(selectors[0].compounds[0].parts, vec![SimpleSelector::Id("header".into())]);
+        assert_eq!(
+            selectors[0].compounds[0].parts,
+            vec![SimpleSelector::Id("header".into())]
+        );
     }
 
     #[test]
@@ -3173,7 +3163,7 @@ mod tests {
         classes: Vec<&'a str>,
         id: Option<&'a str>,
         attributes: Vec<(&'a str, &'a str)>,
-        ancestors: Vec<(&'a str, Vec<&'a str>, Option<&'a str>, Vec<(&'a str, &'a str)>)>,
+        ancestors: Vec<AncestorInfo<'a>>,
     ) -> ElementInfo<'a> {
         ElementInfo {
             tag,
@@ -3291,7 +3281,10 @@ mod tests {
             vec![("class", "intro note main")],
             vec![],
         );
-        assert_eq!(match_rules(&elem_match, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(
+            match_rules(&elem_match, &sheet).color,
+            Some((1.0, 0.0, 0.0))
+        );
 
         let elem_no = test_elem(
             "p",
@@ -3442,20 +3435,14 @@ mod tests {
     fn parse_adjacent_sibling_combinator() {
         let selectors = parse_selector_list("h1 + p");
         assert_eq!(selectors[0].compounds.len(), 2);
-        assert_eq!(
-            selectors[0].combinators,
-            vec![Combinator::AdjacentSibling]
-        );
+        assert_eq!(selectors[0].combinators, vec![Combinator::AdjacentSibling]);
     }
 
     #[test]
     fn parse_general_sibling_combinator() {
         let selectors = parse_selector_list("h1 ~ p");
         assert_eq!(selectors[0].compounds.len(), 2);
-        assert_eq!(
-            selectors[0].combinators,
-            vec![Combinator::GeneralSibling]
-        );
+        assert_eq!(selectors[0].combinators, vec![Combinator::GeneralSibling]);
     }
 
     #[test]
@@ -3592,9 +3579,14 @@ mod tests {
 
     #[test]
     fn page_margin_box_counter_page() {
-        let css = r#"@page { @bottom-center { content: counter(page); } }"#;
+        let css = r"@page { @bottom-center { content: counter(page); } }";
         let sheet = parse_stylesheet(css);
-        let mb = sheet.page_style.margin_boxes.bottom_center.as_ref().unwrap();
+        let mb = sheet
+            .page_style
+            .margin_boxes
+            .bottom_center
+            .as_ref()
+            .unwrap();
         assert_eq!(mb.content, vec![ContentItem::CounterPage]);
     }
 
@@ -3634,8 +3626,10 @@ mod tests {
 
     #[test]
     fn merge_style_non_none_wins() {
-        let mut target = ComputedStyle::default();
-        target.color = Some((1.0, 0.0, 0.0));
+        let mut target = ComputedStyle {
+            color: Some((1.0, 0.0, 0.0)),
+            ..ComputedStyle::default()
+        };
         let source = ComputedStyle {
             font_size: Some(CssLength::Pt(18.0)),
             ..ComputedStyle::default()

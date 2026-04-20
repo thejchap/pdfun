@@ -1,0 +1,1133 @@
+# Spec catalog — hand-curated source of truth for the feature parity matrix.
+#
+# Schema:
+#   [[section]]           top-level grouping (usually a spec chapter or module)
+#   spec                  name of the spec (e.g. "CSS 2.1", "CSS Color 3")
+#   section               section number within the spec (e.g. "8.3"). "" if N/A.
+#   title                 human-readable section title
+#
+#   [[section.behavior]]  nested: one row in the matrix
+#   id                    stable identifier, referenced by test markers (snake-case-or-dashed)
+#   title                 human-readable behavior description
+#   section               spec sub-section (e.g. "8.3.1"). Falls back to section's own value.
+#   weasyprint            "full" | "partial" | "none"
+#   implemented           true | false (editorial claim for pdfun)
+#
+# WeasyPrint baseline: CSS 2.1 is fully supported; CSS3 is per-module.
+# See https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#features
+
+# =============================================================================
+# HTML element rendering (UA stylesheet + DOM handling)
+# =============================================================================
+
+[[section]]
+spec = "HTML"
+section = ""
+title = "Block-level elements"
+
+  [[section.behavior]]
+  id = "html-headings"
+  title = "Headings (h1–h6) with scaled default sizes"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-paragraph"
+  title = "Paragraph (p) default margins"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-div"
+  title = "Generic block container (div)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-blockquote"
+  title = "Block quote (blockquote) with indent"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-pre"
+  title = "Preformatted text (pre) whitespace preservation"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-hr"
+  title = "Horizontal rule (hr)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-semantic"
+  title = "Semantic elements (article/section/nav/header/footer/aside/main)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-figure"
+  title = "Figure / figcaption"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-details"
+  title = "Details / summary (expanded rendering)"
+  weasyprint = "partial"
+  implemented = true
+
+[[section]]
+spec = "HTML"
+section = ""
+title = "Inline elements"
+
+  [[section.behavior]]
+  id = "html-bold"
+  title = "Bold (b, strong)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-italic"
+  title = "Italic (i, em)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-span"
+  title = "Inline span"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-br"
+  title = "Line break (br)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-code"
+  title = "Inline code (code, kbd, samp)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-sup-sub"
+  title = "Superscript / subscript (sup, sub)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-anchor"
+  title = "Links (a) with external PDF annotations"
+  weasyprint = "full"
+  implemented = true
+
+[[section]]
+spec = "HTML"
+section = ""
+title = "Lists"
+
+  [[section.behavior]]
+  id = "html-ul"
+  title = "Unordered list (ul, li)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-ol"
+  title = "Ordered list (ol, li)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-list-nesting"
+  title = "Nested lists"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-definition-list"
+  title = "Definition list (dl, dt, dd)"
+  weasyprint = "full"
+  implemented = true
+
+[[section]]
+spec = "HTML"
+section = ""
+title = "Embedded content"
+
+  [[section.behavior]]
+  id = "html-img-png"
+  title = "PNG image embedding (img)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-img-jpeg"
+  title = "JPEG image embedding (img)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-svg"
+  title = "SVG rendering"
+  weasyprint = "full"
+  implemented = false
+
+[[section]]
+spec = "HTML"
+section = ""
+title = "Tables"
+
+  [[section.behavior]]
+  id = "html-table-basic"
+  title = "Table with tr/td/th"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-table-sections"
+  title = "Table row groups (thead, tbody, tfoot)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "html-table-caption"
+  title = "Table caption"
+  weasyprint = "full"
+  implemented = true
+
+[[section]]
+spec = "HTML"
+section = ""
+title = "Forms"
+
+  [[section.behavior]]
+  id = "html-form-input"
+  title = "input elements"
+  weasyprint = "partial"
+  implemented = false
+
+  [[section.behavior]]
+  id = "html-form-select"
+  title = "select elements"
+  weasyprint = "partial"
+  implemented = false
+
+  [[section.behavior]]
+  id = "html-form-textarea"
+  title = "textarea elements"
+  weasyprint = "partial"
+  implemented = false
+
+  [[section.behavior]]
+  id = "html-form-button"
+  title = "button elements"
+  weasyprint = "partial"
+  implemented = false
+
+# =============================================================================
+# CSS 2.1 §5 — Selectors
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "5"
+title = "Selectors"
+
+  [[section.behavior]]
+  id = "sel-type"
+  title = "Type selectors (p, h1)"
+  section = "5.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-class"
+  title = "Class selectors (.foo)"
+  section = "5.8.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-id"
+  title = "ID selectors (#foo)"
+  section = "5.9"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-universal"
+  title = "Universal selector (*)"
+  section = "5.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-compound"
+  title = "Compound selectors (p.note#main)"
+  section = "5.2"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-descendant"
+  title = "Descendant combinator (div p)"
+  section = "5.5"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-child"
+  title = "Child combinator (div > p)"
+  section = "5.6"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-adjacent-sibling"
+  title = "Adjacent sibling combinator (h1 + p)"
+  section = "5.7"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-general-sibling"
+  title = "General sibling combinator (h1 ~ p)"
+  section = "5.7"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-selector-list"
+  title = "Selector lists (h1, h2, h3)"
+  section = "5.2.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-attribute"
+  title = 'Attribute selectors ([type="text"])'
+  section = "5.8"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-pseudo-first-child"
+  title = ":first-child pseudo-class"
+  section = "5.11.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-pseudo-nth-child"
+  title = ":nth-child() pseudo-class"
+  section = "5.11.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-pseudo-not"
+  title = ":not() pseudo-class"
+  section = "5.11.4"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "sel-pseudo-element-before"
+  title = "::before pseudo-element"
+  section = "5.12.3"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "sel-pseudo-element-after"
+  title = "::after pseudo-element"
+  section = "5.12.3"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "sel-pseudo-element-first-line"
+  title = "::first-line pseudo-element"
+  section = "5.12.1"
+  weasyprint = "none"
+  implemented = false
+
+# =============================================================================
+# CSS 2.1 §6 — Cascade and inheritance
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "6"
+title = "Cascade and inheritance"
+
+  [[section.behavior]]
+  id = "cascade-specificity"
+  title = "Specificity ordering"
+  section = "6.4.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "cascade-origin"
+  title = "Cascade: UA defaults < <style> < inline"
+  section = "6.4.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "cascade-inheritance"
+  title = "Property inheritance parent → child"
+  section = "6.2"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS 2.1 §8 — Box model
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "8"
+title = "Box model"
+
+  [[section.behavior]]
+  id = "box-margin"
+  title = "margin (shorthand + four sides)"
+  section = "8.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "box-padding"
+  title = "padding (shorthand + four sides)"
+  section = "8.4"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "box-border-shorthand"
+  title = "border / border-width / border-color / border-style"
+  section = "8.5"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "box-collapse-siblings"
+  title = "Margin collapse: adjacent siblings"
+  section = "8.3.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "box-collapse-parent-child"
+  title = "Margin collapse: parent / first child"
+  section = "8.3.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "box-collapse-empty"
+  title = "Margin collapse: empty blocks"
+  section = "8.3.1"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS 2.1 §9 — Visual formatting model
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "9"
+title = "Visual formatting model"
+
+  [[section.behavior]]
+  id = "vfm-display-block"
+  title = "display: block"
+  section = "9.2.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfm-display-inline"
+  title = "display: inline"
+  section = "9.2.2"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfm-display-inline-block"
+  title = "display: inline-block"
+  section = "9.2.4"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfm-display-none"
+  title = "display: none"
+  section = "9.2.4"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfm-float-left"
+  title = "float: left with text wrap"
+  section = "9.5.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfm-float-right"
+  title = "float: right with text wrap"
+  section = "9.5.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfm-clear"
+  title = "clear property"
+  section = "9.5.2"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfm-position-static"
+  title = "position: static"
+  section = "9.3.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfm-position-relative"
+  title = "position: relative"
+  section = "9.3.1"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "vfm-position-absolute"
+  title = "position: absolute"
+  section = "9.3.1"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "vfm-position-fixed"
+  title = "position: fixed"
+  section = "9.3.1"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "vfm-offsets"
+  title = "top / right / bottom / left offsets"
+  section = "9.3.2"
+  weasyprint = "full"
+  implemented = false
+
+# =============================================================================
+# CSS 2.1 §10 — Visual formatting model details
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "10"
+title = "Visual formatting model details"
+
+  [[section.behavior]]
+  id = "vfmd-width"
+  title = "width / min-width / max-width"
+  section = "10.2"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfmd-height"
+  title = "height / min-height / max-height"
+  section = "10.5"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfmd-box-sizing"
+  title = "box-sizing (content-box, border-box)"
+  section = "10.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfmd-line-height"
+  title = "line-height"
+  section = "10.8"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "vfmd-vertical-align"
+  title = "vertical-align (table cells: top, middle, bottom)"
+  section = "10.8"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS 2.1 §11 — Visual effects
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "11"
+title = "Visual effects"
+
+  [[section.behavior]]
+  id = "ve-overflow"
+  title = "overflow (visible, hidden, scroll, auto)"
+  section = "11.1.1"
+  weasyprint = "full"
+  implemented = false
+
+# =============================================================================
+# CSS 2.1 §13 — Paged media
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "13"
+title = "Paged media"
+
+  [[section.behavior]]
+  id = "paged-at-page"
+  title = "@page (size, margins)"
+  section = "13.2"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "paged-page-breaks"
+  title = "page-break-before / page-break-after"
+  section = "13.3.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "paged-page-break-inside"
+  title = "page-break-inside"
+  section = "13.3.1"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "paged-orphans-widows"
+  title = "orphans / widows"
+  section = "13.3.2"
+  weasyprint = "full"
+  implemented = false
+
+# =============================================================================
+# CSS 2.1 §14 — Colors and backgrounds
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "14"
+title = "Colors and backgrounds"
+
+  [[section.behavior]]
+  id = "color-named"
+  title = "Named colors (red, blue, ...)"
+  section = "14.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "color-hex"
+  title = "Hex colors (#rgb, #rrggbb)"
+  section = "14.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "color-rgb"
+  title = "rgb() function"
+  section = "14.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "color-property"
+  title = "color property"
+  section = "14.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "bg-color"
+  title = "background-color"
+  section = "14.2.1"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS 2.1 §15 — Fonts
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "15"
+title = "Fonts"
+
+  [[section.behavior]]
+  id = "font-family"
+  title = "font-family (generic: serif, sans-serif, monospace)"
+  section = "15.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "font-style"
+  title = "font-style (normal, italic)"
+  section = "15.4"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "font-weight"
+  title = "font-weight (normal, bold, 100–900)"
+  section = "15.6"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "font-size"
+  title = "font-size (px, pt, em, rem, %, vw/vh)"
+  section = "15.7"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS 2.1 §16 — Text
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "16"
+title = "Text"
+
+  [[section.behavior]]
+  id = "text-indent"
+  title = "text-indent"
+  section = "16.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "text-align"
+  title = "text-align (left, center, right, justify)"
+  section = "16.2"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "text-decoration"
+  title = "text-decoration (underline, line-through)"
+  section = "16.3.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "text-letter-spacing"
+  title = "letter-spacing"
+  section = "16.4"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "text-word-spacing"
+  title = "word-spacing"
+  section = "16.4"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "text-transform"
+  title = "text-transform (uppercase, lowercase, capitalize)"
+  section = "16.5"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "text-white-space"
+  title = "white-space CSS property"
+  section = "16.6"
+  weasyprint = "full"
+  implemented = false
+
+# =============================================================================
+# CSS 2.1 §17 — Tables
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "17"
+title = "Tables"
+
+  [[section.behavior]]
+  id = "table-layout"
+  title = "Table layout (auto width)"
+  section = "17.5"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "table-border-collapse"
+  title = "border-collapse (separate, collapse)"
+  section = "17.6.2"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS Backgrounds and Borders Level 3
+# =============================================================================
+
+[[section]]
+spec = "CSS Backgrounds & Borders 3"
+section = ""
+title = "Backgrounds and borders"
+
+  [[section.behavior]]
+  id = "bb3-border-radius"
+  title = "border-radius"
+  section = "5.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "bb3-box-shadow"
+  title = "box-shadow"
+  section = "7.1"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "bb3-bg-image"
+  title = "background-image"
+  section = "3.3"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "bb3-bg-repeat"
+  title = "background-repeat"
+  section = "3.5"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "bb3-bg-size"
+  title = "background-size"
+  section = "3.9"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "bb3-bg-position"
+  title = "background-position"
+  section = "3.6"
+  weasyprint = "full"
+  implemented = false
+
+# =============================================================================
+# CSS Color Level 3/4
+# =============================================================================
+
+[[section]]
+spec = "CSS Color 3"
+section = ""
+title = "Color spaces and alpha"
+
+  [[section.behavior]]
+  id = "color-rgba"
+  title = "rgba() function"
+  section = "4.2.1"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "color-hsl"
+  title = "hsl() function"
+  section = "4.2.3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "color-hsla"
+  title = "hsla() function"
+  section = "4.2.4"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "color-opacity"
+  title = "opacity property"
+  section = "3.2"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "color-cmyk"
+  title = "device-cmyk() / CMYK colors"
+  section = ""
+  weasyprint = "none"
+  implemented = false
+
+# =============================================================================
+# CSS Fonts Level 3
+# =============================================================================
+
+[[section]]
+spec = "CSS Fonts 3"
+section = ""
+title = "Fonts Level 3"
+
+  [[section.behavior]]
+  id = "fonts3-face"
+  title = "@font-face (web fonts)"
+  section = "4.1"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "fonts3-variable"
+  title = "Variable fonts"
+  section = ""
+  weasyprint = "partial"
+  implemented = false
+
+  [[section.behavior]]
+  id = "fonts3-features"
+  title = "OpenType features (ligatures, alternates)"
+  section = "6"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "fonts3-fallback"
+  title = "Font fallback chains"
+  section = "4.2"
+  weasyprint = "full"
+  implemented = false
+
+# =============================================================================
+# CSS Multi-column Level 1
+# =============================================================================
+
+[[section]]
+spec = "CSS Multi-column 1"
+section = ""
+title = "Multi-column layout"
+
+  [[section.behavior]]
+  id = "multicol-layout"
+  title = "Multi-column layout (column-count, column-gap)"
+  section = "2"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS Paged Media Level 3
+# =============================================================================
+
+[[section]]
+spec = "CSS Paged Media 3"
+section = ""
+title = "Paged media extensions"
+
+  [[section.behavior]]
+  id = "paged3-margin-boxes"
+  title = "@page margin boxes (headers/footers)"
+  section = "5"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "paged3-counters"
+  title = "Page counters (counter(page), counter(pages))"
+  section = "4.3"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS Values and Units Level 3
+# =============================================================================
+
+[[section]]
+spec = "CSS Values 3"
+section = ""
+title = "Values and units"
+
+  [[section.behavior]]
+  id = "values3-custom-props"
+  title = "Custom properties (var())"
+  section = ""
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "values3-calc"
+  title = "calc() expressions"
+  section = "8.1"
+  weasyprint = "full"
+  implemented = false
+
+# =============================================================================
+# CSS Lists and Counters Level 3
+# =============================================================================
+
+[[section]]
+spec = "CSS Lists 3"
+section = ""
+title = "Lists and counters"
+
+  [[section.behavior]]
+  id = "lists-style-type"
+  title = "list-style-type (disc, decimal, lower/upper-alpha, lower/upper-roman)"
+  section = "3"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "lists-style-position"
+  title = "list-style-position"
+  section = "3"
+  weasyprint = "full"
+  implemented = true
+
+# =============================================================================
+# CSS At-Rules (media, import, font-face)
+# =============================================================================
+
+[[section]]
+spec = "CSS 2.1"
+section = "4.1.5"
+title = "At-rules"
+
+  [[section.behavior]]
+  id = "at-media"
+  title = "@media"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "at-import"
+  title = "@import"
+  weasyprint = "full"
+  implemented = false
+
+# =============================================================================
+# CSS Layout — Flexbox and Grid
+# =============================================================================
+
+[[section]]
+spec = "CSS Flexbox 1"
+section = ""
+title = "Flexbox layout"
+
+  [[section.behavior]]
+  id = "flex-container"
+  title = "Flex container (display: flex)"
+  section = "3"
+  weasyprint = "full"
+  implemented = false
+
+[[section]]
+spec = "CSS Grid 1"
+section = ""
+title = "Grid layout"
+
+  [[section.behavior]]
+  id = "grid-container"
+  title = "Grid container (display: grid)"
+  section = "6"
+  weasyprint = "none"
+  implemented = false
+
+# =============================================================================
+# PDF output features (not CSS — pdfun-specific)
+# =============================================================================
+
+[[section]]
+spec = "PDF"
+section = ""
+title = "PDF output features"
+
+  [[section.behavior]]
+  id = "pdf-multipage"
+  title = "Multi-page documents"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "pdf-metadata"
+  title = "Document metadata (title, author, keywords)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "pdf-external-links"
+  title = "Clickable external links"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "pdf-internal-anchors"
+  title = "Internal link anchors"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "pdf-bookmarks"
+  title = "Bookmarks / outline (from headings)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "pdf-toc"
+  title = "Table of contents"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "pdf-font-embedding"
+  title = "Custom font embedding (CIDFont + ToUnicode)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "pdf-font-subsetting"
+  title = "Font subsetting (only used glyphs embedded)"
+  weasyprint = "full"
+  implemented = true
+
+  [[section.behavior]]
+  id = "pdf-compression"
+  title = "Stream compression"
+  weasyprint = "full"
+  implemented = false
+
+  [[section.behavior]]
+  id = "pdf-encryption"
+  title = "PDF encryption"
+  weasyprint = "partial"
+  implemented = false
+
+  [[section.behavior]]
+  id = "pdf-pdfa"
+  title = "PDF/A compliance"
+  weasyprint = "full"
+  implemented = false

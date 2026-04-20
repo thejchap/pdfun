@@ -2,11 +2,16 @@
 #![allow(clippy::cast_precision_loss)] // u32/usize->f32 precision loss is acceptable
 #![allow(clippy::cast_possible_wrap)] // usize->i32 for page count is fine
 #![allow(clippy::unnecessary_wraps)] // PyO3 #[pymethods] requires PyResult signatures
+#![allow(clippy::too_many_lines)] // layout/emit pipelines thread state; splitting hurts readability
+#![allow(clippy::similar_names)] // layout code uses paired x/y, fg/bg, etc.
+#![allow(clippy::many_single_char_names)] // color math reads better with r, g, b, h, s, l
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use pdf_writer::types::{ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap};
+use pdf_writer::types::{
+    ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap,
+};
 use pdf_writer::{Content, Filter, Name, Pdf, Rect, Ref, Str};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -43,16 +48,35 @@ pub(crate) const BUILTIN_FONTS: &[&str] = &[
 pub(crate) enum PdfOp {
     BeginText,
     EndText,
-    SetFont { name: String, size: f32 },
-    SetTextPosition { x: f32, y: f32 },
+    SetFont {
+        name: String,
+        size: f32,
+    },
+    SetTextPosition {
+        x: f32,
+        y: f32,
+    },
     ShowText(String),
     /// glyph ids are resolved lazily in `to_bytes()`; stores (char,) pairs
     ShowGlyphs(Vec<char>),
     // Graphics primitives
-    SetFillColor { r: f32, g: f32, b: f32 },
-    SetStrokeColor { r: f32, g: f32, b: f32 },
+    SetFillColor {
+        r: f32,
+        g: f32,
+        b: f32,
+    },
+    SetStrokeColor {
+        r: f32,
+        g: f32,
+        b: f32,
+    },
     SetLineWidth(f32),
-    Rectangle { x: f32, y: f32, width: f32, height: f32 },
+    Rectangle {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
     /// Rounded rectangle path. Radii are [top-left, top-right, bottom-right, bottom-left].
     /// Each corner is independently clamped to half of the shorter box edge.
     RoundedRectangle {
@@ -62,14 +86,23 @@ pub(crate) enum PdfOp {
         height: f32,
         radii: [f32; 4],
     },
-    MoveTo { x: f32, y: f32 },
-    LineTo { x: f32, y: f32 },
+    MoveTo {
+        x: f32,
+        y: f32,
+    },
+    LineTo {
+        x: f32,
+        y: f32,
+    },
     Stroke,
     Fill,
     FillAndStroke,
     SaveState,
     RestoreState,
-    SetDashPattern { array: Vec<f32>, phase: f32 },
+    SetDashPattern {
+        array: Vec<f32>,
+        phase: f32,
+    },
     SetWordSpacing(f32),
     SetCharacterSpacing(f32),
     /// Draw image #index at (x, y) with given width/height (points).
@@ -80,11 +113,13 @@ pub(crate) enum PdfOp {
         width: f32,
         height: f32,
     },
-    /// Apply a constant opacity (via ExtGState). The emitter allocates an
-    /// ExtGState resource named `/GsN` that sets both `CA` (stroking alpha)
+    /// Apply a constant opacity (via `ExtGState`). The emitter allocates an
+    /// `ExtGState` resource named `/GsN` that sets both `CA` (stroking alpha)
     /// and `ca` (non-stroking alpha) to `alpha` and references it with
     /// `/GsN gs`. Same `alpha` reuses the same resource on a given page.
-    SetAlpha { alpha: f32 },
+    SetAlpha {
+        alpha: f32,
+    },
 }
 
 pub(crate) struct LinkAnnotation {
@@ -161,7 +196,9 @@ struct RegisteredFont {
 struct RefAllocator(i32);
 
 impl RefAllocator {
-    fn new() -> Self { Self(1) }
+    fn new() -> Self {
+        Self(1)
+    }
     fn alloc(&mut self) -> Ref {
         let r = Ref::new(self.0);
         self.0 += 1;
@@ -242,8 +279,8 @@ fn build_custom_font_data(
             }
         }
 
-        let subset_data = subsetter::subset(&rf.data, 0, &remapper)
-            .unwrap_or_else(|_| rf.data.clone());
+        let subset_data =
+            subsetter::subset(&rf.data, 0, &remapper).unwrap_or_else(|_| rf.data.clone());
 
         let mut char_to_new_gid: BTreeMap<char, u16> = BTreeMap::new();
         let mut gid_widths: BTreeMap<u16, f32> = BTreeMap::new();
@@ -262,8 +299,8 @@ fn build_custom_font_data(
 
         let ascent = f32::from(face.ascender()) * 1000.0 / units_per_em;
         let descent = f32::from(face.descender()) * 1000.0 / units_per_em;
-        let cap_height = f32::from(face.capital_height().unwrap_or(face.ascender())) * 1000.0
-            / units_per_em;
+        let cap_height =
+            f32::from(face.capital_height().unwrap_or(face.ascender())) * 1000.0 / units_per_em;
         let global_bbox = face.global_bounding_box();
         let bbox = Rect::new(
             f32::from(global_bbox.x_min) * 1000.0 / units_per_em,
@@ -292,14 +329,14 @@ fn build_custom_font_data(
 
 /// Collect the unique opacities referenced by `SetAlpha` ops on this page,
 /// returning them in first-seen order. The index in the returned `Vec` plus 1
-/// becomes the suffix of the `/GsN` ExtGState resource name.
+/// becomes the suffix of the `/GsN` `ExtGState` resource name.
 fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
     let mut out: Vec<f32> = Vec::new();
     for op in &page.operations {
-        if let PdfOp::SetAlpha { alpha } = op {
-            if !out.iter().any(|a| (a - alpha).abs() < 1e-6) {
-                out.push(*alpha);
-            }
+        if let PdfOp::SetAlpha { alpha } = op
+            && !out.iter().any(|a| (a - alpha).abs() < 1e-6)
+        {
+            out.push(*alpha);
         }
     }
     out
@@ -308,14 +345,10 @@ fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
 /// Format a rounded-rectangle path into `content`. `radii` is
 /// `[top-left, top-right, bottom-right, bottom-left]`. Each corner is
 /// clamped to half the shorter edge so adjacent corners never overlap.
-fn emit_rounded_rect_path(
-    content: &mut Content,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    radii: [f32; 4],
-) {
+fn emit_rounded_rect_path(content: &mut Content, x: f32, y: f32, w: f32, h: f32, radii: [f32; 4]) {
+    // Kappa constant for quarter-circle Bezier approximation.
+    const K: f32 = 0.552_284_8;
+
     if w <= 0.0 || h <= 0.0 {
         return;
     }
@@ -324,8 +357,6 @@ fn emit_rounded_rect_path(
     let r_tr = radii[1].max(0.0).min(max_r);
     let r_br = radii[2].max(0.0).min(max_r);
     let r_bl = radii[3].max(0.0).min(max_r);
-    // Kappa constant for quarter-circle Bezier approximation.
-    const K: f32 = 0.552_284_77;
     // In PDF user space y grows upward. We trace clockwise starting at the
     // top-left corner's horizontal tangent point, i.e. (x + r_tl, y + h).
     let left = x;
@@ -442,10 +473,21 @@ fn write_page_content_stream(
             PdfOp::SetLineWidth(w) => {
                 content.set_line_width(*w);
             }
-            PdfOp::Rectangle { x, y, width, height } => {
+            PdfOp::Rectangle {
+                x,
+                y,
+                width,
+                height,
+            } => {
                 content.rect(*x, *y, *width, *height);
             }
-            PdfOp::RoundedRectangle { x, y, width, height, radii } => {
+            PdfOp::RoundedRectangle {
+                x,
+                y,
+                width,
+                height,
+                radii,
+            } => {
                 emit_rounded_rect_path(&mut content, *x, *y, *width, *height, *radii);
             }
             PdfOp::MoveTo { x, y } => {
@@ -478,7 +520,13 @@ fn write_page_content_stream(
             PdfOp::SetCharacterSpacing(spacing) => {
                 content.set_char_spacing(*spacing);
             }
-            PdfOp::DrawImage { index, x, y, width, height } => {
+            PdfOp::DrawImage {
+                index,
+                x,
+                y,
+                width,
+                height,
+            } => {
                 let resource_name = format!("Im{index}");
                 content.save_state();
                 content.transform([*width, 0.0, 0.0, *height, *x, *y]);
@@ -503,7 +551,7 @@ fn write_page_content_stream(
 /// write the matching `/Outlines` dictionary plus one `OutlineItem` per
 /// heading.
 ///
-/// Hierarchy rule: an h_N becomes a child of the nearest preceding heading
+/// Hierarchy rule: an `h_N` becomes a child of the nearest preceding heading
 /// with level < N. If there is no such heading, it becomes a top-level
 /// entry. This is the same "stack of open parents" algorithm Markdown
 /// renderers use for TOCs and matches what a reader's sidebar expects.
@@ -563,7 +611,11 @@ fn write_outline(
             None => &top_level[..],
         };
         let pos = siblings.iter().position(|&x| x == i).unwrap();
-        let prev = if pos > 0 { Some(siblings[pos - 1]) } else { None };
+        let prev = if pos > 0 {
+            Some(siblings[pos - 1])
+        } else {
+            None
+        };
         let next = if pos + 1 < siblings.len() {
             Some(siblings[pos + 1])
         } else {
@@ -595,7 +647,7 @@ fn write_outline(
     }
 }
 
-/// Write PDF image XObjects for every image and its optional alpha SMask.
+/// Write PDF image `XObjects` for every image and its optional alpha `SMask`.
 fn write_image_xobjects(
     pdf: &mut Pdf,
     images: &[image::ImageData],
@@ -624,7 +676,6 @@ fn write_image_xobjects(
                 image::ImageFilter::Flate => {
                     xobj.filter(Filter::FlateDecode);
                 }
-                image::ImageFilter::None => {}
             }
             if let Some(smask) = smask_ref {
                 xobj.s_mask(smask);
@@ -645,7 +696,7 @@ fn write_image_xobjects(
 }
 
 /// Write all font objects: Type1 for the 14 built-ins, Type0/CIDFont2
-/// for every embedded custom font (with descriptor, font file, ToUnicode).
+/// for every embedded custom font (with descriptor, font file, `ToUnicode`).
 fn write_font_objects(
     pdf: &mut Pdf,
     font_refs: &[FontRefs],
@@ -906,8 +957,7 @@ impl PdfDocument {
 
             let page_alphas = collect_page_alphas(&page);
             // Allocate a Ref per unique alpha on this page.
-            let alpha_refs: Vec<Ref> =
-                page_alphas.iter().map(|_| allocator.alloc()).collect();
+            let alpha_refs: Vec<Ref> = page_alphas.iter().map(|_| allocator.alloc()).collect();
 
             let content_bytes =
                 write_page_content_stream(&page, &font_refs, &custom_data, &page_alphas);
@@ -936,8 +986,7 @@ impl PdfDocument {
                     let mut xobjects = resources.x_objects();
                     for &img_idx in &page.images_used {
                         let resource_name = format!("Im{img_idx}");
-                        xobjects
-                            .pair(Name(resource_name.as_bytes()), image_refs[img_idx].0);
+                        xobjects.pair(Name(resource_name.as_bytes()), image_refs[img_idx].0);
                     }
                 }
                 if !alpha_refs.is_empty() {
@@ -957,12 +1006,7 @@ impl PdfDocument {
             }
 
             for (annot_ref, link) in annot_refs.iter().zip(page.links.iter()) {
-                let rect = Rect::new(
-                    link.x,
-                    link.y,
-                    link.x + link.width,
-                    link.y + link.height,
-                );
+                let rect = Rect::new(link.x, link.y, link.x + link.width, link.y + link.height);
                 let mut annot = pdf.annotation(*annot_ref);
                 annot
                     .subtype(AnnotationType::Link)
@@ -977,14 +1021,16 @@ impl PdfDocument {
                 // clicks are inert, which matches "do not crash" from the
                 // implementation plan.
                 if let Some(fragment) = link.url.strip_prefix('#') {
-                    if let Some((target_page_index, target_y)) =
-                        self.anchors.get(fragment).copied()
+                    if let Some((target_page_index, target_y)) = self.anchors.get(fragment).copied()
                         && target_page_index < page_refs.len()
                     {
                         let target_page_id = page_refs[target_page_index].0;
                         let mut action = annot.action();
                         action.action_type(ActionType::GoTo);
-                        action.destination().page(target_page_id).fit_horizontal(target_y);
+                        action
+                            .destination()
+                            .page(target_page_id)
+                            .fit_horizontal(target_y);
                     }
                     // Unresolved: drop the action silently.
                 } else {
@@ -1385,11 +1431,8 @@ fn html_to_pdf(
         page_height as f32,
     );
     let base_path = base_url.map(std::path::PathBuf::from);
-    let outcome = html_render::render_dom_to_layout(
-        &parsed.document,
-        &mut inner,
-        base_path.as_deref(),
-    );
+    let outcome =
+        html_render::render_dom_to_layout(&parsed.document, &mut inner, base_path.as_deref());
     let page_style = outcome.page_style;
     doc.warnings.extend(outcome.warnings);
 
@@ -1442,7 +1485,7 @@ mod _core {
     use pyo3::prelude::*;
 
     use super::{
-        html_to_pdf, layout, text_width, wrap_text, FontDatabase, FontId, Page, PdfDocument,
+        FontDatabase, FontId, Page, PdfDocument, html_to_pdf, layout, text_width, wrap_text,
     };
 
     #[pymodule_init]
