@@ -342,14 +342,14 @@ title = "Selectors"
   title = "::before pseudo-element"
   section = "5.12.3"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "sel-pseudo-element-after"
   title = "::after pseudo-element"
   section = "5.12.3"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "sel-pseudo-element-first-line"

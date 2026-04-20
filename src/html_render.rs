@@ -692,9 +692,13 @@ impl<'a> HtmlRenderer<'a> {
                 let tag = name.local.as_ref();
                 let inline_style = extract_style_attr(handle);
 
-                // Match stylesheet rules and merge with inline style
-                let merged_style = if self.stylesheet.rules.is_empty() {
-                    inline_style
+                // Match stylesheet rules and merge with inline style. Also
+                // resolve `::before` / `::after` pseudo-element styles; those
+                // only produce a visible injection when their `content`
+                // property is a non-empty string.
+                let (merged_style, pseudo_before, pseudo_after) = if self.stylesheet.rules.is_empty()
+                {
+                    (inline_style, None, None)
                 } else {
                     let (classes, id, attrs_owned) = extract_element_attrs(handle);
                     let ancestors_owned = build_ancestors(handle);
@@ -741,11 +745,22 @@ impl<'a> HtmlRenderer<'a> {
                     if let Some(inline) = &inline_style {
                         css::merge_style(&mut matched, inline);
                     }
-                    if matched.has_any_property() {
+                    let resolve_pseudo = |pseudo: css::PseudoElement| {
+                        let style = css::match_pseudo_rules(&elem, &self.stylesheet, pseudo);
+                        style
+                            .pseudo_content
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .map(|text| (text, style))
+                    };
+                    let before = resolve_pseudo(css::PseudoElement::Before);
+                    let after = resolve_pseudo(css::PseudoElement::After);
+                    let style_opt = if matched.has_any_property() {
                         Some(matched)
                     } else {
                         inline_style
-                    }
+                    };
+                    (style_opt, before, after)
                 };
 
                 // Skip elements with display: none (and their entire subtree)
@@ -807,7 +822,13 @@ impl<'a> HtmlRenderer<'a> {
                 }
 
                 self.handle_start_tag(tag, merged_style);
+                if let Some((text, style)) = &pseudo_before {
+                    self.inject_pseudo(text, style);
+                }
                 self.walk_children(handle, depth);
+                if let Some((text, style)) = &pseudo_after {
+                    self.inject_pseudo(text, style);
+                }
                 self.handle_end_tag(tag);
 
                 self.inherit_stack.pop();
@@ -991,6 +1012,28 @@ impl<'a> HtmlRenderer<'a> {
             return;
         }
         self.current_text.push_str(data);
+    }
+
+    /// Emit `text` as its own `TextRun` with `pseudo_style` layered on top
+    /// of the current element's effective style. Used for `::before` and
+    /// `::after` generated content. Flushes around the injection so the
+    /// pseudo's run doesn't merge with surrounding text.
+    fn inject_pseudo(&mut self, text: &str, pseudo_style: &ComputedStyle) {
+        if self.skip_depth > 0 {
+            return;
+        }
+        self.flush_run();
+        let mut combined = self
+            .inline_styles
+            .last()
+            .cloned()
+            .or_else(|| self.block_style.clone())
+            .unwrap_or_default();
+        css::merge_style(&mut combined, pseudo_style);
+        self.inline_styles.push(combined);
+        self.current_text.push_str(text);
+        self.flush_run();
+        self.inline_styles.pop();
     }
 
     // ── Flush logic ─────────────────────────────────────────
