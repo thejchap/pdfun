@@ -1,7 +1,7 @@
+use html5ever::ParseOpts;
 use html5ever::parse_document;
 use html5ever::tendril::TendrilSink;
-use html5ever::ParseOpts;
-use markup5ever_rcdom::{RcDom};
+use markup5ever_rcdom::RcDom;
 
 /// Parse an HTML string into an `RcDom` tree.
 pub fn parse_html(html: &str) -> RcDom {

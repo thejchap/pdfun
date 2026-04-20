@@ -7,9 +7,7 @@
 //! float and inline-block work will read from.
 
 use crate::css;
-use crate::layout::{
-    Block, BlockStyle, ImageBlock, Paragraph, Table, TextAlign, TextRun,
-};
+use crate::layout::{Block, BlockStyle, ImageBlock, Paragraph, Table, TextAlign, TextRun};
 
 /// A node in the CSS box tree. Containers own their children as `Vec<Node>`
 /// so layout can recurse naturally.
@@ -164,8 +162,7 @@ pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
                 let (start_style, children) = frames
                     .pop()
                     .expect("ContainerEnd without matching ContainerStart");
-                let style =
-                    start_style.expect("non-root frame must have recorded style");
+                let style = start_style.expect("non-root frame must have recorded style");
                 let page_break_before = style.page_break_before;
                 let page_break_after = style.page_break_after;
                 let bb = BlockBox {

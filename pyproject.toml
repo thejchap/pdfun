@@ -13,6 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "maturin>=1.0,<2.0",
     "pymupdf>=1.24",
     "ruff>=0.15.8",
     "tryke",

@@ -41,8 +41,8 @@ pub struct ImageData {
 /// Load an image from a local file. Selects the decoder based on the
 /// magic bytes of the file contents, not the extension.
 pub fn load_from_path(path: &Path) -> Result<ImageData, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("failed to read image {}: {e}", path.display()))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("failed to read image {}: {e}", path.display()))?;
     decode_bytes(&bytes)
 }
 
@@ -50,8 +50,7 @@ pub fn load_from_path(path: &Path) -> Result<ImageData, String> {
 pub fn decode_bytes(bytes: &[u8]) -> Result<ImageData, String> {
     if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
         decode_jpeg(bytes)
-    } else if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-    {
+    } else if bytes.len() >= 8 && bytes[0..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
         decode_png(bytes)
     } else {
         Err("unsupported image format (expected JPEG or PNG)".to_string())
@@ -91,10 +90,8 @@ fn decode_jpeg(bytes: &[u8]) -> Result<ImageData, String> {
 
         // SOF markers (Start Of Frame): 0xC0 = baseline, 0xC1 = extended seq,
         // 0xC2 = progressive, and more in range 0xC0-0xCF except 0xC4, 0xC8, 0xCC.
-        let is_sof = (0xC0..=0xCF).contains(&marker)
-            && marker != 0xC4
-            && marker != 0xC8
-            && marker != 0xCC;
+        let is_sof =
+            (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
 
         if is_sof {
             if i + 7 >= bytes.len() {
@@ -108,9 +105,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<ImageData, String> {
                 1 => ImageColorSpace::DeviceGray,
                 3 => ImageColorSpace::DeviceRgb,
                 _ => {
-                    return Err(format!(
-                        "unsupported JPEG component count: {components}"
-                    ));
+                    return Err(format!("unsupported JPEG component count: {components}"));
                 }
             };
             return Ok(ImageData {

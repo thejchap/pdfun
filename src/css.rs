@@ -393,10 +393,14 @@ macro_rules! with_style_fields {
 
 macro_rules! merge_one {
     (copy, $t:ident, $s:ident, $f:ident) => {
-        if $s.$f.is_some() { $t.$f = $s.$f; }
+        if $s.$f.is_some() {
+            $t.$f = $s.$f;
+        }
     };
     (clone, $t:ident, $s:ident, $f:ident) => {
-        if $s.$f.is_some() { $t.$f.clone_from(&$s.$f); }
+        if $s.$f.is_some() {
+            $t.$f.clone_from(&$s.$f);
+        }
     };
 }
 
@@ -494,7 +498,6 @@ pub struct ComputedStyle {
     pub vertical_align: Option<VerticalAlignValue>,
     pub border_collapse: Option<BorderCollapseValue>,
 }
-
 
 // ── Color parsing ───────────────────────────────────────────
 
@@ -734,12 +737,11 @@ fn parse_border_radius_shorthand<'i>(
     let third = input.try_parse(parse_non_negative_length).ok();
     let fourth = input.try_parse(parse_non_negative_length).ok();
     // Consume and ignore any elliptical second set (`/ …`).
-    let _ = input
-        .try_parse(|i: &mut Parser<'i, '_>| -> Result<(), ParseError<'i, ()>> {
-            i.expect_delim('/')?;
-            while i.try_parse(parse_non_negative_length).is_ok() {}
-            Ok(())
-        });
+    let _ = input.try_parse(|i: &mut Parser<'i, '_>| -> Result<(), ParseError<'i, ()>> {
+        i.expect_delim('/')?;
+        while i.try_parse(parse_non_negative_length).is_ok() {}
+        Ok(())
+    });
 
     // CSS spec corner order: [top-left, top-right, bottom-right, bottom-left].
     Ok(match (second, third, fourth) {
@@ -1038,8 +1040,10 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                         _ => {} // ignore overline, etc.
                     }
                 }
-                self.style.text_decoration =
-                    Some(TextDecoration { underline, line_through });
+                self.style.text_decoration = Some(TextDecoration {
+                    underline,
+                    line_through,
+                });
             }
             "page-break-before" | "break-before" => {
                 let location = input.current_source_location();
@@ -1422,31 +1426,24 @@ impl CompoundSelector {
             SimpleSelector::Class(c) => classes.iter().any(|cl| cl.eq_ignore_ascii_case(c)),
             SimpleSelector::Id(i) => id.is_some_and(|elem_id| elem_id.eq_ignore_ascii_case(i)),
             SimpleSelector::Universal => true,
-            SimpleSelector::PseudoClass(pc) => {
-                match pc {
-                    PseudoClass::FirstChild => sibling_pos == Some(0),
-                    PseudoClass::LastChild => match (sibling_pos, sibling_count) {
-                        (Some(i), Some(n)) => i + 1 == n,
-                        _ => false,
-                    },
-                    PseudoClass::OnlyChild => match (sibling_pos, sibling_count) {
-                        (Some(i), Some(n)) => i == 0 && n == 1,
-                        _ => false,
-                    },
-                    PseudoClass::NthChild(anb) => match sibling_pos {
-                        Some(i) => anb.matches(i as i32 + 1),
-                        None => false,
-                    },
-                    PseudoClass::Not(inner) => !inner.matches_full(
-                        tag,
-                        classes,
-                        id,
-                        attributes,
-                        sibling_pos,
-                        sibling_count,
-                    ),
+            SimpleSelector::PseudoClass(pc) => match pc {
+                PseudoClass::FirstChild => sibling_pos == Some(0),
+                PseudoClass::LastChild => match (sibling_pos, sibling_count) {
+                    (Some(i), Some(n)) => i + 1 == n,
+                    _ => false,
+                },
+                PseudoClass::OnlyChild => match (sibling_pos, sibling_count) {
+                    (Some(i), Some(n)) => i == 0 && n == 1,
+                    _ => false,
+                },
+                PseudoClass::NthChild(anb) => match sibling_pos {
+                    Some(i) => anb.matches(i as i32 + 1),
+                    None => false,
+                },
+                PseudoClass::Not(inner) => {
+                    !inner.matches_full(tag, classes, id, attributes, sibling_pos, sibling_count)
                 }
-            }
+            },
             SimpleSelector::Attribute { name, op, value } => {
                 let attr_value = attributes
                     .iter()
@@ -1471,19 +1468,25 @@ impl CompoundSelector {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value.map(|av| av.starts_with(v.as_str())).unwrap_or(false)
+                        attr_value
+                            .map(|av| av.starts_with(v.as_str()))
+                            .unwrap_or(false)
                     }
                     (AttrOp::Suffix, Some(v)) => {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value.map(|av| av.ends_with(v.as_str())).unwrap_or(false)
+                        attr_value
+                            .map(|av| av.ends_with(v.as_str()))
+                            .unwrap_or(false)
                     }
                     (AttrOp::Substring, Some(v)) => {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value.map(|av| av.contains(v.as_str())).unwrap_or(false)
+                        attr_value
+                            .map(|av| av.contains(v.as_str()))
+                            .unwrap_or(false)
                     }
                 }
             }
@@ -1577,8 +1580,7 @@ fn parse_one_selector_from_text(text: &str) -> Option<SelectorChain> {
                     continue;
                 }
                 if !first {
-                    combinators
-                        .push(pending_combinator.unwrap_or(Combinator::Descendant));
+                    combinators.push(pending_combinator.unwrap_or(Combinator::Descendant));
                 }
                 pending_combinator = None;
                 compounds.push(compound);
@@ -1834,10 +1836,7 @@ fn parse_compound_from_text(
 
 /// Parse a pseudo-class by name (lowercased) and optional argument text.
 /// Returns `(pseudo, specificity_delta)` on success or `None` to skip.
-fn parse_pseudo_class(
-    name: &str,
-    arg: Option<&str>,
-) -> Option<(PseudoClass, (u16, u16, u16))> {
+fn parse_pseudo_class(name: &str, arg: Option<&str>) -> Option<(PseudoClass, (u16, u16, u16))> {
     match name {
         "first-child" => Some((PseudoClass::FirstChild, (0, 1, 0))),
         "last-child" => Some((PseudoClass::LastChild, (0, 1, 0))),
@@ -1857,10 +1856,7 @@ fn parse_pseudo_class(
             if compound.parts.is_empty() {
                 return None;
             }
-            Some((
-                PseudoClass::Not(Box::new(compound)),
-                (id_c, cls_c, typ_c),
-            ))
+            Some((PseudoClass::Not(Box::new(compound)), (id_c, cls_c, typ_c)))
         }
         _ => None,
     }
@@ -2030,16 +2026,14 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
                     page_style.margin_top = Some(parse_non_negative_length(input)?.resolve(12.0));
                 }
                 "margin-right" => {
-                    page_style.margin_right =
-                        Some(parse_non_negative_length(input)?.resolve(12.0));
+                    page_style.margin_right = Some(parse_non_negative_length(input)?.resolve(12.0));
                 }
                 "margin-bottom" => {
                     page_style.margin_bottom =
                         Some(parse_non_negative_length(input)?.resolve(12.0));
                 }
                 "margin-left" => {
-                    page_style.margin_left =
-                        Some(parse_non_negative_length(input)?.resolve(12.0));
+                    page_style.margin_left = Some(parse_non_negative_length(input)?.resolve(12.0));
                 }
                 _ => return Err(input.new_custom_error(())),
             }
@@ -2360,9 +2354,7 @@ fn parse_margin_box_content<'i>(
             break;
         }
         // Try a string literal.
-        if let Ok(s) =
-            input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string()))
-        {
+        if let Ok(s) = input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string())) {
             items.push(ContentItem::String(s));
             continue;
         }
@@ -2392,7 +2384,6 @@ fn parse_margin_box_content<'i>(
     }
     Ok(items)
 }
-
 
 // ── Selector matching ─────────────────────────────────────
 
@@ -2431,7 +2422,6 @@ pub struct ElementInfo<'a> {
     /// Preceding element siblings in document order.
     pub preceding_siblings: Vec<SiblingRecord<'a>>,
 }
-
 
 /// Match all rules in a stylesheet against an element, returning the
 /// merged `ComputedStyle` from all matching rules (respecting specificity).
@@ -2579,7 +2569,6 @@ fn selector_matches(selector: &SelectorChain, element: &ElementInfo<'_>) -> bool
     }
     true
 }
-
 
 // ── Tests ──────────────────────────────────────────────────
 
@@ -3072,21 +3061,30 @@ mod tests {
         let selectors = parse_selector_list("p");
         assert_eq!(selectors.len(), 1);
         assert_eq!(selectors[0].compounds.len(), 1);
-        assert_eq!(selectors[0].compounds[0].parts, vec![SimpleSelector::Type("p".into())]);
+        assert_eq!(
+            selectors[0].compounds[0].parts,
+            vec![SimpleSelector::Type("p".into())]
+        );
     }
 
     #[test]
     fn selector_class() {
         let selectors = parse_selector_list(".highlight");
         assert_eq!(selectors.len(), 1);
-        assert_eq!(selectors[0].compounds[0].parts, vec![SimpleSelector::Class("highlight".into())]);
+        assert_eq!(
+            selectors[0].compounds[0].parts,
+            vec![SimpleSelector::Class("highlight".into())]
+        );
     }
 
     #[test]
     fn selector_id() {
         let selectors = parse_selector_list("#header");
         assert_eq!(selectors.len(), 1);
-        assert_eq!(selectors[0].compounds[0].parts, vec![SimpleSelector::Id("header".into())]);
+        assert_eq!(
+            selectors[0].compounds[0].parts,
+            vec![SimpleSelector::Id("header".into())]
+        );
     }
 
     #[test]
@@ -3173,7 +3171,12 @@ mod tests {
         classes: Vec<&'a str>,
         id: Option<&'a str>,
         attributes: Vec<(&'a str, &'a str)>,
-        ancestors: Vec<(&'a str, Vec<&'a str>, Option<&'a str>, Vec<(&'a str, &'a str)>)>,
+        ancestors: Vec<(
+            &'a str,
+            Vec<&'a str>,
+            Option<&'a str>,
+            Vec<(&'a str, &'a str)>,
+        )>,
     ) -> ElementInfo<'a> {
         ElementInfo {
             tag,
@@ -3291,7 +3294,10 @@ mod tests {
             vec![("class", "intro note main")],
             vec![],
         );
-        assert_eq!(match_rules(&elem_match, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(
+            match_rules(&elem_match, &sheet).color,
+            Some((1.0, 0.0, 0.0))
+        );
 
         let elem_no = test_elem(
             "p",
@@ -3442,20 +3448,14 @@ mod tests {
     fn parse_adjacent_sibling_combinator() {
         let selectors = parse_selector_list("h1 + p");
         assert_eq!(selectors[0].compounds.len(), 2);
-        assert_eq!(
-            selectors[0].combinators,
-            vec![Combinator::AdjacentSibling]
-        );
+        assert_eq!(selectors[0].combinators, vec![Combinator::AdjacentSibling]);
     }
 
     #[test]
     fn parse_general_sibling_combinator() {
         let selectors = parse_selector_list("h1 ~ p");
         assert_eq!(selectors[0].compounds.len(), 2);
-        assert_eq!(
-            selectors[0].combinators,
-            vec![Combinator::GeneralSibling]
-        );
+        assert_eq!(selectors[0].combinators, vec![Combinator::GeneralSibling]);
     }
 
     #[test]
@@ -3594,7 +3594,12 @@ mod tests {
     fn page_margin_box_counter_page() {
         let css = r#"@page { @bottom-center { content: counter(page); } }"#;
         let sheet = parse_stylesheet(css);
-        let mb = sheet.page_style.margin_boxes.bottom_center.as_ref().unwrap();
+        let mb = sheet
+            .page_style
+            .margin_boxes
+            .bottom_center
+            .as_ref()
+            .unwrap();
         assert_eq!(mb.content, vec![ContentItem::CounterPage]);
     }
 

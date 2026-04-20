@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use crate::box_tree::{AnonymousBox, BlockBox, Node};
 use crate::css;
 use crate::font_metrics;
-use crate::{PageContent, PdfDocument, PdfOp, BUILTIN_FONTS};
+use crate::{BUILTIN_FONTS, PageContent, PdfDocument, PdfOp};
 
 /// Word-wrap text into lines that fit within `max_width` points.
 pub fn wrap_text_impl(
@@ -184,12 +184,7 @@ pub struct TextRun {
 impl TextRun {
     #[new]
     #[pyo3(signature = (text, font_name="Helvetica", font_size=12.0, color=None))]
-    fn new(
-        text: String,
-        font_name: &str,
-        font_size: f64,
-        color: Option<(f64, f64, f64)>,
-    ) -> Self {
+    fn new(text: String, font_name: &str, font_size: f64, color: Option<(f64, f64, f64)>) -> Self {
         TextRun {
             text,
             font_name: font_name.to_string(),
@@ -507,9 +502,8 @@ fn wrap_runs_impl(
                     .unwrap_or(0.0);
                 let n_chars = last.text.chars().count() as f32;
                 let n_spaces = last.text.matches(' ').count() as f32;
-                last.width = base
-                    + spacing.letter_spacing * n_chars
-                    + spacing.word_spacing * n_spaces;
+                last.width =
+                    base + spacing.letter_spacing * n_chars + spacing.word_spacing * n_spaces;
             } else if let Some(ib_width) = word.inline_block_width {
                 // Inline-block atom — fixed width, never merges.
                 let leading_space = if segments.is_empty() {
@@ -564,10 +558,7 @@ fn wrap_runs_impl(
         }
 
         let total_width: f32 = segments.iter().map(|s| s.width).sum();
-        let max_font_size = segments
-            .iter()
-            .map(|s| s.font_size)
-            .fold(0.0_f32, f32::max);
+        let max_font_size = segments.iter().map(|s| s.font_size).fold(0.0_f32, f32::max);
         result.push(WrappedLine {
             segments,
             total_width,
@@ -716,7 +707,10 @@ fn heading_level(tag: &str) -> Option<u8> {
 }
 
 fn new_page(doc: &mut PdfDocument, width: f32, height: f32) -> Arc<Mutex<PageContent>> {
-    let page = Arc::new(Mutex::new(PageContent::new(f64::from(width), f64::from(height))));
+    let page = Arc::new(Mutex::new(PageContent::new(
+        f64::from(width),
+        f64::from(height),
+    )));
     doc.pages.push(Arc::clone(&page));
     page
 }
@@ -851,7 +845,10 @@ impl LayoutInner {
         let col_count = self.column_count.max(1);
         let (col_width, col_gap) = if col_count > 1 {
             let gap_total = (col_count - 1) as f32 * self.column_gap;
-            ((content_width - gap_total) / col_count as f32, self.column_gap)
+            (
+                (content_width - gap_total) / col_count as f32,
+                self.column_gap,
+            )
         } else {
             (content_width, 0.0)
         };
@@ -878,7 +875,13 @@ impl LayoutInner {
         let tree = crate::box_tree::unflatten_blocks(blocks);
         self.render_nodes(doc, &tree, &mut state)?;
 
-        self.draw_column_rules(&state.current_page, content_top, col_width, col_gap, col_count);
+        self.draw_column_rules(
+            &state.current_page,
+            content_top,
+            col_width,
+            col_gap,
+            col_count,
+        );
 
         Ok(())
     }
@@ -1065,12 +1068,7 @@ impl LayoutInner {
         );
     }
 
-    fn render_hr_node(
-        &mut self,
-        doc: &mut PdfDocument,
-        bb: &BlockBox,
-        state: &mut RenderState,
-    ) {
+    fn render_hr_node(&mut self, doc: &mut PdfDocument, bb: &BlockBox, state: &mut RenderState) {
         Self::fold_container_top(state);
         if state.cursor_y - 12.0 < self.margin_bottom && state.cursor_y < state.content_top {
             self.advance_column_or_page(
@@ -1089,13 +1087,13 @@ impl LayoutInner {
         let col_width = state.col_width;
         let mut page = state.current_page.lock().unwrap();
         page.operations.push(PdfOp::SaveState);
-        page.operations
-            .push(PdfOp::SetStrokeColor { r: 0.75, g: 0.75, b: 0.75 });
-        page.operations.push(PdfOp::SetLineWidth(0.5));
-        page.operations.push(PdfOp::MoveTo {
-            x: cx,
-            y: cursor_y,
+        page.operations.push(PdfOp::SetStrokeColor {
+            r: 0.75,
+            g: 0.75,
+            b: 0.75,
         });
+        page.operations.push(PdfOp::SetLineWidth(0.5));
+        page.operations.push(PdfOp::MoveTo { x: cx, y: cursor_y });
         page.operations.push(PdfOp::LineTo {
             x: cx + col_width,
             y: cursor_y,
@@ -1289,26 +1287,18 @@ impl LayoutInner {
         let text_indent = style.text_indent.max(0.0);
         let marker_gap = 6.0_f32;
         let marker_width_outside = marker
-            .map(|m| {
-                font_metrics::measure_str(&m.text, &m.font_name, m.font_size).unwrap_or(0.0)
-            })
+            .map(|m| font_metrics::measure_str(&m.text, &m.font_name, m.font_size).unwrap_or(0.0))
             .unwrap_or(0.0);
-        let inside_indent = if matches!(
-            style.list_style_position,
-            css::ListStylePosition::Inside
-        ) && marker.is_some()
+        let inside_indent = if matches!(style.list_style_position, css::ListStylePosition::Inside)
+            && marker.is_some()
         {
             marker_width_outside + marker_gap
         } else {
             0.0
         };
         let wrap_width = (text_area_width - text_indent - inside_indent).max(0.0);
-        let wrapped_lines = wrap_runs_impl(
-            &anon.runs,
-            wrap_width,
-            anon.preserve_whitespace,
-            spacing,
-        )?;
+        let wrapped_lines =
+            wrap_runs_impl(&anon.runs, wrap_width, anon.preserve_whitespace, spacing)?;
 
         let max_font_size = wrapped_lines
             .iter()
@@ -1317,8 +1307,7 @@ impl LayoutInner {
         let line_height = anon.line_height.unwrap_or(max_font_size * 1.2);
 
         let block_text_height = wrapped_lines.len() as f32 * line_height;
-        let natural_box_height =
-            style.padding_top + block_text_height + style.padding_bottom;
+        let natural_box_height = style.padding_top + block_text_height + style.padding_bottom;
         // Clamp to min/max-height. The content still top-aligns inside the
         // padded box — min-height extends the background/border rect down
         // but does not shift the text. (CSS actually lets height: auto
@@ -1358,9 +1347,7 @@ impl LayoutInner {
         let cx = self.col_x(state.current_col, state);
         let box_x = if is_float {
             match style.float {
-                css::FloatValue::Right => {
-                    cx + state.col_width - box_width - style.margin_right
-                }
+                css::FloatValue::Right => cx + state.col_width - box_width - style.margin_right,
                 _ => cx + style.margin_left,
             }
         } else {
@@ -1403,8 +1390,8 @@ impl LayoutInner {
 
         // Helper for emitting a rectangle path that is either sharp or
         // rounded depending on `style.border_radius`.
-        let emit_rect_path = |ops: &mut Vec<PdfOp>, x: f32, y: f32, w: f32, h: f32| {
-            match style.border_radius {
+        let emit_rect_path =
+            |ops: &mut Vec<PdfOp>, x: f32, y: f32, w: f32, h: f32| match style.border_radius {
                 Some(radii) => ops.push(PdfOp::RoundedRectangle {
                     x,
                     y,
@@ -1412,9 +1399,13 @@ impl LayoutInner {
                     height: h,
                     radii,
                 }),
-                None => ops.push(PdfOp::Rectangle { x, y, width: w, height: h }),
-            }
-        };
+                None => ops.push(PdfOp::Rectangle {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                }),
+            };
 
         if let Some((r, g, b)) = style.background_color {
             page.operations.push(PdfOp::SetFillColor { r, g, b });
@@ -1428,9 +1419,7 @@ impl LayoutInner {
             page.operations.push(PdfOp::Fill);
         }
 
-        if style.border_width > 0.0
-            && !matches!(style.border_style, Some(css::BorderStyle::None))
-        {
+        if style.border_width > 0.0 && !matches!(style.border_style, Some(css::BorderStyle::None)) {
             let (r, g, b) = style.border_color.unwrap_or((0.0, 0.0, 0.0));
             page.operations.push(PdfOp::SetStrokeColor { r, g, b });
             page.operations
@@ -1471,10 +1460,8 @@ impl LayoutInner {
 
         let text_x_base = box_x + style.padding_left;
         let mut line_y = cursor_y - style.padding_top;
-        let is_inside_marker = matches!(
-            style.list_style_position,
-            css::ListStylePosition::Inside
-        ) && marker.is_some();
+        let is_inside_marker =
+            matches!(style.list_style_position, css::ListStylePosition::Inside) && marker.is_some();
 
         for (line_idx, line) in wrapped_lines.iter().enumerate() {
             let baseline_y = line_y - line.max_font_size;
@@ -1482,12 +1469,9 @@ impl LayoutInner {
             if line_idx == 0
                 && let Some(marker) = marker
             {
-                let marker_width = font_metrics::measure_str(
-                    &marker.text,
-                    &marker.font_name,
-                    marker.font_size,
-                )
-                .unwrap_or(0.0);
+                let marker_width =
+                    font_metrics::measure_str(&marker.text, &marker.font_name, marker.font_size)
+                        .unwrap_or(0.0);
                 let marker_x = if is_inside_marker {
                     text_x_base
                 } else {
@@ -1506,8 +1490,7 @@ impl LayoutInner {
                     x: marker_x,
                     y: baseline_y,
                 });
-                page.operations
-                    .push(PdfOp::ShowText(marker.text.clone()));
+                page.operations.push(PdfOp::ShowText(marker.text.clone()));
                 page.operations.push(PdfOp::EndText);
             }
 
@@ -1536,8 +1519,7 @@ impl LayoutInner {
             let align_offset = match style.text_align {
                 TextAlign::Left | TextAlign::Justify => indent_for_line,
                 TextAlign::Center => {
-                    indent_for_line + (text_area_width - indent_for_line - line.total_width)
-                        / 2.0
+                    indent_for_line + (text_area_width - indent_for_line - line.total_width) / 2.0
                 }
                 TextAlign::Right => text_area_width - line.total_width,
             };
@@ -1545,7 +1527,8 @@ impl LayoutInner {
             let needs_tw = total_word_spacing != 0.0;
             let needs_tc = style.letter_spacing != 0.0;
             if needs_tw {
-                page.operations.push(PdfOp::SetWordSpacing(total_word_spacing));
+                page.operations
+                    .push(PdfOp::SetWordSpacing(total_word_spacing));
             }
             if needs_tc {
                 page.operations
@@ -1567,53 +1550,52 @@ impl LayoutInner {
                 // into `segment.width`, so the atom box starts at
                 // `x + leading_space`. We recover the atom width from
                 // `inline_block_width` directly.
-                let (atom_x, text_offset_x) =
-                    if let Some(atom_w) = segment.inline_block_width {
-                        let atom_x = x + (segment.width - atom_w);
-                        // Paint background.
-                        if let Some((r, g, b)) = segment.inline_block_bg {
-                            page.operations.push(PdfOp::SaveState);
+                let (atom_x, text_offset_x) = if let Some(atom_w) = segment.inline_block_width {
+                    let atom_x = x + (segment.width - atom_w);
+                    // Paint background.
+                    if let Some((r, g, b)) = segment.inline_block_bg {
+                        page.operations.push(PdfOp::SaveState);
+                        page.operations.push(PdfOp::SetFillColor { r, g, b });
+                        page.operations.push(PdfOp::Rectangle {
+                            x: atom_x,
+                            y: seg_y - segment.font_size * 0.2,
+                            width: atom_w,
+                            height: segment.font_size * 1.2,
+                        });
+                        page.operations.push(PdfOp::Fill);
+                        page.operations.push(PdfOp::RestoreState);
+                        // Re-apply text color since SaveState did not
+                        // preserve the previously set fill color in our
+                        // op stream model (SaveState does preserve it
+                        // in PDF, but we re-set to be safe).
+                        if let Some((r, g, b)) = segment.color {
                             page.operations.push(PdfOp::SetFillColor { r, g, b });
-                            page.operations.push(PdfOp::Rectangle {
-                                x: atom_x,
-                                y: seg_y - segment.font_size * 0.2,
-                                width: atom_w,
-                                height: segment.font_size * 1.2,
-                            });
-                            page.operations.push(PdfOp::Fill);
-                            page.operations.push(PdfOp::RestoreState);
-                            // Re-apply text color since SaveState did not
-                            // preserve the previously set fill color in our
-                            // op stream model (SaveState does preserve it
-                            // in PDF, but we re-set to be safe).
-                            if let Some((r, g, b)) = segment.color {
-                                page.operations.push(PdfOp::SetFillColor { r, g, b });
-                            }
                         }
-                        if let Some((bw, (br, bg_, bb))) = segment.inline_block_border {
-                            page.operations.push(PdfOp::SaveState);
-                            page.operations.push(PdfOp::SetStrokeColor {
-                                r: br,
-                                g: bg_,
-                                b: bb,
-                            });
-                            page.operations.push(PdfOp::SetLineWidth(bw));
-                            page.operations.push(PdfOp::Rectangle {
-                                x: atom_x,
-                                y: seg_y - segment.font_size * 0.2,
-                                width: atom_w,
-                                height: segment.font_size * 1.2,
-                            });
-                            page.operations.push(PdfOp::Stroke);
-                            page.operations.push(PdfOp::RestoreState);
-                            if let Some((r, g, b)) = segment.color {
-                                page.operations.push(PdfOp::SetFillColor { r, g, b });
-                            }
+                    }
+                    if let Some((bw, (br, bg_, bb))) = segment.inline_block_border {
+                        page.operations.push(PdfOp::SaveState);
+                        page.operations.push(PdfOp::SetStrokeColor {
+                            r: br,
+                            g: bg_,
+                            b: bb,
+                        });
+                        page.operations.push(PdfOp::SetLineWidth(bw));
+                        page.operations.push(PdfOp::Rectangle {
+                            x: atom_x,
+                            y: seg_y - segment.font_size * 0.2,
+                            width: atom_w,
+                            height: segment.font_size * 1.2,
+                        });
+                        page.operations.push(PdfOp::Stroke);
+                        page.operations.push(PdfOp::RestoreState);
+                        if let Some((r, g, b)) = segment.color {
+                            page.operations.push(PdfOp::SetFillColor { r, g, b });
                         }
-                        (atom_x, segment.inline_block_padding_x)
-                    } else {
-                        (x, 0.0)
-                    };
+                    }
+                    (atom_x, segment.inline_block_padding_x)
+                } else {
+                    (x, 0.0)
+                };
 
                 page.operations.push(PdfOp::BeginText);
                 page.operations.push(PdfOp::SetFont {
@@ -1624,8 +1606,7 @@ impl LayoutInner {
                     x: atom_x + text_offset_x,
                     y: seg_y,
                 });
-                page.operations
-                    .push(PdfOp::ShowText(segment.text.clone()));
+                page.operations.push(PdfOp::ShowText(segment.text.clone()));
                 page.operations.push(PdfOp::EndText);
 
                 if let Some(url) = &segment.link_url {
@@ -1640,26 +1621,20 @@ impl LayoutInner {
 
                 if let Some(td) = segment.text_decoration {
                     if td.underline || td.line_through {
-                        let metrics =
-                            font_metrics::get_builtin_metrics(&segment.font_name);
+                        let metrics = font_metrics::get_builtin_metrics(&segment.font_name);
                         let scale = segment.font_size / 1000.0;
                         let stroke_width = (segment.font_size * 0.05).max(0.5);
 
                         page.operations.push(PdfOp::SaveState);
                         if let Some((r, g, b)) = segment.color {
-                            page.operations
-                                .push(PdfOp::SetStrokeColor { r, g, b });
+                            page.operations.push(PdfOp::SetStrokeColor { r, g, b });
                         }
                         page.operations.push(PdfOp::SetLineWidth(stroke_width));
 
                         if td.underline {
-                            let descent = metrics
-                                .map_or(-207.0, |m| m.descent as f32);
+                            let descent = metrics.map_or(-207.0, |m| m.descent as f32);
                             let underline_y = baseline_y + descent * scale / 3.0;
-                            page.operations.push(PdfOp::MoveTo {
-                                x,
-                                y: underline_y,
-                            });
+                            page.operations.push(PdfOp::MoveTo { x, y: underline_y });
                             page.operations.push(PdfOp::LineTo {
                                 x: x + segment.width,
                                 y: underline_y,
@@ -1668,13 +1643,9 @@ impl LayoutInner {
                         }
 
                         if td.line_through {
-                            let ascent =
-                                metrics.map_or(718.0, |m| m.ascent as f32);
+                            let ascent = metrics.map_or(718.0, |m| m.ascent as f32);
                             let strike_y = baseline_y + ascent * scale / 3.0;
-                            page.operations.push(PdfOp::MoveTo {
-                                x,
-                                y: strike_y,
-                            });
+                            page.operations.push(PdfOp::MoveTo { x, y: strike_y });
                             page.operations.push(PdfOp::LineTo {
                                 x: x + segment.width,
                                 y: strike_y,
@@ -1861,14 +1832,17 @@ impl LayoutInner {
             name: font_name,
             size: font_size,
         });
-        page.operations
-            .push(PdfOp::SetTextPosition { x, y });
+        page.operations.push(PdfOp::SetTextPosition { x, y });
         page.operations.push(PdfOp::ShowText(text));
         page.operations.push(PdfOp::EndText);
         // Restore default fill color to black so later ops (if any) see
         // a predictable state. Since margin boxes are stamped last, this
         // is mostly defensive.
-        page.operations.push(PdfOp::SetFillColor { r: 0.0, g: 0.0, b: 0.0 });
+        page.operations.push(PdfOp::SetFillColor {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+        });
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1894,13 +1868,10 @@ impl LayoutInner {
         }
 
         // column_width helper (reused)
-        let col_x_for = |col: u32| -> f32 {
-            self.margin_left + col as f32 * (col_width + col_gap)
-        };
+        let col_x_for = |col: u32| -> f32 { self.margin_left + col as f32 * (col_width + col_gap) };
 
         // Total available width for the table within the current column
-        let table_area_width =
-            col_width - table.style.margin_left - table.style.margin_right;
+        let table_area_width = col_width - table.style.margin_left - table.style.margin_right;
 
         // Measure intrinsic min and max widths per column
         let mut col_min = vec![0.0_f32; column_count];
@@ -1928,10 +1899,7 @@ impl LayoutInner {
             // Space to spare: distribute the extra proportionally from max
             let extra = table_area_width - sum_max;
             if sum_max > 0.0 {
-                col_max
-                    .iter()
-                    .map(|&w| w + extra * (w / sum_max))
-                    .collect()
+                col_max.iter().map(|&w| w + extra * (w / sum_max)).collect()
             } else {
                 vec![table_area_width / column_count as f32; column_count]
             }
@@ -1954,8 +1922,7 @@ impl LayoutInner {
         *cursor_y -= collapsed_top_delta(*pending_bottom, table.style.margin_top);
         *pending_bottom = 0.0;
 
-        let is_collapse =
-            matches!(table.border_collapse, css::BorderCollapseValue::Collapse);
+        let is_collapse = matches!(table.border_collapse, css::BorderCollapseValue::Collapse);
 
         // In collapse mode we batch internal + outer borders per-band
         // (a "band" is a contiguous stretch of rows on the same page/column)
@@ -1976,11 +1943,7 @@ impl LayoutInner {
         // Draws the outer rectangle once, internal vertical gridlines at each
         // column boundary, and internal horizontal gridlines at each row
         // boundary.
-        fn flush_collapse_band(
-            page: &mut PageContent,
-            band: &CollapseBand,
-            col_widths: &[f32],
-        ) {
+        fn flush_collapse_band(page: &mut PageContent, band: &CollapseBand, col_widths: &[f32]) {
             if !band.has_border || band.row_bottoms.is_empty() {
                 return;
             }
@@ -2007,7 +1970,10 @@ impl LayoutInner {
             let mut gx = band.x0;
             for cw in col_widths.iter().take(col_widths.len().saturating_sub(1)) {
                 gx += cw;
-                page.operations.push(PdfOp::MoveTo { x: gx, y: band.top_y });
+                page.operations.push(PdfOp::MoveTo {
+                    x: gx,
+                    y: band.top_y,
+                });
                 page.operations.push(PdfOp::LineTo { x: gx, y: bottom_y });
                 page.operations.push(PdfOp::Stroke);
             }
@@ -2016,8 +1982,10 @@ impl LayoutInner {
             // outer rectangle).
             for &rb in &band.row_bottoms[..band.row_bottoms.len() - 1] {
                 page.operations.push(PdfOp::MoveTo { x: band.x0, y: rb });
-                page.operations
-                    .push(PdfOp::LineTo { x: band.x0 + total_w, y: rb });
+                page.operations.push(PdfOp::LineTo {
+                    x: band.x0 + total_w,
+                    y: rb,
+                });
                 page.operations.push(PdfOp::Stroke);
             }
         }
@@ -2144,8 +2112,11 @@ impl LayoutInner {
                 if let Some((r, g, b)) = cell.style.color {
                     page.operations.push(PdfOp::SetFillColor { r, g, b });
                 } else {
-                    page.operations
-                        .push(PdfOp::SetFillColor { r: 0.0, g: 0.0, b: 0.0 });
+                    page.operations.push(PdfOp::SetFillColor {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                    });
                 }
 
                 // Determine text start y based on vertical_align
@@ -2181,8 +2152,7 @@ impl LayoutInner {
                         });
                         page.operations
                             .push(PdfOp::SetTextPosition { x, y: baseline_y });
-                        page.operations
-                            .push(PdfOp::ShowText(segment.text.clone()));
+                        page.operations.push(PdfOp::ShowText(segment.text.clone()));
                         page.operations.push(PdfOp::EndText);
                         x += segment.width;
                     }
@@ -2205,10 +2175,7 @@ impl LayoutInner {
                 band.row_bottoms.push(row_bottom);
                 for cell in &row.cells {
                     let cell_has_border = cell.style.border_width > 0.0
-                        && !matches!(
-                            cell.style.border_style,
-                            Some(css::BorderStyle::None)
-                        );
+                        && !matches!(cell.style.border_style, Some(css::BorderStyle::None));
                     if cell_has_border {
                         band.has_border = true;
                         if cell.style.border_width > band.max_border_width {
@@ -2254,14 +2221,10 @@ impl LayoutInner {
         content_top: f32,
         pending_bottom: &mut f32,
     ) {
-        let col_x_for = |col: u32| -> f32 {
-            self.margin_left + col as f32 * (col_width + col_gap)
-        };
+        let col_x_for = |col: u32| -> f32 { self.margin_left + col as f32 * (col_width + col_gap) };
 
         // Scale down if wider than column content width
-        let box_width = col_width
-            - img.style.margin_left
-            - img.style.margin_right;
+        let box_width = col_width - img.style.margin_left - img.style.margin_right;
         let (draw_w, draw_h) = if img.width > box_width && img.width > 0.0 {
             let scale = box_width / img.width;
             (box_width, img.height * scale)
@@ -2355,10 +2318,14 @@ impl LayoutInner {
                 + (col + 1) as f32 * col_width
                 + col as f32 * col_gap
                 + col_gap / 2.0;
-            page.operations
-                .push(PdfOp::MoveTo { x: rule_x, y: content_top });
-            page.operations
-                .push(PdfOp::LineTo { x: rule_x, y: self.margin_bottom });
+            page.operations.push(PdfOp::MoveTo {
+                x: rule_x,
+                y: content_top,
+            });
+            page.operations.push(PdfOp::LineTo {
+                x: rule_x,
+                y: self.margin_bottom,
+            });
             page.operations.push(PdfOp::Stroke);
         }
 
