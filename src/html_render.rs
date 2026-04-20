@@ -34,7 +34,7 @@ const BLOCK_ELEMENTS: &[&str] = &[
     "summary",
 ];
 /// Block elements that act as pure containers (they wrap other blocks
-/// rather than being "paragraph-like" themselves). For these, html_render
+/// rather than being "paragraph-like" themselves). For these, `html_render`
 /// emits `ContainerStart`/`ContainerEnd` sentinels around the child flow
 /// so their margins can participate in parent/child collapsing. Anything
 /// *not* in this list (like `<p>`, `<h1>`, `<pre>`) keeps the original
@@ -247,7 +247,7 @@ fn map_css_font_family(family: &str) -> Option<&'static str> {
             "serif" | "times" | "times new roman" | "times-roman" => return Some("Times-Roman"),
             "sans-serif" | "helvetica" | "arial" => return Some("Helvetica"),
             "monospace" | "courier" | "courier new" => return Some("Courier"),
-            _ => continue,
+            _ => {}
         }
     }
     None
@@ -444,9 +444,6 @@ fn to_alpha(n: usize, upper: bool) -> String {
 
 /// Convert 1-based counter to roman numeral.
 fn to_roman(n: usize, upper: bool) -> String {
-    if n == 0 || n > 3999 {
-        return n.to_string();
-    }
     const PAIRS: &[(usize, &str, &str)] = &[
         (1000, "M", "m"),
         (900, "CM", "cm"),
@@ -462,6 +459,9 @@ fn to_roman(n: usize, upper: bool) -> String {
         (4, "IV", "iv"),
         (1, "I", "i"),
     ];
+    if n == 0 || n > 3999 {
+        return n.to_string();
+    }
     let mut n = n;
     let mut out = String::new();
     for &(val, up, lo) in PAIRS {
@@ -571,7 +571,7 @@ struct HtmlRenderer<'a> {
     strike_had_style: Vec<bool>,
     /// Stack of link hrefs, pushed/popped as we enter/leave `<a>` elements.
     link_stack: Vec<String>,
-    /// Temporary storage for href extracted in walk_node, consumed by handle_start_tag.
+    /// Temporary storage for href extracted in `walk_node`, consumed by `handle_start_tag`.
     pending_href: Option<String>,
     /// Stack of had-style flags for `<a>` tags.
     link_had_style: Vec<bool>,
@@ -698,18 +698,17 @@ impl<'a> HtmlRenderer<'a> {
                 } else {
                     let (classes, id, attrs_owned) = extract_element_attrs(handle);
                     let ancestors_owned = build_ancestors(handle);
-                    let ancestors: Vec<(&str, Vec<&str>, Option<&str>, Vec<(&str, &str)>)> =
-                        ancestors_owned
-                            .iter()
-                            .map(|(t, c, i, a)| {
-                                (
-                                    t.as_str(),
-                                    c.iter().map(String::as_str).collect(),
-                                    i.as_deref(),
-                                    a.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect(),
-                                )
-                            })
-                            .collect();
+                    let ancestors: Vec<css::AncestorInfo<'_>> = ancestors_owned
+                        .iter()
+                        .map(|(t, c, i, a)| {
+                            (
+                                t.as_str(),
+                                c.iter().map(String::as_str).collect(),
+                                i.as_deref(),
+                                a.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect(),
+                            )
+                        })
+                        .collect();
                     let preceding: Vec<SiblingRecord<'_>> = preceding_siblings
                         .iter()
                         .map(|s| SiblingRecord {
@@ -750,10 +749,10 @@ impl<'a> HtmlRenderer<'a> {
                 };
 
                 // Skip elements with display: none (and their entire subtree)
-                if let Some(ref style) = merged_style {
-                    if style.display == Some(css::DisplayValue::None) {
-                        return;
-                    }
+                if let Some(ref style) = merged_style
+                    && style.display == Some(css::DisplayValue::None)
+                {
+                    return;
                 }
 
                 // display: inline-block — collect the subtree's text as a
@@ -761,24 +760,24 @@ impl<'a> HtmlRenderer<'a> {
                 // background/border. This is the minimal-but-real form:
                 // inline-blocks flow inline, own their background and
                 // border, and never split across lines.
-                if let Some(ref style) = merged_style {
-                    if style.display == Some(css::DisplayValue::InlineBlock) {
-                        let parent = self.inherit_stack.last().cloned().unwrap_or_default();
-                        let inherited = parent.inherit_into(&merged_style);
-                        self.push_inline_block(handle, &inherited, style);
-                        return;
-                    }
+                if let Some(ref style) = merged_style
+                    && style.display == Some(css::DisplayValue::InlineBlock)
+                {
+                    let parent = self.inherit_stack.last().cloned().unwrap_or_default();
+                    let inherited = parent.inherit_into(merged_style.as_ref());
+                    self.push_inline_block(handle, &inherited, style);
+                    return;
                 }
 
                 // Push inherited style for this element's subtree
                 let parent = self.inherit_stack.last().cloned().unwrap_or_default();
-                let inherited = parent.inherit_into(&merged_style);
+                let inherited = parent.inherit_into(merged_style.as_ref());
                 self.inherit_stack.push(inherited);
 
                 // Tables are processed as a self-contained subtree.
                 if tag == "table" {
                     self.flush();
-                    self.build_and_push_table(handle, merged_style);
+                    self.build_and_push_table(handle, merged_style.as_ref());
                     self.inherit_stack.pop();
                     return;
                 }
@@ -1196,7 +1195,7 @@ impl<'a> HtmlRenderer<'a> {
                 self.layout.push_paragraph(Paragraph {
                     runs,
                     line_height: self.resolve_line_height(),
-                    spacing_after: self.resolve_spacing_after(LIST_ITEM_SPACING),
+                    spacing_after: LIST_ITEM_SPACING,
                     style: list_block_style,
                     marker: Some(marker),
                     is_hr: false,
@@ -1227,7 +1226,7 @@ impl<'a> HtmlRenderer<'a> {
         self.layout.push_paragraph(Paragraph {
             runs,
             line_height: self.resolve_line_height(),
-            spacing_after: self.resolve_spacing_after(ua.spacing_after),
+            spacing_after: ua.spacing_after,
             style: block_style,
             marker: None,
             is_hr: false,
@@ -1239,17 +1238,17 @@ impl<'a> HtmlRenderer<'a> {
 
     // ── Table building ──────────────────────────────────────
 
-    fn build_and_push_table(&mut self, table_handle: &Handle, table_style: Option<ComputedStyle>) {
+    fn build_and_push_table(&mut self, table_handle: &Handle, table_style: Option<&ComputedStyle>) {
         use crate::layout::{Table, TableRow};
 
         let ctx = self.length_context();
         let inherited = self.inherit_stack.last().cloned().unwrap_or_default();
-        let inherited_with_table = inherited.inherit_into(&table_style);
+        let inherited_with_table = inherited.inherit_into(table_style);
 
         let mut table_block_style = BlockStyle::default();
         let spacing_after = 12.0_f32;
 
-        if let Some(style) = table_style.as_ref() {
+        if let Some(style) = table_style {
             if let Some(len) = style.margin_top {
                 table_block_style.margin_top = len.resolve_ctx(&ctx);
             }
@@ -1270,21 +1269,13 @@ impl<'a> HtmlRenderer<'a> {
 
         let mut rows: Vec<TableRow> = Vec::new();
         let mut caption: Option<Box<crate::layout::Paragraph>> = None;
-        collect_table_rows(
-            table_handle,
-            &inherited_with_table,
-            &mut rows,
-            &mut caption,
-            &self.stylesheet,
-            &[],
-        );
+        collect_table_rows(table_handle, &inherited_with_table, &mut rows, &mut caption);
 
         if rows.is_empty() && caption.is_none() {
             return;
         }
 
         let border_collapse = table_style
-            .as_ref()
             .and_then(|s| s.border_collapse)
             .unwrap_or_default();
 
@@ -1322,7 +1313,7 @@ impl<'a> HtmlRenderer<'a> {
             .map_or(ua.font_size, |len| len.resolve_ctx(&self.length_context()));
         let css_weight = style.font_weight.or(inherited.font_weight);
         let css_italic = style.font_style.or(inherited.font_style);
-        let bold = css_weight.is_some_and(|w| w.is_bold());
+        let bold = css_weight.is_some_and(super::css::FontWeight::is_bold);
         let italic = matches!(css_italic, Some(FontStyle::Italic));
         let base_font = style
             .font_family
@@ -1347,14 +1338,8 @@ impl<'a> HtmlRenderer<'a> {
 
         // Horizontal padding (already flows into the atom box interior).
         let ctx = self.length_context();
-        let pad_l = style
-            .padding_left
-            .map(|l| l.resolve_ctx(&ctx))
-            .unwrap_or(0.0);
-        let pad_r = style
-            .padding_right
-            .map(|l| l.resolve_ctx(&ctx))
-            .unwrap_or(0.0);
+        let pad_l = style.padding_left.map_or(0.0, |l| l.resolve_ctx(&ctx));
+        let pad_r = style.padding_right.map_or(0.0, |l| l.resolve_ctx(&ctx));
         let pad_x = pad_l.max(pad_r);
 
         // Measure the text to get a natural width; use declared width if any.
@@ -1439,21 +1424,19 @@ impl<'a> HtmlRenderer<'a> {
         };
 
         if let Some(max_w) = inline_style.and_then(|s| s.max_width.map(|len| len.resolve_ctx(&ctx)))
+            && width > max_w
         {
-            if width > max_w {
-                let scale = max_w / width;
-                width = max_w;
-                height *= scale;
-            }
+            let scale = max_w / width;
+            width = max_w;
+            height *= scale;
         }
         if let Some(max_h) =
             inline_style.and_then(|s| s.max_height.map(|len| len.resolve_ctx(&ctx)))
+            && height > max_h
         {
-            if height > max_h {
-                let scale = max_h / height;
-                height = max_h;
-                width *= scale;
-            }
+            let scale = max_h / height;
+            height = max_h;
+            width *= scale;
         }
 
         // Store in layout's image vec and get an index
@@ -1517,14 +1500,6 @@ impl<'a> HtmlRenderer<'a> {
             .and_then(|s| s.line_height)
             .or_else(|| self.inherit_stack.last().and_then(|s| s.line_height))
             .map(|len| len.resolve_ctx(&ctx))
-    }
-
-    fn resolve_spacing_after(&self, default: f32) -> f32 {
-        // `spacing_after` is the UA-default gap below a block (e.g. 12pt
-        // after a <p>). CSS `margin-bottom` is handled separately through
-        // `BlockStyle::margin_bottom` and participates in margin collapsing,
-        // so we must NOT also fold it in here — doing so double-counts.
-        default
     }
 
     fn apply_block_css(&self, block_style: &mut BlockStyle) {
@@ -1647,38 +1622,31 @@ impl<'a> HtmlRenderer<'a> {
         // explicitly set locally. These are CSS-inheritable properties.
         if let Some(inh) = inherited {
             let has_letter = src.is_some_and(|s| s.letter_spacing.is_some());
-            if !has_letter {
-                if let Some(len) = inh.letter_spacing {
-                    block_style.letter_spacing = resolve(len);
-                }
+            if !has_letter && let Some(len) = inh.letter_spacing {
+                block_style.letter_spacing = resolve(len);
             }
             let has_word = src.is_some_and(|s| s.word_spacing.is_some());
-            if !has_word {
-                if let Some(len) = inh.word_spacing {
-                    block_style.word_spacing = resolve(len);
-                }
+            if !has_word && let Some(len) = inh.word_spacing {
+                block_style.word_spacing = resolve(len);
             }
             let has_indent = src.is_some_and(|s| s.text_indent.is_some());
-            if !has_indent {
-                if let Some(len) = inh.text_indent {
-                    block_style.text_indent = resolve(len);
-                }
+            if !has_indent && let Some(len) = inh.text_indent {
+                block_style.text_indent = resolve(len);
             }
         }
 
         // Inherit color and text-align from ancestor if not explicitly set
         if let Some(inh) = inherited {
             let block_has_color = src.is_some_and(|s| s.color.is_some());
-            if !block_has_color && block_style.color.is_none() {
-                if let Some(c) = inh.color {
-                    block_style.color = Some(c);
-                }
+            if !block_has_color
+                && block_style.color.is_none()
+                && let Some(c) = inh.color
+            {
+                block_style.color = Some(c);
             }
             let block_has_align = src.is_some_and(|s| s.text_align.is_some());
-            if !block_has_align {
-                if let Some(a) = &inh.text_align {
-                    block_style.text_align = a.clone();
-                }
+            if !block_has_align && let Some(a) = &inh.text_align {
+                block_style.text_align = a.clone();
             }
         }
     }
@@ -1692,8 +1660,6 @@ fn collect_table_rows(
     inherited: &ComputedStyle,
     rows: &mut Vec<crate::layout::TableRow>,
     caption: &mut Option<Box<crate::layout::Paragraph>>,
-    _stylesheet: &Stylesheet,
-    _ancestors: &[()],
 ) {
     if let NodeData::Element { name, .. } = &handle.data {
         let tag = name.local.as_ref();
@@ -1724,7 +1690,7 @@ fn collect_table_rows(
 
         // Descend into table/thead/tbody/tfoot/etc.
         for child in handle.children.borrow().iter() {
-            collect_table_rows(child, inherited, rows, caption, _stylesheet, &[]);
+            collect_table_rows(child, inherited, rows, caption);
         }
     }
 }
@@ -1739,8 +1705,7 @@ fn build_caption_paragraph(handle: &Handle, inherited: &ComputedStyle) -> crate:
         .unwrap_or_else(|| "Helvetica".to_string());
     let font_size = inherited
         .font_size
-        .map(|len| len.resolve_ctx(&ctx))
-        .unwrap_or(12.0);
+        .map_or(12.0, |len| len.resolve_ctx(&ctx));
     let color = inherited.color;
 
     let mut runs: Vec<TextRun> = Vec::new();
@@ -1776,7 +1741,7 @@ fn build_table_cell(
     // Cell's inline style only (no stylesheet matching for MVP)
     let cell_style: Option<ComputedStyle> = extract_style_attr(handle);
 
-    let merged_inherited = inherited.inherit_into(&cell_style);
+    let merged_inherited = inherited.inherit_into(cell_style.as_ref());
     // Table cells currently resolve lengths against a fallback context.
     // This is a known limitation — `rem`/`vw`/`vh` inside cells won't see
     // the real root font size or viewport. Threading the renderer's

@@ -15,8 +15,6 @@ pub enum ImageFilter {
     Dct,
     /// Deflate-compressed raw pixels (PDF's `FlateDecode`).
     Flate,
-    /// Uncompressed raw pixels.
-    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,8 +96,8 @@ fn decode_jpeg(bytes: &[u8]) -> Result<ImageData, String> {
                 return Err("truncated SOF marker".to_string());
             }
             let precision = bytes[i + 2];
-            let height = u16::from_be_bytes([bytes[i + 3], bytes[i + 4]]) as u32;
-            let width = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            let height = u32::from(u16::from_be_bytes([bytes[i + 3], bytes[i + 4]]));
+            let width = u32::from(u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]));
             let components = bytes[i + 7];
             let color_space = match components {
                 1 => ImageColorSpace::DeviceGray,
@@ -128,6 +126,8 @@ fn decode_jpeg(bytes: &[u8]) -> Result<ImageData, String> {
 /// Decode a PNG using the `png` crate and return an `ImageData` with
 /// deflate-compressed raw pixels.
 fn decode_png(bytes: &[u8]) -> Result<ImageData, String> {
+    use png::ColorType;
+
     let decoder = png::Decoder::new(bytes);
     let mut reader = decoder
         .read_info()
@@ -150,7 +150,6 @@ fn decode_png(bytes: &[u8]) -> Result<ImageData, String> {
     let out_bpc = 8; // png crate expands to 8bpc for most inputs; see below
     let _ = bit_depth;
 
-    use png::ColorType;
     // Produce (rgb_bytes, optional alpha_bytes)
     let (rgb_bytes, alpha_bytes, color_space) = match color_type {
         ColorType::Grayscale => (buf, None, ImageColorSpace::DeviceGray),

@@ -2,6 +2,9 @@
 #![allow(clippy::cast_precision_loss)] // u32/usize->f32 precision loss is acceptable
 #![allow(clippy::cast_possible_wrap)] // usize->i32 for page count is fine
 #![allow(clippy::unnecessary_wraps)] // PyO3 #[pymethods] requires PyResult signatures
+#![allow(clippy::too_many_lines)] // layout/emit pipelines thread state; splitting hurts readability
+#![allow(clippy::similar_names)] // layout code uses paired x/y, fg/bg, etc.
+#![allow(clippy::many_single_char_names)] // color math reads better with r, g, b, h, s, l
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -110,8 +113,8 @@ pub(crate) enum PdfOp {
         width: f32,
         height: f32,
     },
-    /// Apply a constant opacity (via ExtGState). The emitter allocates an
-    /// ExtGState resource named `/GsN` that sets both `CA` (stroking alpha)
+    /// Apply a constant opacity (via `ExtGState`). The emitter allocates an
+    /// `ExtGState` resource named `/GsN` that sets both `CA` (stroking alpha)
     /// and `ca` (non-stroking alpha) to `alpha` and references it with
     /// `/GsN gs`. Same `alpha` reuses the same resource on a given page.
     SetAlpha {
@@ -326,14 +329,14 @@ fn build_custom_font_data(
 
 /// Collect the unique opacities referenced by `SetAlpha` ops on this page,
 /// returning them in first-seen order. The index in the returned `Vec` plus 1
-/// becomes the suffix of the `/GsN` ExtGState resource name.
+/// becomes the suffix of the `/GsN` `ExtGState` resource name.
 fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
     let mut out: Vec<f32> = Vec::new();
     for op in &page.operations {
-        if let PdfOp::SetAlpha { alpha } = op {
-            if !out.iter().any(|a| (a - alpha).abs() < 1e-6) {
-                out.push(*alpha);
-            }
+        if let PdfOp::SetAlpha { alpha } = op
+            && !out.iter().any(|a| (a - alpha).abs() < 1e-6)
+        {
+            out.push(*alpha);
         }
     }
     out
@@ -343,6 +346,9 @@ fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
 /// `[top-left, top-right, bottom-right, bottom-left]`. Each corner is
 /// clamped to half the shorter edge so adjacent corners never overlap.
 fn emit_rounded_rect_path(content: &mut Content, x: f32, y: f32, w: f32, h: f32, radii: [f32; 4]) {
+    // Kappa constant for quarter-circle Bezier approximation.
+    const K: f32 = 0.552_284_8;
+
     if w <= 0.0 || h <= 0.0 {
         return;
     }
@@ -351,8 +357,6 @@ fn emit_rounded_rect_path(content: &mut Content, x: f32, y: f32, w: f32, h: f32,
     let r_tr = radii[1].max(0.0).min(max_r);
     let r_br = radii[2].max(0.0).min(max_r);
     let r_bl = radii[3].max(0.0).min(max_r);
-    // Kappa constant for quarter-circle Bezier approximation.
-    const K: f32 = 0.552_284_77;
     // In PDF user space y grows upward. We trace clockwise starting at the
     // top-left corner's horizontal tangent point, i.e. (x + r_tl, y + h).
     let left = x;
@@ -547,7 +551,7 @@ fn write_page_content_stream(
 /// write the matching `/Outlines` dictionary plus one `OutlineItem` per
 /// heading.
 ///
-/// Hierarchy rule: an h_N becomes a child of the nearest preceding heading
+/// Hierarchy rule: an `h_N` becomes a child of the nearest preceding heading
 /// with level < N. If there is no such heading, it becomes a top-level
 /// entry. This is the same "stack of open parents" algorithm Markdown
 /// renderers use for TOCs and matches what a reader's sidebar expects.
@@ -643,7 +647,7 @@ fn write_outline(
     }
 }
 
-/// Write PDF image XObjects for every image and its optional alpha SMask.
+/// Write PDF image `XObjects` for every image and its optional alpha `SMask`.
 fn write_image_xobjects(
     pdf: &mut Pdf,
     images: &[image::ImageData],
@@ -672,7 +676,6 @@ fn write_image_xobjects(
                 image::ImageFilter::Flate => {
                     xobj.filter(Filter::FlateDecode);
                 }
-                image::ImageFilter::None => {}
             }
             if let Some(smask) = smask_ref {
                 xobj.s_mask(smask);
@@ -693,7 +696,7 @@ fn write_image_xobjects(
 }
 
 /// Write all font objects: Type1 for the 14 built-ins, Type0/CIDFont2
-/// for every embedded custom font (with descriptor, font file, ToUnicode).
+/// for every embedded custom font (with descriptor, font file, `ToUnicode`).
 fn write_font_objects(
     pdf: &mut Pdf,
     font_refs: &[FontRefs],

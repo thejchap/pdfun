@@ -434,10 +434,9 @@ macro_rules! gen_style_impl {
             /// Build inherited style for a child element. Inheritable
             /// properties fall back to parent's value when the child
             /// leaves them unset; non-inheritable properties reset.
-            pub fn inherit_into(&self, child: &Option<ComputedStyle>) -> ComputedStyle {
+            pub fn inherit_into(&self, child: Option<&ComputedStyle>) -> ComputedStyle {
                 let mut result = ComputedStyle::default();
-                let c = child.as_ref();
-                $( inherit_one!($kind, $inh, result, c, self, $name); )*
+                $( inherit_one!($kind, $inh, result, child, self, $name); )*
                 result
             }
         }
@@ -852,7 +851,7 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                         Token::QuotedString(s) => families.push(s.to_string()),
                         _ => break,
                     }
-                    if input.try_parse(|i| i.expect_comma()).is_err() {
+                    if input.try_parse(cssparser::Parser::expect_comma).is_err() {
                         break;
                     }
                 }
@@ -974,10 +973,9 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
             }
             "column-count" => {
                 let n = input.expect_integer()?;
-                if n >= 1 {
-                    self.style.column_count = Some(n as u32);
-                } else {
-                    return Err(input.new_custom_error(()));
+                match u32::try_from(n) {
+                    Ok(n) if n >= 1 => self.style.column_count = Some(n),
+                    _ => return Err(input.new_custom_error(())),
                 }
             }
             "column-gap" => {
@@ -1348,7 +1346,7 @@ pub struct AnB {
 
 impl AnB {
     /// Does this formula match a 1-based position `n`?
-    pub fn matches(&self, n: i32) -> bool {
+    pub fn matches(self, n: i32) -> bool {
         if n < 1 {
             return false;
         }
@@ -1450,43 +1448,34 @@ impl CompoundSelector {
                     .find(|(n, _)| n.eq_ignore_ascii_case(name))
                     .map(|(_, v)| *v);
                 match (op, value) {
-                    (AttrOp::Exists, _) => attr_value.is_some(),
-                    (_, None) => attr_value.is_some(),
+                    (AttrOp::Exists, _) | (_, None) => attr_value.is_some(),
                     (AttrOp::Equals, Some(v)) => attr_value == Some(v.as_str()),
                     (AttrOp::Includes, Some(v)) => {
                         if v.is_empty() || v.contains(char::is_whitespace) {
                             return false;
                         }
-                        attr_value
-                            .map(|av| av.split_whitespace().any(|tok| tok == v))
-                            .unwrap_or(false)
+                        attr_value.is_some_and(|av| av.split_whitespace().any(|tok| tok == v))
                     }
-                    (AttrOp::DashMatch, Some(v)) => attr_value
-                        .map(|av| av == v || av.starts_with(&format!("{}-", v)))
-                        .unwrap_or(false),
+                    (AttrOp::DashMatch, Some(v)) => {
+                        attr_value.is_some_and(|av| av == v || av.starts_with(&format!("{v}-")))
+                    }
                     (AttrOp::Prefix, Some(v)) => {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value
-                            .map(|av| av.starts_with(v.as_str()))
-                            .unwrap_or(false)
+                        attr_value.is_some_and(|av| av.starts_with(v.as_str()))
                     }
                     (AttrOp::Suffix, Some(v)) => {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value
-                            .map(|av| av.ends_with(v.as_str()))
-                            .unwrap_or(false)
+                        attr_value.is_some_and(|av| av.ends_with(v.as_str()))
                     }
                     (AttrOp::Substring, Some(v)) => {
                         if v.is_empty() {
                             return false;
                         }
-                        attr_value
-                            .map(|av| av.contains(v.as_str()))
-                            .unwrap_or(false)
+                        attr_value.is_some_and(|av| av.contains(v.as_str()))
                     }
                 }
             }
@@ -1650,10 +1639,11 @@ fn tokenize_selector(text: &str) -> Vec<SelectorToken> {
         let mut depth_paren: i32 = 0;
         while i < chars.len() {
             let ch = chars[i];
-            if depth_brack == 0 && depth_paren == 0 {
-                if ch.is_whitespace() || ch == '>' || ch == '+' || ch == '~' {
-                    break;
-                }
+            if depth_brack == 0
+                && depth_paren == 0
+                && (ch.is_whitespace() || ch == '>' || ch == '+' || ch == '~')
+            {
+                break;
             }
             if ch == '[' {
                 depth_brack += 1;
@@ -1682,13 +1672,13 @@ fn parse_compound_from_text(
     class_count: &mut u16,
     type_count: &mut u16,
 ) -> CompoundSelector {
-    let mut parts: Vec<SimpleSelector> = Vec::new();
-    let mut chars = text.char_indices().peekable();
-
     // Stop characters for ident-like runs.
     fn is_boundary(c: char) -> bool {
         c == '.' || c == '#' || c == '[' || c == ':' || c == '('
     }
+
+    let mut parts: Vec<SimpleSelector> = Vec::new();
+    let mut chars = text.char_indices().peekable();
 
     while let Some(&(pos, ch)) = chars.peek() {
         match ch {
@@ -1906,13 +1896,13 @@ pub(crate) fn parse_an_b(arg: &str) -> Option<AnB> {
 
 /// Parse the contents inside `[` ... `]` into an attribute selector.
 fn parse_attribute_selector(inner: &str) -> Option<SimpleSelector> {
+    fn is_name_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    }
+
     let inner = inner.trim();
     if inner.is_empty() {
         return None;
-    }
-
-    fn is_name_char(c: char) -> bool {
-        c.is_ascii_alphanumeric() || c == '-' || c == '_'
     }
 
     // Scan for end of attribute name.
@@ -2251,7 +2241,7 @@ fn parse_margin_box_declarations(declarations: &str) -> MarginBox {
                         input.expect_ident()?.as_ref().to_string()
                     };
                     mb.font_family = Some(first);
-                    while input.try_parse(|i| i.expect_comma()).is_ok() {
+                    while input.try_parse(cssparser::Parser::expect_comma).is_ok() {
                         let _ = input
                             .try_parse(|i| i.expect_string().map(|_| ()))
                             .or_else(|_| input.try_parse(|i| i.expect_ident().map(|_| ())));
@@ -2400,6 +2390,14 @@ pub struct SiblingRecord<'a> {
     pub sibling_count: usize,
 }
 
+/// Ancestor record for selector matching: (tag, classes, id, attributes).
+pub type AncestorInfo<'a> = (
+    &'a str,
+    Vec<&'a str>,
+    Option<&'a str>,
+    Vec<(&'a str, &'a str)>,
+);
+
 /// Information about an element needed for selector matching.
 pub struct ElementInfo<'a> {
     pub tag: &'a str,
@@ -2408,13 +2406,7 @@ pub struct ElementInfo<'a> {
     /// All attributes on the element (name, value).
     pub attributes: Vec<(&'a str, &'a str)>,
     /// Ancestor chain from parent to root.
-    /// Each entry: (tag, classes, id, attributes).
-    pub ancestors: Vec<(
-        &'a str,
-        Vec<&'a str>,
-        Option<&'a str>,
-        Vec<(&'a str, &'a str)>,
-    )>,
+    pub ancestors: Vec<AncestorInfo<'a>>,
     /// 0-based index of this element among its element siblings.
     pub sibling_index: usize,
     /// Total number of element siblings on the shared parent (including self).
@@ -3171,12 +3163,7 @@ mod tests {
         classes: Vec<&'a str>,
         id: Option<&'a str>,
         attributes: Vec<(&'a str, &'a str)>,
-        ancestors: Vec<(
-            &'a str,
-            Vec<&'a str>,
-            Option<&'a str>,
-            Vec<(&'a str, &'a str)>,
-        )>,
+        ancestors: Vec<AncestorInfo<'a>>,
     ) -> ElementInfo<'a> {
         ElementInfo {
             tag,
@@ -3592,7 +3579,7 @@ mod tests {
 
     #[test]
     fn page_margin_box_counter_page() {
-        let css = r#"@page { @bottom-center { content: counter(page); } }"#;
+        let css = r"@page { @bottom-center { content: counter(page); } }";
         let sheet = parse_stylesheet(css);
         let mb = sheet
             .page_style
@@ -3639,8 +3626,10 @@ mod tests {
 
     #[test]
     fn merge_style_non_none_wins() {
-        let mut target = ComputedStyle::default();
-        target.color = Some((1.0, 0.0, 0.0));
+        let mut target = ComputedStyle {
+            color: Some((1.0, 0.0, 0.0)),
+            ..ComputedStyle::default()
+        };
         let source = ComputedStyle {
             font_size: Some(CssLength::Pt(18.0)),
             ..ComputedStyle::default()

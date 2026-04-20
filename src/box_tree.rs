@@ -7,7 +7,7 @@
 //! float and inline-block work will read from.
 
 use crate::css;
-use crate::layout::{Block, BlockStyle, ImageBlock, Paragraph, Table, TextAlign, TextRun};
+use crate::layout::{Block, BlockStyle, ImageBlock, Paragraph, Table, TextRun};
 
 /// A node in the CSS box tree. Containers own their children as `Vec<Node>`
 /// so layout can recurse naturally.
@@ -52,9 +52,6 @@ pub struct AnonymousBox {
     pub runs: Vec<TextRun>,
     pub line_height: Option<f32>,
     pub preserve_whitespace: bool,
-    pub text_align: TextAlign,
-    pub letter_spacing: f32,
-    pub word_spacing: f32,
     /// UA-default gap below (same meaning as `BlockBox::spacing_after`).
     pub spacing_after: f32,
 }
@@ -73,14 +70,10 @@ impl Node {
     /// Build a leaf node wrapping today's `Paragraph` shape. Used by
     /// `flatten_tree` round-trip tests and by Stage 1 construction sites.
     pub fn paragraph_leaf(para: Paragraph) -> Node {
-        let style = para.style.clone();
         let anon = AnonymousBox {
             runs: para.runs,
             line_height: para.line_height,
             preserve_whitespace: para.preserve_whitespace,
-            text_align: style.text_align,
-            letter_spacing: style.letter_spacing,
-            word_spacing: style.word_spacing,
             spacing_after: para.spacing_after,
         };
         Node::Block(BlockBox {
@@ -279,9 +272,11 @@ mod tests {
 
     #[test]
     fn unflatten_container_sentinels_produces_nested_block() {
-        let mut outer_style = BlockStyle::default();
-        outer_style.margin_top = 10.0;
-        outer_style.margin_bottom = 10.0;
+        let outer_style = BlockStyle {
+            margin_top: 10.0,
+            margin_bottom: 10.0,
+            ..Default::default()
+        };
         let flat = vec![
             Block::ContainerStart(outer_style.clone()),
             Block::Paragraph(sample_paragraph("inside")),
@@ -348,9 +343,11 @@ mod tests {
 
     #[test]
     fn unflatten_container_page_breaks_propagate_to_block_box() {
-        let mut style = BlockStyle::default();
-        style.page_break_before = Some(css::PageBreak::Always);
-        style.page_break_after = Some(css::PageBreak::Always);
+        let style = BlockStyle {
+            page_break_before: Some(css::PageBreak::Always),
+            page_break_after: Some(css::PageBreak::Always),
+            ..Default::default()
+        };
         let flat = vec![
             Block::ContainerStart(style.clone()),
             Block::ContainerEnd(style),

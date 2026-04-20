@@ -113,7 +113,7 @@ pub struct BlockStyle {
     pub border_radius: Option<[f32; 4]>,
     /// CSS `opacity`. `None` or `Some(1.0)` means fully opaque (no state
     /// change emitted). Values in `[0.0, 1.0)` wrap the block's content
-    /// emission in SaveState → SetAlpha → … → RestoreState.
+    /// emission in `SaveState` → `SetAlpha` → … → `RestoreState`.
     pub opacity: Option<f32>,
     /// CSS `float`. A floated block is taken out of the normal flow and
     /// shifted to the left or right edge of its containing block.
@@ -211,7 +211,7 @@ pub struct Paragraph {
     /// heading outline. `None` means "doesn't matter" (list items, etc.).
     pub tag: Option<&'static str>,
     /// An id="…" attribute captured during DOM walk. Registered as a
-    /// GoTo destination at render time so `<a href="#id">` links can
+    /// `GoTo` destination at render time so `<a href="#id">` links can
     /// resolve to this block's page and y-position.
     pub anchor_id: Option<String>,
 }
@@ -588,7 +588,7 @@ fn wrap_runs_preformatted(
         font_size = run.font_size;
         color = run.color;
         text_decoration = run.text_decoration;
-        link_url = run.link_url.clone();
+        link_url.clone_from(&run.link_url);
         baseline_shift = run.baseline_shift;
     }
 
@@ -1273,10 +1273,10 @@ impl LayoutInner {
         if let Some(min_w) = style.min_width {
             text_area_width = text_area_width.max((min_w - content_adjust).max(0.0));
         }
-        if !is_float {
-            text_area_width = text_area_width.min(available_text_width).max(0.0);
-        } else {
+        if is_float {
             text_area_width = text_area_width.max(0.0);
+        } else {
+            text_area_width = text_area_width.min(available_text_width).max(0.0);
         }
         let box_width = text_area_width + h_padding;
 
@@ -1286,9 +1286,9 @@ impl LayoutInner {
         };
         let text_indent = style.text_indent.max(0.0);
         let marker_gap = 6.0_f32;
-        let marker_width_outside = marker
-            .map(|m| font_metrics::measure_str(&m.text, &m.font_name, m.font_size).unwrap_or(0.0))
-            .unwrap_or(0.0);
+        let marker_width_outside = marker.map_or(0.0, |m| {
+            font_metrics::measure_str(&m.text, &m.font_name, m.font_size).unwrap_or(0.0)
+        });
         let inside_indent = if matches!(style.list_style_position, css::ListStylePosition::Inside)
             && marker.is_some()
         {
@@ -1315,15 +1315,15 @@ impl LayoutInner {
         // still honor max-height by clipping the drawn rect — any text
         // that would have hung below the clamped edge just spills out.)
         let mut box_height = natural_box_height;
-        if let Some(min_h) = style.min_height {
-            if box_height < min_h {
-                box_height = min_h;
-            }
+        if let Some(min_h) = style.min_height
+            && box_height < min_h
+        {
+            box_height = min_h;
         }
-        if let Some(max_h) = style.max_height {
-            if box_height > max_h {
-                box_height = max_h;
-            }
+        if let Some(max_h) = style.max_height
+            && box_height > max_h
+        {
+            box_height = max_h;
         }
         let top_delta = collapsed_top_delta(state.pending_bottom, style.margin_top);
         let block_total_height = top_delta + box_height + style.margin_bottom;
@@ -1619,42 +1619,42 @@ impl LayoutInner {
                     });
                 }
 
-                if let Some(td) = segment.text_decoration {
-                    if td.underline || td.line_through {
-                        let metrics = font_metrics::get_builtin_metrics(&segment.font_name);
-                        let scale = segment.font_size / 1000.0;
-                        let stroke_width = (segment.font_size * 0.05).max(0.5);
+                if let Some(td) = segment.text_decoration
+                    && (td.underline || td.line_through)
+                {
+                    let metrics = font_metrics::get_builtin_metrics(&segment.font_name);
+                    let scale = segment.font_size / 1000.0;
+                    let stroke_width = (segment.font_size * 0.05).max(0.5);
 
-                        page.operations.push(PdfOp::SaveState);
-                        if let Some((r, g, b)) = segment.color {
-                            page.operations.push(PdfOp::SetStrokeColor { r, g, b });
-                        }
-                        page.operations.push(PdfOp::SetLineWidth(stroke_width));
-
-                        if td.underline {
-                            let descent = metrics.map_or(-207.0, |m| m.descent as f32);
-                            let underline_y = baseline_y + descent * scale / 3.0;
-                            page.operations.push(PdfOp::MoveTo { x, y: underline_y });
-                            page.operations.push(PdfOp::LineTo {
-                                x: x + segment.width,
-                                y: underline_y,
-                            });
-                            page.operations.push(PdfOp::Stroke);
-                        }
-
-                        if td.line_through {
-                            let ascent = metrics.map_or(718.0, |m| m.ascent as f32);
-                            let strike_y = baseline_y + ascent * scale / 3.0;
-                            page.operations.push(PdfOp::MoveTo { x, y: strike_y });
-                            page.operations.push(PdfOp::LineTo {
-                                x: x + segment.width,
-                                y: strike_y,
-                            });
-                            page.operations.push(PdfOp::Stroke);
-                        }
-
-                        page.operations.push(PdfOp::RestoreState);
+                    page.operations.push(PdfOp::SaveState);
+                    if let Some((r, g, b)) = segment.color {
+                        page.operations.push(PdfOp::SetStrokeColor { r, g, b });
                     }
+                    page.operations.push(PdfOp::SetLineWidth(stroke_width));
+
+                    if td.underline {
+                        let descent = metrics.map_or(-207.0, |m| f32::from(m.descent));
+                        let underline_y = baseline_y + descent * scale / 3.0;
+                        page.operations.push(PdfOp::MoveTo { x, y: underline_y });
+                        page.operations.push(PdfOp::LineTo {
+                            x: x + segment.width,
+                            y: underline_y,
+                        });
+                        page.operations.push(PdfOp::Stroke);
+                    }
+
+                    if td.line_through {
+                        let ascent = metrics.map_or(718.0, |m| f32::from(m.ascent));
+                        let strike_y = baseline_y + ascent * scale / 3.0;
+                        page.operations.push(PdfOp::MoveTo { x, y: strike_y });
+                        page.operations.push(PdfOp::LineTo {
+                            x: x + segment.width,
+                            y: strike_y,
+                        });
+                        page.operations.push(PdfOp::Stroke);
+                    }
+
+                    page.operations.push(PdfOp::RestoreState);
                 }
 
                 let spaces_in_segment = segment.text.matches(' ').count() as f32;
@@ -1845,7 +1845,7 @@ impl LayoutInner {
         });
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments, clippy::items_after_statements)]
     fn render_table(
         &mut self,
         current_page: &mut Arc<Mutex<PageContent>>,
@@ -2032,11 +2032,9 @@ impl LayoutInner {
             // Page-break check: move the entire row to next column/page if it doesn't fit
             if *cursor_y - row_height < self.margin_bottom && *cursor_y < content_top {
                 // Flush any pending collapse band before moving on.
-                if is_collapse {
-                    if let Some(band) = collapse_band.take() {
-                        let mut page = current_page.lock().unwrap();
-                        flush_collapse_band(&mut page, &band, &col_widths);
-                    }
+                if is_collapse && let Some(band) = collapse_band.take() {
+                    let mut page = current_page.lock().unwrap();
+                    flush_collapse_band(&mut page, &band, &col_widths);
                 }
                 self.advance_column_or_page(
                     current_page,
@@ -2192,11 +2190,9 @@ impl LayoutInner {
         }
 
         // Flush any remaining collapse band at the end of the table.
-        if is_collapse {
-            if let Some(band) = collapse_band.take() {
-                let mut page = current_page.lock().unwrap();
-                flush_collapse_band(&mut page, &band, &col_widths);
-            }
+        if is_collapse && let Some(band) = collapse_band.take() {
+            let mut page = current_page.lock().unwrap();
+            flush_collapse_band(&mut page, &band, &col_widths);
         }
 
         // Record table bottom margin as pending so the following block's
@@ -2273,6 +2269,7 @@ impl LayoutInner {
 
     /// Advance to the next column, or if already in the last column,
     /// draw rules on the current page and start a new one.
+    #[allow(clippy::too_many_arguments)]
     fn advance_column_or_page(
         &self,
         current_page: &mut Arc<Mutex<PageContent>>,
