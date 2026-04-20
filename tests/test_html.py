@@ -4128,3 +4128,74 @@ with describe("pseudo-elements ::before and ::after"):
         html = "<style>p::before { color: red }</style><p>body</p>"
         text = _pdf_text(HtmlDocument(string=html).to_bytes())
         expect(text).to_equal("body")
+
+
+with describe("table of contents"):
+    # spec: pdfun; behaviors: pdf-toc
+    @test
+    def toc_true_prepends_heading_list():
+        """`toc=True` auto-prepends a clickable ToC based on document headings."""
+        html = (
+            "<h1>Intro</h1><p>hello</p>"
+            "<h2>Details</h2><p>body</p>"
+            "<h1>Wrap up</h1><p>bye</p>"
+        )
+        data = HtmlDocument(string=html, toc=True).to_bytes()
+        expect(data).to_contain(b"Table of Contents")
+        expect(data).to_contain(b"Intro")
+        expect(data).to_contain(b"Details")
+        expect(data).to_contain(b"Wrap up")
+
+    # spec: pdfun; behaviors: pdf-toc
+    @test
+    def toc_emits_internal_link_per_heading():
+        """Each heading produces a clickable GoTo annotation in the PDF."""
+        html = "<h1>One</h1><h1>Two</h1><h1>Three</h1>"
+        data = HtmlDocument(string=html, toc=True).to_bytes()
+        # One GoTo action per heading (the ToC links).
+        expect(data.count(b"/GoTo")).to_equal(3)
+
+    # spec: pdfun; behaviors: pdf-toc
+    @test
+    def toc_isolates_itself_on_dedicated_page():
+        """The ToC sits before a forced page break so body starts fresh."""
+        html = "<h1>A</h1><p>body</p>"
+        data = HtmlDocument(string=html, toc=True).to_bytes()
+        expect(data).to_contain(b"/Count 2")
+
+    # spec: pdfun; behaviors: pdf-toc
+    @test
+    def toc_string_sets_custom_title():
+        """Passing a string to `toc` uses it as the heading text."""
+        html = "<h1>Chapter</h1><p>body</p>"
+        data = HtmlDocument(string=html, toc="Contents").to_bytes()
+        expect(data).to_contain(b"Contents")
+        assert b"Table of Contents" not in data
+
+    # spec: pdfun; behaviors: pdf-toc
+    @test
+    def toc_preserves_existing_heading_ids():
+        """User-supplied `id` on a heading is not used in the generated link."""
+        from pdfun.toc import build_toc
+
+        html = '<h1 id="preface">Preface</h1><p>body</p>'
+        _modified, toc_html = build_toc(html)
+        expect("#preface" in toc_html).to_equal(True)
+
+    # spec: pdfun; behaviors: pdf-toc
+    @test
+    def toc_false_is_a_no_op():
+        """`toc=False` (default) leaves the document untouched."""
+        html = "<h1>A</h1><p>body</p>"
+        data_no_toc = HtmlDocument(string=html).to_bytes()
+        data_false = HtmlDocument(string=html, toc=False).to_bytes()
+        expect(data_no_toc).to_equal(data_false)
+
+    # spec: pdfun; behaviors: pdf-toc
+    @test
+    def toc_on_empty_document_no_op():
+        """A document with no headings renders identically with toc=True."""
+        html = "<p>just a paragraph</p>"
+        data_no_toc = HtmlDocument(string=html).to_bytes()
+        data_toc = HtmlDocument(string=html, toc=True).to_bytes()
+        expect(data_no_toc).to_equal(data_toc)
