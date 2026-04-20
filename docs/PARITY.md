@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 97/133 behaviors implemented · 97/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 99/133 behaviors implemented · 99/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -91,8 +91,8 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | :first-child pseudo-class | 5.11.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::first_child_matches_first_p` |
 | :nth-child() pseudo-class | 5.11.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::nth_child_even_hits_even_positions` |
 | :not() pseudo-class | 5.11.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::not_pseudo_excludes_class` |
-| ::before pseudo-element | 5.12.3 | ✅ | ❌ | — |
-| ::after pseudo-element | 5.12.3 | ✅ | ❌ | — |
+| ::before pseudo-element | 5.12.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::before_prepends_generated_content` |
+| ::after pseudo-element | 5.12.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::after_appends_generated_content` |
 | ::first-line pseudo-element | 5.12.1 | ❌ | ❌ | — |
 
 ## CSS 2.1 §6 — Cascade and inheritance

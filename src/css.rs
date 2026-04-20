@@ -387,6 +387,7 @@ macro_rules! with_style_fields {
             (clear,             copy,  no),
             (vertical_align,    copy,  no),
             (border_collapse,   copy,  no),
+            (pseudo_content,    clone, no),
         }
     };
 }
@@ -496,6 +497,11 @@ pub struct ComputedStyle {
     pub clear: Option<ClearValue>,
     pub vertical_align: Option<VerticalAlignValue>,
     pub border_collapse: Option<BorderCollapseValue>,
+    /// String value of the CSS `content` property, used for `::before` /
+    /// `::after` pseudo-elements. Lives here so `merge_style` can cascade
+    /// it like any other property. Only the literal-string form is parsed
+    /// today; `counter()`, `attr()`, and `url()` are not.
+    pub pseudo_content: Option<String>,
 }
 
 // ── Color parsing ───────────────────────────────────────────
@@ -1260,6 +1266,23 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 };
                 self.style.border_collapse = Some(bc);
             }
+            "content" => {
+                // Only the literal-string form of `content`. `none` and the
+                // CSS-wide idents like `normal`/`inherit` are treated as
+                // "no content" (which is also the default).
+                if let Ok(s) = input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string()))
+                {
+                    self.style.pseudo_content = Some(s);
+                } else if let Ok(ident) =
+                    input.try_parse(|i| i.expect_ident().map(|s| s.as_ref().to_ascii_lowercase()))
+                {
+                    if ident != "none" && ident != "normal" {
+                        return Err(input.new_custom_error(()));
+                    }
+                } else {
+                    return Err(input.new_custom_error(()));
+                }
+            }
             _ => return Err(input.new_custom_error(())),
         }
         Ok(())
@@ -1329,6 +1352,15 @@ pub enum SimpleSelector {
     },
     /// Pseudo-class such as `:first-child`, `:nth-child(2n+1)`, `:not(.foo)`.
     PseudoClass(PseudoClass),
+}
+
+/// CSS pseudo-elements. Unlike pseudo-classes, these don't select an
+/// existing DOM element — they attach a style (and optionally generated
+/// content) to a synthetic position before/after the element's content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PseudoElement {
+    Before,
+    After,
 }
 
 /// CSS pseudo-classes supported by the selector matcher.
@@ -1498,6 +1530,10 @@ pub struct SelectorChain {
     pub combinators: Vec<Combinator>,
     /// Specificity as (`id_count`, `class_count`, `type_count`).
     pub specificity: (u16, u16, u16),
+    /// Trailing pseudo-element (`::before` / `::after`). When `None`, the
+    /// chain targets real DOM elements; otherwise it targets a synthetic
+    /// slot attached to the matched element.
+    pub pseudo_element: Option<PseudoElement>,
 }
 
 /// A CSS rule: one or more selectors with a declaration block.
@@ -1544,6 +1580,7 @@ fn parse_one_selector_from_text(text: &str) -> Option<SelectorChain> {
     let mut id_count: u16 = 0;
     let mut class_count: u16 = 0;
     let mut type_count: u16 = 0;
+    let mut pseudo_element: Option<PseudoElement> = None;
 
     // Tokenize into a stream where compound selectors and combinator symbols
     // are separate tokens. We walk character-by-character so combinators
@@ -1569,6 +1606,7 @@ fn parse_one_selector_from_text(text: &str) -> Option<SelectorChain> {
                     &mut id_count,
                     &mut class_count,
                     &mut type_count,
+                    &mut pseudo_element,
                 );
                 if compound.parts.is_empty() {
                     continue;
@@ -1595,6 +1633,7 @@ fn parse_one_selector_from_text(text: &str) -> Option<SelectorChain> {
         compounds,
         combinators,
         specificity: (id_count, class_count, type_count),
+        pseudo_element,
     })
 }
 
@@ -1676,6 +1715,7 @@ fn parse_compound_from_text(
     id_count: &mut u16,
     class_count: &mut u16,
     type_count: &mut u16,
+    pseudo_element: &mut Option<PseudoElement>,
 ) -> CompoundSelector {
     // Stop characters for ident-like runs.
     fn is_boundary(c: char) -> bool {
@@ -1763,8 +1803,14 @@ fn parse_compound_from_text(
             }
             ':' => {
                 chars.next();
-                // Read the pseudo-class name.
-                let name_start = pos + 1;
+                // `::x` is a pseudo-element; `:x` is usually a pseudo-class,
+                // except for the legacy CSS 2.1 forms `:before` / `:after`
+                // which aliased today's `::before` / `::after`.
+                let double_colon = chars.peek().map(|&(_, c)| c) == Some(':');
+                if double_colon {
+                    chars.next();
+                }
+                let name_start = chars.peek().map_or(text.len(), |&(i, _)| i);
                 while let Some(&(_, c)) = chars.peek() {
                     if c.is_ascii_alphanumeric() || c == '-' {
                         chars.next();
@@ -1774,6 +1820,18 @@ fn parse_compound_from_text(
                 }
                 let name_end = chars.peek().map_or(text.len(), |&(i, _)| i);
                 let name = text[name_start..name_end].to_ascii_lowercase();
+
+                if double_colon || matches!(name.as_str(), "before" | "after") {
+                    // Pseudo-element. Record it on the chain and skip the
+                    // compound slot — the selector subject stays the real
+                    // element; the pseudo is a tag on the whole chain.
+                    match name.as_str() {
+                        "before" => *pseudo_element = Some(PseudoElement::Before),
+                        "after" => *pseudo_element = Some(PseudoElement::After),
+                        _ => {} // unknown pseudo-element: silently skip
+                    }
+                    continue;
+                }
 
                 // Optional parenthesised argument.
                 let mut arg: Option<String> = None;
@@ -1843,11 +1901,19 @@ fn parse_pseudo_class(name: &str, arg: Option<&str>) -> Option<(PseudoClass, (u1
         }
         "not" => {
             let arg = arg?.trim();
-            // Parse the argument as a single compound selector.
+            // Parse the argument as a single compound selector. `:not(::before)`
+            // is semantically nonsense and ignored — we discard the pseudo.
             let mut id_c = 0u16;
             let mut cls_c = 0u16;
             let mut typ_c = 0u16;
-            let compound = parse_compound_from_text(arg, &mut id_c, &mut cls_c, &mut typ_c);
+            let mut discard: Option<PseudoElement> = None;
+            let compound = parse_compound_from_text(
+                arg,
+                &mut id_c,
+                &mut cls_c,
+                &mut typ_c,
+                &mut discard,
+            );
             if compound.parts.is_empty() {
                 return None;
             }
@@ -2422,11 +2488,34 @@ pub struct ElementInfo<'a> {
 
 /// Match all rules in a stylesheet against an element, returning the
 /// merged `ComputedStyle` from all matching rules (respecting specificity).
+/// Rules whose selector carries a pseudo-element (`::before`/`::after`)
+/// are skipped — those are surfaced via `match_pseudo_rules`.
 pub fn match_rules(element: &ElementInfo<'_>, stylesheet: &Stylesheet) -> ComputedStyle {
+    match_rules_for(element, stylesheet, None)
+}
+
+/// Match rules with a specific pseudo-element tag. Used to resolve the
+/// computed style for a synthetic `::before` / `::after` slot.
+pub fn match_pseudo_rules(
+    element: &ElementInfo<'_>,
+    stylesheet: &Stylesheet,
+    pseudo: PseudoElement,
+) -> ComputedStyle {
+    match_rules_for(element, stylesheet, Some(pseudo))
+}
+
+fn match_rules_for(
+    element: &ElementInfo<'_>,
+    stylesheet: &Stylesheet,
+    pseudo: Option<PseudoElement>,
+) -> ComputedStyle {
     let mut matches: Vec<(u16, u16, u16, usize, &ComputedStyle)> = Vec::new();
 
     for (rule_idx, rule) in stylesheet.rules.iter().enumerate() {
         for selector in &rule.selectors {
+            if selector.pseudo_element != pseudo {
+                continue;
+            }
             if selector_matches(selector, element) {
                 matches.push((
                     selector.specificity.0,

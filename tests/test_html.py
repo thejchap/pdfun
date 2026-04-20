@@ -3992,3 +3992,70 @@ with describe("bookmarks and internal links"):
         for word in (b"One", b"Two", b"Three", b"Four", b"Five", b"Six"):
             expect(data).to_contain(word)
         expect(data).to_contain(b"/Outlines")
+
+
+def _pdf_text(pdf_bytes: bytes) -> str:
+    import fitz
+
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf:
+        return pdf[0].get_text().strip()
+
+
+with describe("pseudo-elements ::before and ::after"):
+    # spec: CSS 2.1 §5.12.3; behaviors: sel-pseudo-element-before
+    @test
+    def before_prepends_generated_content():
+        html = '<style>p::before { content: "[PRE]" }</style><p>body</p>'
+        text = _pdf_text(HtmlDocument(string=html).to_bytes())
+        expect(text.startswith("[PRE]")).to_equal(True)
+        expect(text).to_contain("body")
+
+    # spec: CSS 2.1 §5.12.3; behaviors: sel-pseudo-element-after
+    @test
+    def after_appends_generated_content():
+        html = '<style>p::after { content: "[POST]" }</style><p>body</p>'
+        text = _pdf_text(HtmlDocument(string=html).to_bytes())
+        expect(text.endswith("[POST]")).to_equal(True)
+        expect(text).to_contain("body")
+
+    @test
+    def legacy_single_colon_before_is_accepted():
+        """CSS 2.1 :before aliases CSS3 ::before for compatibility."""
+        html = '<style>p:before { content: "[LEG]" }</style><p>body</p>'
+        text = _pdf_text(HtmlDocument(string=html).to_bytes())
+        expect(text.startswith("[LEG]")).to_equal(True)
+
+    @test
+    def pseudo_does_not_leak_style_to_host_element():
+        """color on ::before must not colour the host element's own text."""
+        # The element itself has no color rule; only its ::before does. The
+        # PDF should have at most one red fill operator (for the ::before),
+        # and the body text stays in the default fill.
+        html = '<style>p::before { content: "[R]"; color: red }</style><p>body</p>'
+        data = HtmlDocument(string=html).to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+        # One red rg operator, for just the pseudo-element's run.
+        expect(data.count(b"1 0 0 rg")).to_equal(1)
+
+    @test
+    def non_matching_pseudo_rule_is_inert():
+        html = '<style>div::before { content: "NO" }</style><p>body</p>'
+        text = _pdf_text(HtmlDocument(string=html).to_bytes())
+        expect(text).to_equal("body")
+
+    @test
+    def before_and_after_combine():
+        html = (
+            '<style>p::before { content: "<" }p::after { content: ">" }</style><p>x</p>'
+        )
+        text = _pdf_text(HtmlDocument(string=html).to_bytes())
+        expect(text.startswith("<")).to_equal(True)
+        expect(text.endswith(">")).to_equal(True)
+        expect(text).to_contain("x")
+
+    @test
+    def pseudo_without_content_property_is_ignored():
+        """::before with no content produces no text, matching CSS spec."""
+        html = "<style>p::before { color: red }</style><p>body</p>"
+        text = _pdf_text(HtmlDocument(string=html).to_bytes())
+        expect(text).to_equal("body")
