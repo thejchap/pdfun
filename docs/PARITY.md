@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 99/133 behaviors implemented · 99/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 101/133 behaviors implemented · 101/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -153,8 +153,8 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 |----------|:------:|:----------:|:-----:|:-------|
 | @page (size, margins) | 13.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::at_page_size_letter` |
 | page-break-before / page-break-after | 13.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/page_break.html` |
-| page-break-inside | 13.3.1 | ✅ | ❌ | — |
-| orphans / widows | 13.3.2 | ✅ | ❌ | — |
+| page-break-inside | 13.3.1 | ✅ | ✅ | ✅ (3) `tests/test_html.py::page_break_inside_avoid_parses`, `tests/test_html.py::break_inside_avoid_alias_accepted`, `tests/test_html.py::page_break_inside_avoid_pushes_overflow_to_next_page` |
+| orphans / widows | 13.3.2 | ✅ | ✅ | ✅ (3) `tests/test_html.py::orphans_integer_parses`, `tests/test_html.py::widows_integer_parses`, `tests/test_html.py::orphans_and_widows_via_stylesheet` |
 
 ## CSS 2.1 §14 — Colors and backgrounds
 

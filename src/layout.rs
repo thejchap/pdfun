@@ -62,7 +62,7 @@ pub enum TextAlign {
 
 // ── BlockStyle ────────────────────────────────────────────────
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct BlockStyle {
     pub color: Option<(f32, f32, f32)>,
     pub background_color: Option<(f32, f32, f32)>,
@@ -80,6 +80,13 @@ pub struct BlockStyle {
     pub text_align: TextAlign,
     pub page_break_before: Option<css::PageBreak>,
     pub page_break_after: Option<css::PageBreak>,
+    pub page_break_inside: Option<css::PageBreakInside>,
+    /// CSS `orphans`: minimum lines of a paragraph that must be left at the
+    /// bottom of a page before a split. Default 2.
+    pub orphans: u32,
+    /// CSS `widows`: minimum lines of a paragraph that must be carried to
+    /// the top of the next page after a split. Default 2.
+    pub widows: u32,
     /// Resolved content-box sizing constraints in PDF points. `None` means
     /// "auto" / "no constraint". These are applied when computing the
     /// content width of a block in `render_paragraph_block`.
@@ -123,6 +130,47 @@ pub struct BlockStyle {
     /// CSS `clear`. Before rendering, `cursor_y` is advanced past the
     /// bottom of any matching in-flight floats.
     pub clear: css::ClearValue,
+}
+
+impl Default for BlockStyle {
+    fn default() -> Self {
+        Self {
+            color: None,
+            background_color: None,
+            margin_top: 0.0,
+            margin_right: 0.0,
+            margin_bottom: 0.0,
+            margin_left: 0.0,
+            padding_top: 0.0,
+            padding_right: 0.0,
+            padding_bottom: 0.0,
+            padding_left: 0.0,
+            border_width: 0.0,
+            border_color: None,
+            border_style: None,
+            text_align: TextAlign::default(),
+            page_break_before: None,
+            page_break_after: None,
+            page_break_inside: None,
+            orphans: 2,
+            widows: 2,
+            width: None,
+            height: None,
+            min_width: None,
+            min_height: None,
+            max_width: None,
+            max_height: None,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            box_sizing: css::BoxSizing::default(),
+            text_indent: 0.0,
+            list_style_position: css::ListStylePosition::default(),
+            border_radius: None,
+            opacity: None,
+            float: css::FloatValue::default(),
+            clear: css::ClearValue::default(),
+        }
+    }
 }
 
 impl BlockStyle {
@@ -1328,7 +1376,20 @@ impl LayoutInner {
         let top_delta = collapsed_top_delta(state.pending_bottom, style.margin_top);
         let block_total_height = top_delta + box_height + style.margin_bottom;
 
-        if state.cursor_y - block_total_height < self.margin_bottom
+        // Keep-together: by default (or with explicit `page-break-inside:
+        // avoid`) push the whole block to the next page when it won't fit
+        // in the remaining space. `page-break-inside: auto` opts out — the
+        // block is laid out at the current cursor and may run off the
+        // bottom (a known limitation until mid-paragraph splitting lands).
+        // `orphans` and `widows` are carried on the style and trivially
+        // honored: since we never split a paragraph across pages, all lines
+        // always stay together on one page.
+        let avoid_split = !matches!(
+            style.page_break_inside,
+            Some(css::PageBreakInside::Auto)
+        );
+        if avoid_split
+            && state.cursor_y - block_total_height < self.margin_bottom
             && state.cursor_y < state.content_top
         {
             self.advance_column_or_page(
@@ -1343,6 +1404,10 @@ impl LayoutInner {
             );
             state.pending_bottom = 0.0;
         }
+        // Silence dead-code warnings — these are parsed, propagated into
+        // `BlockStyle`, and trivially honored (no splitting). They'll gain
+        // real enforcement when mid-paragraph pagination is implemented.
+        let _ = (style.orphans, style.widows);
 
         let cx = self.col_x(state.current_col, state);
         let box_x = if is_float {

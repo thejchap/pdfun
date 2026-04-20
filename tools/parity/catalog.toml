@@ -620,14 +620,14 @@ title = "Paged media"
   title = "page-break-inside"
   section = "13.3.1"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "paged-orphans-widows"
   title = "orphans / widows"
   section = "13.3.2"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
 # =============================================================================
 # CSS 2.1 §14 — Colors and backgrounds

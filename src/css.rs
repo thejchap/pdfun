@@ -165,6 +165,12 @@ pub enum PageBreak {
     Avoid,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PageBreakInside {
+    Auto,
+    Avoid,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BoxSizing {
     /// CSS default: `width`/`height` refer to the content area.
@@ -370,6 +376,9 @@ macro_rules! with_style_fields {
             (list_style_position, copy, yes),
             (page_break_before, copy,  no),
             (page_break_after,  copy,  no),
+            (page_break_inside, copy,  no),
+            (orphans,           copy,  yes),
+            (widows,            copy,  yes),
             (width,             copy,  no),
             (height,            copy,  no),
             (min_width,         copy,  no),
@@ -480,6 +489,9 @@ pub struct ComputedStyle {
     pub list_style_position: Option<ListStylePosition>,
     pub page_break_before: Option<PageBreak>,
     pub page_break_after: Option<PageBreak>,
+    pub page_break_inside: Option<PageBreakInside>,
+    pub orphans: Option<u32>,
+    pub widows: Option<u32>,
     pub width: Option<CssLength>,
     pub height: Option<CssLength>,
     pub min_width: Option<CssLength>,
@@ -1075,6 +1087,30 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     _ => return Err(location.new_custom_error(())),
                 };
                 self.style.page_break_after = Some(pb);
+            }
+            "page-break-inside" | "break-inside" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let pbi = match ident.to_ascii_lowercase().as_str() {
+                    "auto" => PageBreakInside::Auto,
+                    "avoid" | "avoid-page" | "avoid-column" => PageBreakInside::Avoid,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.page_break_inside = Some(pbi);
+            }
+            "orphans" => {
+                let n = input.expect_integer()?;
+                if n < 1 {
+                    return Err(input.new_custom_error(()));
+                }
+                self.style.orphans = Some(n.cast_unsigned());
+            }
+            "widows" => {
+                let n = input.expect_integer()?;
+                if n < 1 {
+                    return Err(input.new_custom_error(()));
+                }
+                self.style.widows = Some(n.cast_unsigned());
             }
             "width" => {
                 self.style.width = parse_length_or_keyword(input, "auto")?;

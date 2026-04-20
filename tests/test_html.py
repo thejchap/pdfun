@@ -2696,6 +2696,75 @@ with describe("page-break"):
         data = doc.to_bytes()
         assert b"/Count 2" in data
 
+    # spec: CSS 2.1 §13.3.1; behaviors: paged-page-break-inside
+    @test
+    def page_break_inside_avoid_parses():
+        """page-break-inside: avoid is accepted and renders without error."""
+        doc = HtmlDocument(
+            string='<p style="page-break-inside: avoid">Keep together</p>'
+        )
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Keep together")
+        expect(data).to_contain(b"/Count 1")
+
+    # spec: CSS 2.1 §13.3.1; behaviors: paged-page-break-inside
+    @test
+    def break_inside_avoid_alias_accepted():
+        """break-inside (CSS3 alias) with avoid is accepted."""
+        doc = HtmlDocument(string='<p style="break-inside: avoid">Keep</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Keep")
+
+    # spec: CSS 2.1 §13.3.1; behaviors: paged-page-break-inside
+    @test
+    def page_break_inside_avoid_pushes_overflow_to_next_page():
+        """A tall paragraph that would overflow the current page is pushed
+        whole to the next page when page-break-inside: avoid is set. This
+        matches the existing "keep block together" behavior."""
+        # Fill most of page 1, then place an avoid-inside block that must go
+        # to page 2 rather than overflow at the bottom of page 1.
+        filler = "<p>line</p>" * 45
+        html = (
+            f"{filler}"
+            '<p style="page-break-inside: avoid">'
+            "<span>A</span><span>B</span><span>C</span>"
+            "</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"/Count 2")
+
+    # spec: CSS 2.1 §13.3.2; behaviors: paged-orphans-widows
+    @test
+    def orphans_integer_parses():
+        """orphans: N is accepted with any positive integer."""
+        doc = HtmlDocument(string='<p style="orphans: 3">Body</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Body")
+
+    # spec: CSS 2.1 §13.3.2; behaviors: paged-orphans-widows
+    @test
+    def widows_integer_parses():
+        """widows: N is accepted with any positive integer."""
+        doc = HtmlDocument(string='<p style="widows: 4">Body</p>')
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Body")
+
+    # spec: CSS 2.1 §13.3.2; behaviors: paged-orphans-widows
+    @test
+    def orphans_and_widows_via_stylesheet():
+        """orphans and widows declared in a stylesheet apply to matched rules."""
+        html = (
+            "<html><head><style>"
+            "p { orphans: 3; widows: 3; }"
+            "</style></head><body>"
+            "<p>Paragraph text</p>"
+            "</body></html>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"Paragraph text")
+
 
 with describe("text-align: justify"):
     # spec: CSS 2.1 §16.4; behaviors: text-word-spacing
