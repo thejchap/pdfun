@@ -206,7 +206,7 @@ fn decode_png(bytes: &[u8]) -> Result<ImageData, String> {
     })
 }
 
-fn compress(data: &[u8]) -> Vec<u8> {
+pub(crate) fn compress(data: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(data, 6)
 }
 

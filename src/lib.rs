@@ -749,7 +749,9 @@ fn write_font_objects(
                 .stem_v(80.0)
                 .font_file2(font_file_ref);
 
-            pdf.stream(font_file_ref, &cfd.subset_data);
+            let compressed_font = image::compress(&cfd.subset_data);
+            pdf.stream(font_file_ref, &compressed_font)
+                .filter(Filter::FlateDecode);
 
             let sys_info = SystemInfo {
                 registry: Str(b"Adobe"),
@@ -761,7 +763,9 @@ fn write_font_objects(
                 cmap.pair(new_gid, ch);
             }
             let cmap_data = cmap.finish();
-            pdf.stream(tounicode_ref, cmap_data.as_slice());
+            let compressed_cmap = image::compress(&cmap_data);
+            pdf.stream(tounicode_ref, &compressed_cmap)
+                .filter(Filter::FlateDecode);
         } else {
             pdf.type1_font(fr.type0_ref)
                 .base_font(Name(fr.name.as_bytes()));

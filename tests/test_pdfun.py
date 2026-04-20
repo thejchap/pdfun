@@ -448,6 +448,21 @@ with describe("Font embedding"):
         expect(data).to_contain(b"/W ")
 
     @test
+    def embedded_font_stream_is_flate_compressed():
+        """Font program and ToUnicode CMap streams use /FlateDecode."""
+        result = _load_system_font()
+        if result is None:
+            return
+        db, font_id = result
+        doc = PdfDocument()
+        name = doc.register_font(db, font_id)
+        page = doc.add_page()
+        page.set_font(name, 12.0)
+        page.draw_text(72.0, 720.0, "compressed")
+        data = doc.to_bytes()
+        expect(data.count(b"/FlateDecode")).to_be_greater_than(1)
+
+    @test
     def unicode_text_with_embedded_font():
         """Non-ASCII text renders with embedded font."""
         result = _load_system_font()
