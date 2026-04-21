@@ -130,6 +130,10 @@ pub struct BlockStyle {
     /// CSS `clear`. Before rendering, `cursor_y` is advanced past the
     /// bottom of any matching in-flight floats.
     pub clear: css::ClearValue,
+    /// CSS `overflow`. When not `Visible`, content is clipped to the
+    /// padding box via a `W n` path after the normal border/background
+    /// draw. In a paged medium, `scroll`/`auto` collapse to `hidden`.
+    pub overflow: css::Overflow,
 }
 
 impl Default for BlockStyle {
@@ -169,6 +173,7 @@ impl Default for BlockStyle {
             opacity: None,
             float: css::FloatValue::default(),
             clear: css::ClearValue::default(),
+            overflow: css::Overflow::default(),
         }
     }
 }
@@ -1482,8 +1487,9 @@ impl LayoutInner {
             state.cursor_y -= collapsed_top_delta(state.pending_bottom, style.margin_top);
         }
 
-        let needs_state_wrap =
-            style.has_any_styling() || anon.runs.iter().any(|r| r.color.is_some());
+        let needs_state_wrap = style.has_any_styling()
+            || style.overflow.clips()
+            || anon.runs.iter().any(|r| r.color.is_some());
         let cursor_y = state.cursor_y;
         let mut page = state.current_page.lock().unwrap();
 
@@ -1577,6 +1583,25 @@ impl LayoutInner {
                 box_height,
             );
             page.operations.push(PdfOp::Stroke);
+        }
+
+        // CSS 2.1 §11.1: `overflow: hidden` (and scroll/auto in a paged
+        // medium) clip content to the padding edge. Emit the clip path
+        // after drawing the box's own background + border so those stay
+        // visible, but before any children. The clip is scoped to the
+        // SaveState/RestoreState pair (`needs_state_wrap` already set).
+        if style.overflow.clips() {
+            let pad_x = box_x + style.border_width;
+            let pad_y = cursor_y - box_height + style.border_width;
+            let pad_w = (box_width - 2.0 * style.border_width).max(0.0);
+            let pad_h = (box_height - 2.0 * style.border_width).max(0.0);
+            page.operations.push(PdfOp::Rectangle {
+                x: pad_x,
+                y: pad_y,
+                width: pad_w,
+                height: pad_h,
+            });
+            page.operations.push(PdfOp::ClipNonzero);
         }
 
         if let Some((r, g, b)) = style.color {

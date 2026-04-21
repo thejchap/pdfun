@@ -4285,6 +4285,79 @@ with describe("display: inline-block"):
         expect(content).to_contain(b"Badge")
 
 
+with describe("overflow"):
+    # spec: CSS 2.1 §11.1; behaviors: ve-overflow
+
+    @test
+    def overflow_hidden_emits_clip_op():
+        """`overflow: hidden` emits a `W n` clip op (nonzero-rule clip path
+        ending without fill/stroke)."""
+        html = (
+            "<div style='overflow: hidden; width: 50px; height: 40px;'>"
+            "Some text that overflows."
+            "</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"\nW\n")
+        expect(content).to_contain(b"\nn\n")
+
+    @test
+    def overflow_visible_does_not_clip():
+        """`overflow: visible` is the default and must not emit `W n`."""
+        html = (
+            "<div style='overflow: visible; width: 50px; height: 40px;'>"
+            "Some text."
+            "</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # A plain block without clipping should not emit a W n pair.
+        expect(content.find(b"\nW\n")).to_equal(-1)
+
+    @test
+    def overflow_scroll_clips_like_hidden_in_print():
+        """In a paged medium (PDF), `overflow: scroll` falls back to
+        hidden-like clipping — emits a W n pair."""
+        html = (
+            "<div style='overflow: scroll; width: 50px; height: 40px;'>Some text.</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"\nW\n")
+
+    @test
+    def overflow_auto_clips_like_hidden_in_print():
+        """`overflow: auto` also collapses to hidden in PDF output."""
+        html = (
+            "<div style='overflow: auto; width: 50px; height: 40px;'>Some text.</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"\nW\n")
+
+    @test
+    def overflow_hidden_clip_is_wrapped_in_save_restore():
+        """The clip path is scoped to a q…Q pair so it doesn't leak to
+        subsequent content."""
+        html = (
+            "<div style='overflow: hidden; width: 50px; height: 40px;'>A</div>"
+            "<p>Unclipped paragraph.</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Every W must sit between a matched q/Q pair emitted for the block.
+        w_idx = content.find(b"\nW\n")
+        expect(w_idx).to_be_greater_than(-1)
+        # A Q (restore) must appear after the W.
+        expect(content.find(b"\nQ\n", w_idx)).to_be_greater_than(-1)
+
+
 with describe("float and clear"):
 
     @test

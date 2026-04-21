@@ -188,6 +188,29 @@ pub enum TextTransform {
     Capitalize,
 }
 
+/// CSS `overflow` property (CSS 2.1 §11.1). Controls whether content
+/// that exceeds the box's padding edge is clipped.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Overflow {
+    /// Default: content is not clipped.
+    #[default]
+    Visible,
+    /// Content is clipped at the padding edge.
+    Hidden,
+    /// In a paged medium (PDF), scroll/auto behave as hidden — there is
+    /// no interactive scroll surface to render.
+    Scroll,
+    /// Same as Scroll in a paged medium.
+    Auto,
+}
+
+impl Overflow {
+    /// Whether this overflow value requires clipping to the padding box.
+    pub fn clips(self) -> bool {
+        !matches!(self, Overflow::Visible)
+    }
+}
+
 /// CSS `white-space` property. Controls whitespace collapsing and line
 /// wrapping for inline content.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -430,6 +453,7 @@ macro_rules! with_style_fields {
             (clear,             copy,  no),
             (vertical_align,    copy,  no),
             (border_collapse,   copy,  no),
+            (overflow,          copy,  no),
             (pseudo_content,    clone, no),
         }
     };
@@ -544,6 +568,7 @@ pub struct ComputedStyle {
     pub clear: Option<ClearValue>,
     pub vertical_align: Option<VerticalAlignValue>,
     pub border_collapse: Option<BorderCollapseValue>,
+    pub overflow: Option<Overflow>,
     /// String value of the CSS `content` property, used for `::before` /
     /// `::after` pseudo-elements. Lives here so `merge_style` can cascade
     /// it like any other property. Only the literal-string form is parsed
@@ -1246,6 +1271,18 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     _ => return Err(location.new_custom_error(())),
                 };
                 self.style.white_space = Some(ws);
+            }
+            "overflow" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let ov = match ident.to_ascii_lowercase().as_str() {
+                    "visible" => Overflow::Visible,
+                    "hidden" | "clip" => Overflow::Hidden,
+                    "scroll" => Overflow::Scroll,
+                    "auto" => Overflow::Auto,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.overflow = Some(ov);
             }
             "list-style-type" => {
                 let location = input.current_source_location();
