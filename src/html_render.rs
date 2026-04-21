@@ -1242,7 +1242,7 @@ impl<'a> HtmlRenderer<'a> {
                     style: list_block_style,
                     marker: Some(marker),
                     is_hr: false,
-                    preserve_whitespace: false,
+                    white_space: self.resolve_white_space(),
                     tag: None,
                     anchor_id: self.pending_anchor_id.take(),
                 });
@@ -1273,7 +1273,7 @@ impl<'a> HtmlRenderer<'a> {
             style: block_style,
             marker: None,
             is_hr: false,
-            preserve_whitespace: self.pre_depth > 0,
+            white_space: self.resolve_white_space(),
             tag: paragraph_tag,
             anchor_id: self.pending_anchor_id.take(),
         });
@@ -1545,6 +1545,22 @@ impl<'a> HtmlRenderer<'a> {
             .map(|len| len.resolve_ctx(&ctx))
     }
 
+    /// Resolve the effective `white-space` value for the paragraph being
+    /// flushed. The CSS property wins when set; otherwise the legacy
+    /// `<pre>` container depth pins the value to `Pre` to preserve the
+    /// historical default for the HTML tag.
+    fn resolve_white_space(&self) -> css::WhiteSpace {
+        self.block_style
+            .as_ref()
+            .and_then(|s| s.white_space)
+            .or_else(|| self.inherit_stack.last().and_then(|s| s.white_space))
+            .unwrap_or(if self.pre_depth > 0 {
+                css::WhiteSpace::Pre
+            } else {
+                css::WhiteSpace::Normal
+            })
+    }
+
     fn apply_block_css(&self, block_style: &mut BlockStyle) {
         let css_style = self.block_style.clone();
         self.apply_block_css_from(block_style, css_style.as_ref());
@@ -1777,7 +1793,7 @@ fn build_caption_paragraph(handle: &Handle, inherited: &ComputedStyle) -> crate:
         style: block_style,
         marker: None,
         is_hr: false,
-        preserve_whitespace: false,
+        white_space: css::WhiteSpace::Normal,
         tag: None,
         anchor_id: None,
     }

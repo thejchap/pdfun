@@ -51,7 +51,7 @@ pub struct BlockBox {
 pub struct AnonymousBox {
     pub runs: Vec<TextRun>,
     pub line_height: Option<f32>,
-    pub preserve_whitespace: bool,
+    pub white_space: css::WhiteSpace,
     /// UA-default gap below (same meaning as `BlockBox::spacing_after`).
     pub spacing_after: f32,
 }
@@ -73,7 +73,7 @@ impl Node {
         let anon = AnonymousBox {
             runs: para.runs,
             line_height: para.line_height,
-            preserve_whitespace: para.preserve_whitespace,
+            white_space: para.white_space,
             spacing_after: para.spacing_after,
         };
         Node::Block(BlockBox {
@@ -228,7 +228,7 @@ mod tests {
             style: BlockStyle::default(),
             marker: None,
             is_hr: false,
-            preserve_whitespace: false,
+            white_space: css::WhiteSpace::Normal,
             tag: None,
             anchor_id: None,
         }
@@ -256,7 +256,7 @@ mod tests {
             style: BlockStyle::default(),
             marker: None,
             is_hr: true,
-            preserve_whitespace: false,
+            white_space: css::WhiteSpace::Normal,
             tag: None,
             anchor_id: None,
         })];

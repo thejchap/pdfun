@@ -766,7 +766,7 @@ title = "Text"
   title = "white-space CSS property"
   section = "16.6"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
 # =============================================================================
 # CSS 2.1 §17 — Tables
@@ -1021,13 +1021,13 @@ title = "At-rules"
   id = "at-media"
   title = "@media"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "at-import"
   title = "@import"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
 # =============================================================================
 # CSS Layout — Flexbox and Grid
