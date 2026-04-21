@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 110/133 behaviors implemented · 109/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 114/133 behaviors implemented · 111/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -200,10 +200,10 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 |----------|:------:|:----------:|:-----:|:-------|
 | border-radius | 5.1 | ✅ | ✅ | ✅ (1) `tests/visual/border_radius.html` |
 | box-shadow | 7.1 | ✅ | ❌ | — |
-| background-image | 3.3 | ✅ | ❌ | — |
-| background-repeat | 3.5 | ✅ | ❌ | — |
-| background-size | 3.9 | ✅ | ❌ | — |
-| background-position | 3.6 | ✅ | ❌ | — |
+| background-image | 3.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::background_image_url_emits_xobject` |
+| background-repeat | 3.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::background_image_url_emits_xobject` |
+| background-size | 3.9 | ✅ | ✅ | ⚠️ untested |
+| background-position | 3.6 | ✅ | ✅ | ⚠️ untested |
 
 ## CSS Color 3 — Color spaces and alpha
 

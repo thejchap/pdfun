@@ -146,6 +146,24 @@ pub struct BlockStyle {
     /// CSS `left` offset in points. Applied only when `position` is
     /// `Relative`. Positive values shift the painted box to the right.
     pub position_left: Option<f32>,
+    /// Resolved background image parameters. `None` means no background
+    /// image was specified (or loading failed). Present value carries the
+    /// arena index of the loaded image plus the repeat/size/position
+    /// parameters needed to emit the tile grid at paint time.
+    pub background_image: Option<BackgroundImageParams>,
+}
+
+/// Paint-time parameters for a block's `background-image`. The image has
+/// already been decoded and registered into `Layout::images`; `index`
+/// references that slot.
+#[derive(Clone, Copy, Debug)]
+pub struct BackgroundImageParams {
+    pub index: usize,
+    pub intrinsic_width: f32,
+    pub intrinsic_height: f32,
+    pub repeat: css::BackgroundRepeat,
+    pub size: css::BackgroundSize,
+    pub position: css::BackgroundPosition,
 }
 
 impl Default for BlockStyle {
@@ -189,6 +207,7 @@ impl Default for BlockStyle {
             position: css::Position::default(),
             position_top: None,
             position_left: None,
+            background_image: None,
         }
     }
 }
@@ -203,6 +222,7 @@ impl BlockStyle {
             || self.margin_bottom > 0.0
             || self.margin_left > 0.0
             || self.border_radius.is_some()
+            || self.background_image.is_some()
             || self.needs_alpha()
     }
 
@@ -836,6 +856,131 @@ fn heading_level(tag: &str) -> Option<u8> {
         "h6" => Some(6),
         _ => None,
     }
+}
+
+/// Paint `background-image` tiles into `page`, clipped to the padding box
+/// `(pad_x, pad_y_bottom)` with size `(pad_w, pad_h)` (PDF coords: origin
+/// bottom-left of the clip rect). Handles `background-size`,
+/// `background-repeat`, and `background-position`.
+fn emit_background_image_tiles(
+    page: &mut PageContent,
+    bg: &BackgroundImageParams,
+    pad_x: f32,
+    pad_y_bottom: f32,
+    pad_w: f32,
+    pad_h: f32,
+) {
+    // Resolve tile size.
+    let intr_w = bg.intrinsic_width.max(1.0);
+    let intr_h = bg.intrinsic_height.max(1.0);
+    let (tile_w, tile_h) = match bg.size {
+        css::BackgroundSize::Auto => (intr_w, intr_h),
+        css::BackgroundSize::Cover => {
+            let s = (pad_w / intr_w).max(pad_h / intr_h);
+            (intr_w * s, intr_h * s)
+        }
+        css::BackgroundSize::Contain => {
+            let s = (pad_w / intr_w).min(pad_h / intr_h);
+            (intr_w * s, intr_h * s)
+        }
+        css::BackgroundSize::Length(w, h) => {
+            // Percentages resolve against the padding box; `auto` on
+            // either axis preserves the image's aspect ratio.
+            let resolve_w = |l: css::CssLength| match l {
+                css::CssLength::Pct(v) => v * pad_w / 100.0,
+                other => other.resolve(12.0),
+            };
+            let resolve_h = |l: css::CssLength| match l {
+                css::CssLength::Pct(v) => v * pad_h / 100.0,
+                other => other.resolve(12.0),
+            };
+            let rw = w.map(resolve_w);
+            let rh = h.map(resolve_h);
+            match (rw, rh) {
+                (Some(w), Some(h)) => (w, h),
+                (Some(w), None) => (w, intr_h * (w / intr_w)),
+                (None, Some(h)) => (intr_w * (h / intr_h), h),
+                (None, None) => (intr_w, intr_h),
+            }
+        }
+    };
+    if tile_w <= 0.0 || tile_h <= 0.0 {
+        return;
+    }
+
+    // Resolve position. Per CSS 2.1 §14.2.1 a percentage value `p` places
+    // the point `p` of the image at the point `p` of the padding box —
+    // i.e. the tile's origin-x is `(pad_w - tile_w) * p`.
+    let pos_x = match bg.position.x {
+        css::CssLength::Pct(p) => (pad_w - tile_w) * p / 100.0,
+        other => other.resolve(12.0),
+    };
+    let pos_y_from_top = match bg.position.y {
+        css::CssLength::Pct(p) => (pad_h - tile_h) * p / 100.0,
+        other => other.resolve(12.0),
+    };
+    // Convert CSS-top-anchored y to PDF-bottom-anchored y for the tile's
+    // lower-left corner.
+    let origin_x = pad_x + pos_x;
+    let origin_y_bottom = pad_y_bottom + pad_h - pos_y_from_top - tile_h;
+
+    // Tile counts per repeat mode.
+    let (repeat_x, repeat_y) = match bg.repeat {
+        css::BackgroundRepeat::Repeat => (true, true),
+        css::BackgroundRepeat::NoRepeat => (false, false),
+        css::BackgroundRepeat::RepeatX => (true, false),
+        css::BackgroundRepeat::RepeatY => (false, true),
+    };
+
+    page.operations.push(PdfOp::SaveState);
+    page.operations.push(PdfOp::Rectangle {
+        x: pad_x,
+        y: pad_y_bottom,
+        width: pad_w,
+        height: pad_h,
+    });
+    page.operations.push(PdfOp::ClipNonzero);
+
+    if !page.images_used.contains(&bg.index) {
+        page.images_used.push(bg.index);
+    }
+
+    // Compute how many tiles to emit on each axis, and the starting offset.
+    let (x_start, x_count) = if repeat_x {
+        // Find the leftmost x ≤ pad_x by stepping origin_x backward by
+        // tile_w, then count forward until off the right edge.
+        let steps_back = ((origin_x - pad_x) / tile_w).ceil().max(0.0);
+        let start = origin_x - steps_back * tile_w;
+        let count = (((pad_x + pad_w) - start) / tile_w).ceil() as i32;
+        (start, count.max(0))
+    } else {
+        (origin_x, 1)
+    };
+    let (y_start, y_count) = if repeat_y {
+        let tile_top_bottom = origin_y_bottom;
+        let steps_back = ((tile_top_bottom - pad_y_bottom) / tile_h).ceil().max(0.0);
+        let start = tile_top_bottom - steps_back * tile_h;
+        let count = (((pad_y_bottom + pad_h) - start) / tile_h).ceil() as i32;
+        (start, count.max(0))
+    } else {
+        (origin_y_bottom, 1)
+    };
+
+    for iy in 0..y_count {
+        for ix in 0..x_count {
+            let tx = x_start + ix as f32 * tile_w;
+            let ty = y_start + iy as f32 * tile_h;
+            page.operations.push(PdfOp::DrawImage {
+                index: bg.index,
+                x: tx,
+                y: ty,
+                width: tile_w,
+                height: tile_h,
+            });
+        }
+    }
+
+    page.operations.push(PdfOp::RestoreState);
 }
 
 fn new_page(doc: &mut PdfDocument, width: f32, height: f32) -> Arc<Mutex<PageContent>> {
@@ -1611,6 +1756,21 @@ impl LayoutInner {
                 box_height,
             );
             page.operations.push(PdfOp::Stroke);
+        }
+
+        // CSS 2.1 §14.2.1: paint `background-image` tiles over the
+        // padding box. Clipped to the padding box via its own save/clip/
+        // restore bracket so tiles never leak out of the block even when
+        // `overflow: visible`, and so later content (text, borders of
+        // siblings) is unaffected by the clip.
+        if let Some(bg_img) = &style.background_image {
+            let pad_x = box_x + style.border_width;
+            let pad_y_bottom = cursor_y - box_height + style.border_width;
+            let pad_w = (box_width - 2.0 * style.border_width).max(0.0);
+            let pad_h = (box_height - 2.0 * style.border_width).max(0.0);
+            if pad_w > 0.0 && pad_h > 0.0 {
+                emit_background_image_tiles(&mut page, bg_img, pad_x, pad_y_bottom, pad_w, pad_h);
+            }
         }
 
         // CSS 2.1 §11.1: `overflow: hidden` (and scroll/auto in a paged

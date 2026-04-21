@@ -819,28 +819,28 @@ title = "Backgrounds and borders"
   title = "background-image"
   section = "3.3"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "bb3-bg-repeat"
   title = "background-repeat"
   section = "3.5"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "bb3-bg-size"
   title = "background-size"
   section = "3.9"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "bb3-bg-position"
   title = "background-position"
   section = "3.6"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
 # =============================================================================
 # CSS Color Level 3/4

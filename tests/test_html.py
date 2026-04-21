@@ -4491,6 +4491,139 @@ with describe("position: relative"):
         expect(content_stream(data)).to_contain(b"A")
 
 
+with describe("background-image"):
+    # spec: CSS 2.1 §14.2.1; behaviors: bb3-bg-image, bb3-bg-repeat,
+    # bb3-bg-size, bb3-bg-position
+
+    @test
+    def background_image_url_emits_xobject():
+        """`background-image: url(...)` loads the PNG and emits an Image
+        XObject plus a `Do` op referencing it."""
+        png = _make_png(2, 2, bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            doc = HtmlDocument(
+                string=(
+                    f"<div style='background-image: url({path}); "
+                    f"width: 30pt; height: 30pt;'>Block</div>"
+                )
+            )
+            data = doc.to_bytes()
+            content = content_stream(data)
+            expect(data).to_contain(b"/XObject")
+            expect(data).to_contain(b"/Subtype /Image")
+            expect(content).to_contain(b"/Im0 Do")
+            expect(content).to_contain(b"Block")
+        finally:
+            Path(path).unlink()
+
+    @test
+    def background_repeat_no_repeat_paints_once():
+        """With `background-repeat: no-repeat` the Image XObject is
+        painted exactly once regardless of box size."""
+        png = _make_png(1, 1, bytes([0, 0, 0]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            doc = HtmlDocument(
+                string=(
+                    f"<div style='background-image: url({path}); "
+                    f"background-repeat: no-repeat; "
+                    f"width: 100pt; height: 100pt;'>X</div>"
+                )
+            )
+            data = doc.to_bytes()
+            content = content_stream(data)
+            # Count `Do` operator invocations within the block's clip.
+            expect(content.count(b"/Im0 Do")).to_equal(1)
+        finally:
+            Path(path).unlink()
+
+    @test
+    def background_repeat_tiles_multiple_times():
+        """With the default `repeat`, a small tile is drawn multiple times
+        to cover a larger padding box."""
+        png = _make_png(1, 1, bytes([0, 0, 0]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            # Intrinsic 1px = 0.75pt tile. In a 30ptx30pt box we expect
+            # 40x40 = 1600 tiles.
+            doc = HtmlDocument(
+                string=(
+                    f"<div style='background-image: url({path}); "
+                    f"width: 30pt; height: 30pt;'>X</div>"
+                )
+            )
+            data = doc.to_bytes()
+            content = content_stream(data)
+            expect(content.count(b"/Im0 Do")).to_be_greater_than(100)
+        finally:
+            Path(path).unlink()
+
+    @test
+    def background_size_cover_fills_box():
+        """`background-size: cover` scales the tile to fully cover the
+        padding box. A single 2x2 tile in a 60ptx30pt box with cover+
+        no-repeat paints one tile at least 60pt wide (inspected via the
+        image transform matrix in the DrawImage op)."""
+        png = _make_png(2, 2, bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            doc = HtmlDocument(
+                string=(
+                    f"<div style='background-image: url({path}); "
+                    f"background-size: cover; "
+                    f"background-repeat: no-repeat; "
+                    f"width: 60pt; height: 30pt;'>X</div>"
+                )
+            )
+            data = doc.to_bytes()
+            content = content_stream(data)
+            # Exactly one tile.
+            expect(content.count(b"/Im0 Do")).to_equal(1)
+            # The PDF cm matrix for the tile is emitted as `w 0 0 h x y cm`
+            # where `w` is the tile width. Cover should produce w≥60.
+            expect(content).to_contain(b"60 0 0 60")
+        finally:
+            Path(path).unlink()
+
+    @test
+    def background_image_over_background_color_both_rendered():
+        """A block with both `background-color` and `background-image`
+        emits the color fill first, then the image — colour is underneath."""
+        png = _make_png(1, 1, bytes([0, 0, 0]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = f.name
+        try:
+            doc = HtmlDocument(
+                string=(
+                    f"<div style='background-color: red; "
+                    f"background-image: url({path}); "
+                    f"background-repeat: no-repeat; "
+                    f"width: 30pt; height: 30pt;'>X</div>"
+                )
+            )
+            data = doc.to_bytes()
+            content = content_stream(data)
+            # `f` (fill) for the color must appear before the first `Do`
+            # for the image.
+            fill_idx = content.find(b"\nf\n")
+            do_idx = content.find(b"/Im0 Do")
+            expect(fill_idx).to_be_greater_than(-1)
+            expect(do_idx).to_be_greater_than(-1)
+            expect(fill_idx).to_be_less_than(do_idx)
+        finally:
+            Path(path).unlink()
+
+
 with describe("float and clear"):
 
     @test
