@@ -1304,6 +1304,57 @@ with describe("HtmlDocument - pre element"):
         expect(data).to_contain(b"Normal paragraph")
 
 
+with describe("HtmlDocument - white-space"):
+    # spec: CSS 2.1 §16.6; behaviors: text-white-space
+    @test
+    def white_space_pre_preserves_spaces_like_pre_tag():
+        """`white-space: pre` on a <p> preserves internal runs of spaces."""
+        html = '<p style="white-space: pre">a  b  c</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"a  b  c")
+
+    @test
+    def white_space_pre_preserves_newlines():
+        """`white-space: pre` renders `\\n` as a line break."""
+        html = '<p style="white-space: pre">line1\nline2</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"line1")
+        expect(data).to_contain(b"line2")
+
+    @test
+    def white_space_nowrap_keeps_long_text_on_one_line():
+        """`white-space: nowrap` bypasses wrapping for text wider than the column."""
+        words = " ".join([f"word{i}" for i in range(40)])
+        normal = HtmlDocument(string=f"<p>{words}</p>").to_bytes()
+        nowrap = HtmlDocument(
+            string=f'<p style="white-space: nowrap">{words}</p>'
+        ).to_bytes()
+        # Both contain the text; nowrap's stream should have fewer text-show ops
+        # than the wrapped version (one line vs many). We approximate this by
+        # counting the number of `Td` operators that start a new line.
+        expect(normal.count(b" Td")).to_be_greater_than(nowrap.count(b" Td"))
+
+    @test
+    def white_space_normal_collapses_whitespace():
+        """`white-space: normal` collapses runs of internal whitespace."""
+        html = '<p style="white-space: normal">a   b   c</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # Collapsed form is "a b c"; the tripled-space form must NOT appear.
+        assert b"a   b   c" not in data
+        expect(data).to_contain(b"a b c")
+
+    @test
+    def white_space_inherits_to_children():
+        """`white-space` inherits from a parent container to inline children."""
+        html = '<div style="white-space: pre">outer  <span>inner  text</span></div>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"outer  ")
+
+
 with describe("HtmlDocument - style blocks"):
     # spec: CSS 2.1 §5.3, §14.1; behaviors: sel-type, color-property
     @test
@@ -1484,6 +1535,72 @@ with describe("HtmlDocument - style blocks"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         expect(data).to_contain(b"1 1 0 rg")
+
+
+with describe("@media and @import"):
+    # spec: CSS 2.1 §7.2; behaviors: at-media
+    @test
+    def media_print_rules_apply():
+        """Rules inside `@media print { ... }` apply in the PDF output."""
+        html = "<style>@media print { p { color: red } }</style><p>Hello</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def media_screen_only_rules_skipped():
+        """Rules scoped to `@media screen` do NOT apply in the PDF."""
+        html = "<style>@media screen { p { color: red } }</style><p>Hello</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        assert b"1 0 0 rg" not in data
+
+    @test
+    def media_all_rules_apply():
+        """`@media all` applies regardless of output medium."""
+        html = "<style>@media all { p { color: red } }</style><p>Hello</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def media_not_screen_applies_to_print():
+        """`@media not screen` matches print."""
+        html = "<style>@media not screen { p { color: red } }</style><p>Hello</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def media_comma_list_matches_if_any_clause_matches():
+        """Comma-separated `@media screen, print` applies to print."""
+        html = "<style>@media screen, print { p { color: red } }</style><p>Hello</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
+
+    # spec: CSS 2.1 §6.3; behaviors: at-import
+    @test
+    def import_statement_does_not_break_parser():
+        """`@import url(...)` at the top of a sheet is ignored, not fatal."""
+        html = '<style>@import url("other.css"); p { color: red }</style><p>Hello</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # The rule that followed @import should still apply.
+        expect(data).to_contain(b"1 0 0 rg")
+
+    @test
+    def multiple_imports_tolerated():
+        """Two stacked `@import` statements are skipped without error."""
+        html = (
+            "<style>"
+            '@import "a.css"; @import url(b.css); '
+            "p { color: red }"
+            "</style><p>Hello</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(data).to_contain(b"1 0 0 rg")
 
 
 with describe("body CSS inheritance"):

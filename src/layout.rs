@@ -253,7 +253,7 @@ pub struct Paragraph {
     pub style: BlockStyle,
     pub marker: Option<TextRun>,
     pub is_hr: bool,
-    pub preserve_whitespace: bool,
+    pub white_space: css::WhiteSpace,
     /// Source tag name (e.g. "h1", "p"). Only set by `html_render` for
     /// tags that need to participate in document-level features like the
     /// heading outline. `None` means "doesn't matter" (list items, etc.).
@@ -436,12 +436,28 @@ struct SpacingOpts {
 fn wrap_runs_impl(
     runs: &[TextRun],
     max_width: f32,
-    preserve_whitespace: bool,
+    ws: css::WhiteSpace,
     spacing: SpacingOpts,
 ) -> Result<Vec<WrappedLine>, String> {
-    if preserve_whitespace {
-        return wrap_runs_preformatted(runs, spacing);
+    if ws.preserves_whitespace() {
+        // Pre / PreWrap: explicit newlines split lines. PreWrap additionally
+        // wraps overly-long lines at word boundaries; Pre lets them overflow.
+        let wrap_limit = if ws.allows_wrap() {
+            max_width
+        } else {
+            f32::INFINITY
+        };
+        return wrap_runs_preformatted(runs, spacing, wrap_limit);
     }
+
+    // Collapse-whitespace path: Normal, Nowrap, and PreLine (V1 treats
+    // PreLine as Normal — newlines collapse). Nowrap disables wrapping by
+    // giving the greedy algorithm an effectively infinite line budget.
+    let effective_max = if ws.allows_wrap() {
+        max_width
+    } else {
+        f32::INFINITY
+    };
 
     // Phase 1: flatten runs into styled words. Inline-block runs are
     // treated as a single unbreakable atom regardless of their text
@@ -510,7 +526,7 @@ fn wrap_runs_impl(
             // The joining space is itself a glyph, so one letter-spacing
             // advances after it as well as word-spacing.
             let space_width = base_space + spacing.letter_spacing + spacing.word_spacing;
-            if current_width + space_width + word_width <= max_width {
+            if current_width + space_width + word_width <= effective_max {
                 current_width += space_width + word_width;
                 current.push(word);
             } else {
@@ -617,10 +633,15 @@ fn wrap_runs_impl(
     Ok(result)
 }
 
-/// Wrap preformatted text: preserve whitespace, split on newlines only.
+/// Wrap preformatted text: preserve whitespace, split on newlines.
+///
+/// When `wrap_limit` is finite (PreWrap), lines that exceed the limit are
+/// additionally soft-wrapped at the last space that still fits. The
+/// leading whitespace on each hard-newline segment is preserved.
 fn wrap_runs_preformatted(
     runs: &[TextRun],
     spacing: SpacingOpts,
+    wrap_limit: f32,
 ) -> Result<Vec<WrappedLine>, String> {
     let mut full_text = String::new();
     let mut font_name = String::new();
@@ -640,15 +661,17 @@ fn wrap_runs_preformatted(
         baseline_shift = run.baseline_shift;
     }
 
-    let mut result: Vec<WrappedLine> = Vec::new();
-    for line in full_text.split('\n') {
-        let base = font_metrics::measure_str(line, &font_name, font_size)
+    let measure = |s: &str| -> Result<f32, String> {
+        let base = font_metrics::measure_str(s, &font_name, font_size)
             .ok_or_else(|| format!("unknown font: {font_name}"))?;
-        let width = base
-            + spacing.letter_spacing * line.chars().count() as f32
-            + spacing.word_spacing * line.matches(' ').count() as f32;
-        let segment = LineSegment {
-            text: line.to_string(),
+        Ok(base
+            + spacing.letter_spacing * s.chars().count() as f32
+            + spacing.word_spacing * s.matches(' ').count() as f32)
+    };
+
+    let emit = |text: String, width: f32| WrappedLine {
+        segments: vec![LineSegment {
+            text,
             font_name: font_name.clone(),
             font_size,
             color,
@@ -660,12 +683,53 @@ fn wrap_runs_preformatted(
             inline_block_bg: None,
             inline_block_border: None,
             inline_block_padding_x: 0.0,
-        };
-        result.push(WrappedLine {
-            segments: vec![segment],
-            total_width: width,
-            max_font_size: font_size,
-        });
+        }],
+        total_width: width,
+        max_font_size: font_size,
+    };
+
+    let mut result: Vec<WrappedLine> = Vec::new();
+    for line in full_text.split('\n') {
+        let width = measure(line)?;
+        if !wrap_limit.is_finite() || width <= wrap_limit || line.is_empty() {
+            result.push(emit(line.to_string(), width));
+            continue;
+        }
+
+        // PreWrap soft-wrap: walk the line, breaking at whitespace where
+        // possible. We keep whitespace characters attached to the segment
+        // they follow so the preserved indentation survives.
+        let mut remainder = line;
+        while !remainder.is_empty() {
+            let total_w = measure(remainder)?;
+            if total_w <= wrap_limit {
+                result.push(emit(remainder.to_string(), total_w));
+                break;
+            }
+            let mut break_idx: Option<usize> = None;
+            let mut cursor = 0usize;
+            for (idx, ch) in remainder.char_indices() {
+                if ch == ' ' && idx > 0 {
+                    let w = measure(&remainder[..idx])?;
+                    if w <= wrap_limit {
+                        break_idx = Some(idx);
+                    } else {
+                        break;
+                    }
+                }
+                cursor = idx + ch.len_utf8();
+            }
+            let split = break_idx.unwrap_or(cursor);
+            let (head, tail) = remainder.split_at(split);
+            let head_w = measure(head)?;
+            result.push(emit(head.to_string(), head_w));
+            // Skip exactly one space (the break point) if present; otherwise
+            // continue verbatim to avoid losing content when no break exists.
+            remainder = tail.strip_prefix(' ').unwrap_or(tail);
+            if remainder == line {
+                break;
+            }
+        }
     }
 
     Ok(result)
@@ -841,7 +905,7 @@ impl LayoutInner {
     }
 
     pub fn push_paragraph(&mut self, para: Paragraph) {
-        if !para.preserve_whitespace {
+        if !para.white_space.preserves_whitespace() {
             let has_content = para.runs.iter().any(|r| !r.text.trim().is_empty());
             if !has_content {
                 return;
@@ -879,7 +943,7 @@ impl LayoutInner {
             style: BlockStyle::default(),
             marker: None,
             is_hr: true,
-            preserve_whitespace: false,
+            white_space: css::WhiteSpace::Normal,
             tag: None,
             anchor_id: None,
         }));
@@ -1346,7 +1410,7 @@ impl LayoutInner {
         };
         let wrap_width = (text_area_width - text_indent - inside_indent).max(0.0);
         let wrapped_lines =
-            wrap_runs_impl(&anon.runs, wrap_width, anon.preserve_whitespace, spacing)?;
+            wrap_runs_impl(&anon.runs, wrap_width, anon.white_space, spacing)?;
 
         let max_font_size = wrapped_lines
             .iter()
@@ -2071,7 +2135,8 @@ impl LayoutInner {
                     letter_spacing: cell.style.letter_spacing,
                     word_spacing: cell.style.word_spacing,
                 };
-                let wrapped = wrap_runs_impl(&cell.runs, text_w, false, cell_spacing)?;
+                let wrapped =
+                    wrap_runs_impl(&cell.runs, text_w, css::WhiteSpace::Normal, cell_spacing)?;
                 let max_fs = wrapped
                     .iter()
                     .map(|l| l.max_font_size)
@@ -2481,7 +2546,7 @@ impl Layout {
             },
             marker: None,
             is_hr: false,
-            preserve_whitespace: false,
+            white_space: css::WhiteSpace::Normal,
             tag: None,
             anchor_id: None,
         }));
@@ -2524,7 +2589,7 @@ impl Layout {
             },
             marker,
             is_hr: false,
-            preserve_whitespace: false,
+            white_space: css::WhiteSpace::Normal,
             tag: None,
             anchor_id: None,
         });

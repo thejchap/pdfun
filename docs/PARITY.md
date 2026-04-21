@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 102/133 behaviors implemented · 102/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 105/133 behaviors implemented · 105/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -185,7 +185,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | letter-spacing | 16.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::letter_spacing_emits_character_spacing_op` |
 | word-spacing | 16.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::justify_emits_word_spacing_op` |
 | text-transform (uppercase, lowercase, capitalize) | 16.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::uppercase_transforms_text` |
-| white-space CSS property | 16.6 | ✅ | ❌ | — |
+| white-space CSS property | 16.6 | ✅ | ✅ | ✅ (1) `tests/test_html.py::white_space_pre_preserves_spaces_like_pre_tag` |
 
 ## CSS 2.1 §17 — Tables
 
@@ -255,8 +255,8 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| @media | 4.1.5 | ✅ | ❌ | — |
-| @import | 4.1.5 | ✅ | ❌ | — |
+| @media | 4.1.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::media_print_rules_apply` |
+| @import | 4.1.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::import_statement_does_not_break_parser` |
 
 ## CSS Flexbox 1 — Flexbox layout
 

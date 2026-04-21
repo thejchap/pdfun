@@ -188,6 +188,39 @@ pub enum TextTransform {
     Capitalize,
 }
 
+/// CSS `white-space` property. Controls whitespace collapsing and line
+/// wrapping for inline content.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum WhiteSpace {
+    /// Default: collapse runs of whitespace, wrap at word boundaries.
+    #[default]
+    Normal,
+    /// Preserve all whitespace and newlines; no wrapping (`<pre>` default).
+    Pre,
+    /// Collapse whitespace, no wrapping — emit one long line.
+    Nowrap,
+    /// Preserve whitespace and newlines; wrap at word boundaries.
+    PreWrap,
+    /// Collapse runs of whitespace but preserve newlines; wrap at word
+    /// boundaries. V1 treats this as `Normal` (newlines collapsed).
+    PreLine,
+}
+
+impl WhiteSpace {
+    /// Whether runs of whitespace should be preserved verbatim.
+    pub fn preserves_whitespace(self) -> bool {
+        matches!(self, WhiteSpace::Pre | WhiteSpace::PreWrap)
+    }
+
+    /// Whether line wrapping is allowed at word boundaries.
+    pub fn allows_wrap(self) -> bool {
+        matches!(
+            self,
+            WhiteSpace::Normal | WhiteSpace::PreWrap | WhiteSpace::PreLine
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ListStyleType {
     None,
@@ -389,6 +422,7 @@ macro_rules! with_style_fields {
             (word_spacing,      copy,  yes),
             (box_sizing,        copy,  no),
             (text_transform,    copy,  yes),
+            (white_space,       copy,  yes),
             (text_indent,       copy,  yes),
             (border_radius,     copy,  no),
             (opacity,           copy,  no),
@@ -502,6 +536,7 @@ pub struct ComputedStyle {
     pub word_spacing: Option<CssLength>,
     pub box_sizing: Option<BoxSizing>,
     pub text_transform: Option<TextTransform>,
+    pub white_space: Option<WhiteSpace>,
     pub text_indent: Option<CssLength>,
     pub border_radius: Option<[CssLength; 4]>,
     pub opacity: Option<f32>,
@@ -1198,6 +1233,19 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     _ => return Err(location.new_custom_error(())),
                 };
                 self.style.text_transform = Some(tt);
+            }
+            "white-space" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let ws = match ident.to_ascii_lowercase().as_str() {
+                    "normal" => WhiteSpace::Normal,
+                    "pre" => WhiteSpace::Pre,
+                    "nowrap" => WhiteSpace::Nowrap,
+                    "pre-wrap" => WhiteSpace::PreWrap,
+                    "pre-line" => WhiteSpace::PreLine,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.white_space = Some(ws);
             }
             "list-style-type" => {
                 let location = input.current_source_location();
@@ -2202,11 +2250,77 @@ fn find_matching_close(src: &str) -> Option<usize> {
     None
 }
 
+/// Does an `@media` prelude apply in a print context?
+///
+/// Returns true unless the query explicitly targets a non-print medium
+/// (e.g. `screen` only). Complex media features like `(max-width: 600px)`
+/// are not evaluated — we err toward inclusion, matching browser
+/// behavior when a query type is unrecognized.
+fn media_query_applies_to_print(prelude: &str) -> bool {
+    let trimmed = prelude.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Split on `,` to get the comma-separated list of queries. A rule
+    // applies if ANY clause matches print.
+    for clause in trimmed.split(',') {
+        let c = clause.trim().to_ascii_lowercase();
+        // Strip a leading `not`/`only` keyword. `not` inverts the match.
+        let (negate, rest) = if let Some(r) = c.strip_prefix("not ") {
+            (true, r.trim_start())
+        } else if let Some(r) = c.strip_prefix("only ") {
+            (false, r.trim_start())
+        } else {
+            (false, c.as_str())
+        };
+        // First token is the media type (or `(feature: value)` expression).
+        let first_token = rest.split_ascii_whitespace().next().unwrap_or("");
+        let ty_matches = match first_token {
+            "print" | "all" | "" => true,
+            t if t.starts_with('(') => true, // feature query w/o explicit type
+            _ => false,
+        };
+        if ty_matches != negate {
+            return true;
+        }
+    }
+    false
+}
+
+/// Consume leading whitespace and any `@import ...;` / `@charset ...;`
+/// statements from the front of `remaining`. Returns the rest of the
+/// stylesheet after those have been skipped.
+///
+/// `@import` is recognized and discarded without fetching the referenced
+/// stylesheet — pdfun has no file-resolver plumbed into the CSS layer
+/// yet, and silently ignoring the directive is preferable to hard-failing
+/// the whole sheet. Consumers that need imports can inline the CSS
+/// themselves.
+fn skip_leading_at_statements(mut remaining: &str) -> &str {
+    loop {
+        let trimmed = remaining.trim_start();
+        if trimmed.starts_with("@import") || trimmed.starts_with("@charset") {
+            if let Some(end) = trimmed.find(';') {
+                remaining = &trimmed[end + 1..];
+                continue;
+            }
+            // Malformed (no semicolon): drop the remainder.
+            return "";
+        }
+        return trimmed;
+    }
+}
+
 /// Parse stylesheet by manually scanning for `{ }` blocks.
 fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut PageStyle) {
     let mut remaining = css;
 
     while !remaining.trim().is_empty() {
+        remaining = skip_leading_at_statements(remaining);
+        if remaining.is_empty() {
+            break;
+        }
+
         // Find the next `{`
         let Some(brace_open) = remaining.find('{') else {
             break;
@@ -2224,6 +2338,32 @@ fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut
             let body = &after_open[..brace_close];
             remaining = &after_open[brace_close + 1..];
             parse_page_body(body, page_style);
+            continue;
+        }
+
+        // Handle @media <query> { ...rules... }. The body holds full
+        // CSS rules that should be applied only when the query matches
+        // the print output context. We recurse into `parse_stylesheet_manual`
+        // for matching blocks so nested at-rules (e.g. another @media)
+        // behave consistently.
+        if let Some(prelude) = selector_text.strip_prefix("@media") {
+            let Some(brace_close) = find_matching_close(after_open) else {
+                break;
+            };
+            let body = &after_open[..brace_close];
+            remaining = &after_open[brace_close + 1..];
+            if media_query_applies_to_print(prelude) {
+                parse_stylesheet_manual(body, rules, page_style);
+            }
+            continue;
+        }
+
+        // Other unknown at-rules: skip the block entirely.
+        if selector_text.starts_with('@') {
+            let Some(brace_close) = find_matching_close(after_open) else {
+                break;
+            };
+            remaining = &after_open[brace_close + 1..];
             continue;
         }
 
