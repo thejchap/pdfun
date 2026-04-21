@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 106/133 behaviors implemented · 105/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 107/133 behaviors implemented · 106/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -145,7 +145,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| overflow (visible, hidden, scroll, auto) | 11.1.1 | ✅ | ❌ | — |
+| overflow (visible, hidden, scroll, auto) | 11.1.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::overflow_hidden_emits_clip_op` |
 
 ## CSS 2.1 §13 — Paged media
 
