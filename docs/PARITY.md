@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 105/133 behaviors implemented · 105/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 106/133 behaviors implemented · 105/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -282,7 +282,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Table of contents | — | ✅ | ✅ | ✅ (7) `tests/test_html.py::toc_true_prepends_heading_list`, `tests/test_html.py::toc_emits_internal_link_per_heading`, `tests/test_html.py::toc_isolates_itself_on_dedicated_page`, `tests/test_html.py::toc_string_sets_custom_title`, `tests/test_html.py::toc_preserves_existing_heading_ids`, `tests/test_html.py::toc_false_is_a_no_op`, `tests/test_html.py::toc_on_empty_document_no_op` |
 | Custom font embedding (CIDFont + ToUnicode) | — | ✅ | ✅ | ✅ (1) `tests/test_pdfun.py::register_font_returns_name` |
 | Font subsetting (only used glyphs embedded) | — | ✅ | ✅ | ✅ (1) `tests/test_pdfun.py::embedded_font_has_widths` |
-| Stream compression | — | ✅ | ❌ | — |
+| Stream compression | — | ✅ | ✅ | ⚠️ untested |
 | PDF encryption | — | 🟡 | ❌ | — |
 | PDF/A compliance | — | ✅ | ❌ | — |
 

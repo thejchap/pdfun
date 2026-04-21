@@ -1,6 +1,7 @@
 from tryke import describe, expect, test
 
 from pdfun import Layout, PdfDocument, TextRun
+from tests._pdf_helpers import content_stream
 
 with describe("TextRun"):
 
@@ -33,7 +34,8 @@ with describe("Layout.add_paragraph - single run"):
         layout.add_paragraph(runs=[TextRun("Hello world")])
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello world")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello world")
 
     @test
     def single_run_bold():
@@ -43,8 +45,9 @@ with describe("Layout.add_paragraph - single run"):
         layout.add_paragraph(runs=[TextRun("Bold text", font_name="Helvetica-Bold")])
         layout.finish()
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Helvetica-Bold")
-        expect(data).to_contain(b"Bold text")
+        expect(content).to_contain(b"Bold text")
 
 
 with describe("Layout.add_paragraph - multiple runs"):
@@ -62,8 +65,9 @@ with describe("Layout.add_paragraph - multiple runs"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello")
-        expect(data).to_contain(b"world")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello")
+        expect(content).to_contain(b"world")
 
     @test
     def bold_and_normal_fonts_in_pdf():
@@ -94,7 +98,8 @@ with describe("Layout.add_paragraph - multiple runs"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data.count(b"Td")).to_be_greater_than(1)
+        content = content_stream(data)
+        expect(content.count(b"Td")).to_be_greater_than(1)
 
     @test
     def different_font_sizes():
@@ -109,8 +114,9 @@ with describe("Layout.add_paragraph - multiple runs"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"24 Tf")
-        expect(data).to_contain(b"10 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"24 Tf")
+        expect(content).to_contain(b"10 Tf")
 
 
 with describe("Layout.add_paragraph - block styling"):
@@ -124,8 +130,9 @@ with describe("Layout.add_paragraph - block styling"):
         layout.add_paragraph(runs=[TextRun("Second")])
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"First")
-        expect(data).to_contain(b"Second")
+        content = content_stream(data)
+        expect(content).to_contain(b"First")
+        expect(content).to_contain(b"Second")
 
     @test
     def paragraph_with_background():
@@ -138,7 +145,8 @@ with describe("Layout.add_paragraph - block styling"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"0.9 0.9 0.9 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0.9 0.9 0.9 rg")
 
     @test
     def paragraph_with_padding():
@@ -151,7 +159,8 @@ with describe("Layout.add_paragraph - block styling"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Padded")
+        content = content_stream(data)
+        expect(content).to_contain(b"Padded")
 
     @test
     def paragraph_with_text_align_center():
@@ -164,7 +173,8 @@ with describe("Layout.add_paragraph - block styling"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Centered")
+        content = content_stream(data)
+        expect(content).to_contain(b"Centered")
 
 
 with describe("Layout.add_paragraph - backward compat"):
@@ -177,7 +187,8 @@ with describe("Layout.add_paragraph - backward compat"):
         layout.add_text("Hello world", font="Helvetica", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello world")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello world")
 
     @test
     def mixed_add_text_and_add_paragraph():
@@ -188,8 +199,9 @@ with describe("Layout.add_paragraph - backward compat"):
         layout.add_paragraph(runs=[TextRun("Second", font_name="Helvetica-Bold")])
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"First")
-        expect(data).to_contain(b"Second")
+        content = content_stream(data)
+        expect(content).to_contain(b"First")
+        expect(content).to_contain(b"Second")
 
 
 with describe("Layout.add_paragraph - colors"):
@@ -205,7 +217,8 @@ with describe("Layout.add_paragraph - colors"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def different_runs_different_colors():
@@ -220,8 +233,9 @@ with describe("Layout.add_paragraph - colors"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"0 0 1 rg")
 
 
 with describe("Layout.add_paragraph - marker"):
@@ -239,7 +253,8 @@ with describe("Layout.add_paragraph - marker"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Item text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Item text")
 
     @test
     def marker_font_registered():

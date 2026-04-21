@@ -4,6 +4,7 @@ from pathlib import Path
 from tryke import describe, expect, test
 
 from pdfun import FontDatabase, FontId, Layout, PdfDocument, text_width, wrap_text
+from tests._pdf_helpers import content_stream
 
 with describe("PdfDocument API"):
 
@@ -89,7 +90,8 @@ with describe("Page API"):
         page.set_font("Helvetica", 12.0)
         page.draw_text(72.0, 720.0, "Hello")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello")
 
 
 with describe("PDF output format"):
@@ -136,8 +138,25 @@ with describe("PDF output format"):
         page.set_font("Helvetica", 12.0)
         page.draw_text(72.0, 720.0, "test")
         data = doc.to_bytes()
-        expect(data).to_contain(b"BT")
-        expect(data).to_contain(b"ET")
+        content = content_stream(data)
+        expect(content).to_contain(b"BT")
+        expect(content).to_contain(b"ET")
+
+    @test
+    def page_content_streams_are_flate_compressed():
+        """Rendered pages carry /FlateDecode on their content streams."""
+        doc = PdfDocument()
+        page = doc.add_page()
+        page.set_font("Helvetica", 12.0)
+        page.draw_text(72.0, 720.0, "compressed body text")
+        data = doc.to_bytes()
+        # Content streams round-trip through the decompressor without error
+        # and contain the drawn operators.
+        content = content_stream(data)
+        expect(content).to_contain(b"BT")
+        expect(content).to_contain(b"ET")
+        # At least one /FlateDecode must be present (content stream).
+        expect(data).to_contain(b"/FlateDecode")
 
 
 with describe("Text - built-in fonts"):
@@ -150,8 +169,9 @@ with describe("Text - built-in fonts"):
         page.set_font("Helvetica", 12.0)
         page.draw_text(72.0, 720.0, "Hello")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Helvetica")
-        expect(data).to_contain(b"(Hello) Tj")
+        expect(content).to_contain(b"(Hello) Tj")
 
     @test
     def text_with_times_roman():
@@ -181,7 +201,8 @@ with describe("Text - built-in fonts"):
         page.set_font("Helvetica", 12.0)
         page.draw_text(100.0, 500.0, "Positioned")
         data = doc.to_bytes()
-        expect(data).to_contain(b"100 500 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"100 500 Td")
 
     @test
     def text_multiple_lines():
@@ -193,8 +214,9 @@ with describe("Text - built-in fonts"):
         page.set_font("Helvetica", 12.0)
         page.draw_text(72.0, 700.0, "Line two")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Line one")
-        expect(data).to_contain(b"Line two")
+        content = content_stream(data)
+        expect(content).to_contain(b"Line one")
+        expect(content).to_contain(b"Line two")
 
     @test
     def text_empty_string():
@@ -214,9 +236,10 @@ with describe("Text - built-in fonts"):
         page.set_font("Helvetica", 12.0)
         page.draw_text(72.0, 720.0, "test (parens) and \\backslash")
         data = doc.to_bytes()
-        expect(data).to_contain(b"\\(")
-        expect(data).to_contain(b"\\)")
-        expect(data).to_contain(b"\\\\")
+        content = content_stream(data)
+        expect(content).to_contain(b"\\(")
+        expect(content).to_contain(b"\\)")
+        expect(content).to_contain(b"\\\\")
 
     @test
     def text_font_size():
@@ -226,7 +249,8 @@ with describe("Text - built-in fonts"):
         page.set_font("Helvetica", 24.0)
         page.draw_text(72.0, 720.0, "Big")
         data = doc.to_bytes()
-        expect(data).to_contain(b"24 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"24 Tf")
 
 
 with describe("Text measurement"):
@@ -487,8 +511,9 @@ with describe("Graphics - rectangles"):
         page = doc.add_page()
         page.draw_rect(100.0, 200.0, 50.0, 30.0)
         data = doc.to_bytes()
-        expect(data).to_contain(b"100 200 50 30 re")
-        expect(data).to_contain(b"\nf\n")
+        content = content_stream(data)
+        expect(content).to_contain(b"100 200 50 30 re")
+        expect(content).to_contain(b"\nf\n")
 
     @test
     def stroke_rect():
@@ -497,8 +522,9 @@ with describe("Graphics - rectangles"):
         page = doc.add_page()
         page.stroke_rect(10.0, 20.0, 100.0, 50.0)
         data = doc.to_bytes()
-        expect(data).to_contain(b"10 20 100 50 re")
-        expect(data).to_contain(b"\nS\n")
+        content = content_stream(data)
+        expect(content).to_contain(b"10 20 100 50 re")
+        expect(content).to_contain(b"\nS\n")
 
     @test
     def fill_and_stroke_rect():
@@ -507,8 +533,9 @@ with describe("Graphics - rectangles"):
         page = doc.add_page()
         page.fill_and_stroke_rect(10.0, 20.0, 100.0, 50.0)
         data = doc.to_bytes()
-        expect(data).to_contain(b"10 20 100 50 re")
-        expect(data).to_contain(b"\nB\n")
+        content = content_stream(data)
+        expect(content).to_contain(b"10 20 100 50 re")
+        expect(content).to_contain(b"\nB\n")
 
 
 with describe("Graphics - colors"):
@@ -521,7 +548,8 @@ with describe("Graphics - colors"):
         page.set_fill_color(1.0, 0.0, 0.0)
         page.draw_rect(10.0, 10.0, 50.0, 50.0)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def set_stroke_color_rgb():
@@ -531,7 +559,8 @@ with describe("Graphics - colors"):
         page.set_stroke_color(0.0, 0.0, 1.0)
         page.stroke_rect(10.0, 10.0, 50.0, 50.0)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 RG")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 RG")
 
     @test
     def fill_color_then_text():
@@ -542,8 +571,9 @@ with describe("Graphics - colors"):
         page.set_font("Helvetica", 12.0)
         page.draw_text(72.0, 720.0, "Red text")
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
-        expect(data).to_contain(b"Red text")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"Red text")
 
 
 with describe("Graphics - lines"):
@@ -555,9 +585,10 @@ with describe("Graphics - lines"):
         page = doc.add_page()
         page.draw_line(0.0, 0.0, 100.0, 100.0)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 m")
-        expect(data).to_contain(b"100 100 l")
-        expect(data).to_contain(b"\nS\n")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 m")
+        expect(content).to_contain(b"100 100 l")
+        expect(content).to_contain(b"\nS\n")
 
     @test
     def set_line_width():
@@ -567,7 +598,8 @@ with describe("Graphics - lines"):
         page.set_line_width(2.5)
         page.draw_line(0.0, 0.0, 100.0, 0.0)
         data = doc.to_bytes()
-        expect(data).to_contain(b"2.5 w")
+        content = content_stream(data)
+        expect(content).to_contain(b"2.5 w")
 
     @test
     def line_width_negative_raises():
@@ -589,8 +621,9 @@ with describe("Graphics - state management"):
         page.draw_rect(10.0, 10.0, 50.0, 50.0)
         page.restore_state()
         data = doc.to_bytes()
-        expect(data).to_contain(b"q\n")
-        expect(data).to_contain(b"Q\n")
+        content = content_stream(data)
+        expect(content).to_contain(b"q\n")
+        expect(content).to_contain(b"Q\n")
 
     @test
     def state_isolates_color():
@@ -619,8 +652,9 @@ with describe("Graphics - combined text and shapes"):
         page.set_font("Helvetica", 12.0)
         page.draw_text(72.0, 715.0, "Hello on background")
         data = doc.to_bytes()
-        expect(data).to_contain(b"re")
-        expect(data).to_contain(b"Hello on background")
+        content = content_stream(data)
+        expect(content).to_contain(b"re")
+        expect(content).to_contain(b"Hello on background")
 
 
 with describe("Text wrapping"):
@@ -685,7 +719,8 @@ with describe("Layout"):
         layout.add_text("Hello")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello")
 
     @test
     def layout_respects_margins():
@@ -695,7 +730,8 @@ with describe("Layout"):
         layout.add_text("Margin test", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"72 708 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"72 708 Td")
 
     @test
     def layout_wraps_long_text():
@@ -706,7 +742,8 @@ with describe("Layout"):
         layout.add_text(long_text)
         layout.finish()
         data = doc.to_bytes()
-        expect(data.count(b"Td")).to_be_greater_than(1)
+        content = content_stream(data)
+        expect(content.count(b"Td")).to_be_greater_than(1)
 
     @test
     def layout_multiple_paragraphs():
@@ -717,8 +754,9 @@ with describe("Layout"):
         layout.add_text("Second paragraph")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"First paragraph")
-        expect(data).to_contain(b"Second paragraph")
+        content = content_stream(data)
+        expect(content).to_contain(b"First paragraph")
+        expect(content).to_contain(b"Second paragraph")
 
     @test
     def layout_page_break():
@@ -739,7 +777,8 @@ with describe("Layout"):
         layout.add_text("Custom margins", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"100 680 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"100 680 Td")
 
     @test
     def layout_custom_line_height():
@@ -750,7 +789,8 @@ with describe("Layout"):
         layout.add_text(long_text, line_height=20.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"72 688 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"72 688 Td")
 
     @test
     def layout_spacing_after():
@@ -761,8 +801,9 @@ with describe("Layout"):
         layout.add_text("Para two", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Para one")
-        expect(data).to_contain(b"Para two")
+        content = content_stream(data)
+        expect(content).to_contain(b"Para one")
+        expect(content).to_contain(b"Para two")
 
     @test
     def layout_different_fonts():
@@ -773,8 +814,9 @@ with describe("Layout"):
         layout.add_text("Times text", font="Times-Roman", font_size=14.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Helvetica text")
-        expect(data).to_contain(b"Times text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Helvetica text")
+        expect(content).to_contain(b"Times text")
 
     @test
     def layout_empty_text():
@@ -785,7 +827,8 @@ with describe("Layout"):
         layout.add_text("Actual text")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Actual text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Actual text")
 
     @test
     def layout_finish_no_blocks():
@@ -807,8 +850,9 @@ with describe("Layout - text color"):
         layout.add_text("Red text", color=(1.0, 0.0, 0.0))
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
-        expect(data).to_contain(b"Red text")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"Red text")
 
     @test
     def layout_text_color_isolation():
@@ -819,8 +863,9 @@ with describe("Layout - text color"):
         layout.add_text("Default")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"q\n")
-        expect(data).to_contain(b"Q\n")
+        content = content_stream(data)
+        expect(content).to_contain(b"q\n")
+        expect(content).to_contain(b"Q\n")
 
 
 with describe("Layout - background color"):
@@ -833,9 +878,10 @@ with describe("Layout - background color"):
         layout.add_text("Highlighted", background_color=(1.0, 1.0, 0.0))
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 1 0 rg")
-        expect(data).to_contain(b"re")
-        expect(data).to_contain(b"Highlighted")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 1 0 rg")
+        expect(content).to_contain(b"re")
+        expect(content).to_contain(b"Highlighted")
 
     @test
     def layout_background_behind_text():
@@ -845,8 +891,9 @@ with describe("Layout - background color"):
         layout.add_text("Over bg", background_color=(0.9, 0.9, 0.9))
         layout.finish()
         data = doc.to_bytes()
-        fill_pos = data.find(b"\nf\n")
-        bt_pos = data.find(b"BT")
+        content = content_stream(data)
+        fill_pos = content.find(b"\nf\n")
+        bt_pos = content.find(b"BT")
         expect(fill_pos).to_be_less_than(bt_pos)
 
     @test
@@ -857,7 +904,8 @@ with describe("Layout - background color"):
         layout.add_text("Plain text")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).not_.to_contain(b" re\n")
+        content = content_stream(data)
+        expect(content).not_.to_contain(b" re\n")
 
 
 with describe("Layout - padding"):
@@ -875,7 +923,8 @@ with describe("Layout - padding"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"82 698 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"82 698 Td")
 
     @test
     def layout_padding_four_sides():
@@ -890,7 +939,8 @@ with describe("Layout - padding"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"102 688 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"102 688 Td")
 
     @test
     def layout_padding_narrows_wrap_width():
@@ -901,6 +951,7 @@ with describe("Layout - padding"):
         layout.add_text(long_text, padding=50.0)
         layout.finish()
         data = doc.to_bytes()
+        content = content_stream(data)
         no_pad_doc = PdfDocument()
         no_pad_layout = Layout(
             no_pad_doc,
@@ -911,7 +962,10 @@ with describe("Layout - padding"):
         no_pad_layout.add_text(long_text)
         no_pad_layout.finish()
         no_pad_data = no_pad_doc.to_bytes()
-        expect(data.count(b"Td")).to_be_greater_than(no_pad_data.count(b"Td"))
+        no_pad_data_content = content_stream(no_pad_data)
+        expect(content.count(b"Td")).to_be_greater_than(
+            no_pad_data_content.count(b"Td")
+        )
 
     @test
     def layout_padding_zero_default():
@@ -921,7 +975,8 @@ with describe("Layout - padding"):
         layout.add_text("No padding", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"72 708 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"72 708 Td")
 
 
 with describe("Layout - borders"):
@@ -934,9 +989,10 @@ with describe("Layout - borders"):
         layout.add_text("Bordered", border_width=1.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 w")
-        expect(data).to_contain(b"re")
-        expect(data).to_contain(b"\nS\n")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 w")
+        expect(content).to_contain(b"re")
+        expect(content).to_contain(b"\nS\n")
 
     @test
     def layout_border_color():
@@ -946,8 +1002,9 @@ with describe("Layout - borders"):
         layout.add_text("Red border", border_width=2.0, border_color=(1.0, 0.0, 0.0))
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 RG")
-        expect(data).to_contain(b"2 w")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 RG")
+        expect(content).to_contain(b"2 w")
 
     @test
     def layout_border_default_color_black():
@@ -957,7 +1014,8 @@ with describe("Layout - borders"):
         layout.add_text("Default border", border_width=1.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 0 RG")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 0 RG")
 
     @test
     def layout_no_border_by_default():
@@ -967,7 +1025,8 @@ with describe("Layout - borders"):
         layout.add_text("No border")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).not_.to_contain(b"RG")
+        content = content_stream(data)
+        expect(content).not_.to_contain(b"RG")
 
     @test
     def layout_border_with_background():
@@ -982,8 +1041,9 @@ with describe("Layout - borders"):
         )
         layout.finish()
         data = doc.to_bytes()
-        fill_pos = data.find(b"\nf\n")
-        stroke_pos = data.find(b"\nS\n")
+        content = content_stream(data)
+        fill_pos = content.find(b"\nf\n")
+        stroke_pos = content.find(b"\nS\n")
         expect(fill_pos).to_be_less_than(stroke_pos)
 
 
@@ -997,7 +1057,8 @@ with describe("Layout - text alignment"):
         layout.add_text("Left aligned", font_size=12.0)
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"72 708 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"72 708 Td")
 
     @test
     def layout_align_center():
@@ -1007,7 +1068,8 @@ with describe("Layout - text alignment"):
         layout.add_text("Hi", font="Courier", font_size=10.0, text_align="center")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"300 710 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"300 710 Td")
 
     @test
     def layout_align_right():
@@ -1017,7 +1079,8 @@ with describe("Layout - text alignment"):
         layout.add_text("Hi", font="Courier", font_size=10.0, text_align="right")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"528 710 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"528 710 Td")
 
     @test
     def layout_align_invalid_raises():
@@ -1040,7 +1103,8 @@ with describe("Layout - text alignment"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"300 710 Td")
+        content = content_stream(data)
+        expect(content).to_contain(b"300 710 Td")
 
 
 with describe("Layout - combined styling"):
@@ -1062,10 +1126,11 @@ with describe("Layout - combined styling"):
         )
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Styled block")
-        expect(data).to_contain(b"q\n")
-        expect(data).to_contain(b"Q\n")
-        expect(data).to_contain(b"re")
+        content = content_stream(data)
+        expect(content).to_contain(b"Styled block")
+        expect(content).to_contain(b"q\n")
+        expect(content).to_contain(b"Q\n")
+        expect(content).to_contain(b"re")
         expect(data[:5]).to_equal(b"%PDF-")
 
     @test
@@ -1098,8 +1163,9 @@ with describe("Layout - combined styling"):
         layout.add_text("Plain")
         layout.finish()
         data = doc.to_bytes()
-        expect(data).to_contain(b"Styled")
-        expect(data).to_contain(b"Plain")
+        content = content_stream(data)
+        expect(content).to_contain(b"Styled")
+        expect(content).to_contain(b"Plain")
 
 
 with describe("Document metadata"):

@@ -1118,7 +1118,7 @@ title = "PDF output features"
   id = "pdf-compression"
   title = "Stream compression"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "pdf-encryption"

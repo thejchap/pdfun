@@ -1045,7 +1045,9 @@ impl PdfDocument {
                 }
             }
 
-            pdf.stream(content_id, &content_bytes);
+            let compressed_content = image::compress(&content_bytes);
+            pdf.stream(content_id, &compressed_content)
+                .filter(Filter::FlateDecode);
         }
 
         // Emit the outline tree if we collected any headings.
