@@ -635,7 +635,7 @@ fn wrap_runs_impl(
 
 /// Wrap preformatted text: preserve whitespace, split on newlines.
 ///
-/// When `wrap_limit` is finite (PreWrap), lines that exceed the limit are
+/// When `wrap_limit` is finite (`PreWrap`), lines that exceed the limit are
 /// additionally soft-wrapped at the last space that still fits. The
 /// leading whitespace on each hard-newline segment is preserved.
 fn wrap_runs_preformatted(
@@ -1409,8 +1409,7 @@ impl LayoutInner {
             0.0
         };
         let wrap_width = (text_area_width - text_indent - inside_indent).max(0.0);
-        let wrapped_lines =
-            wrap_runs_impl(&anon.runs, wrap_width, anon.white_space, spacing)?;
+        let wrapped_lines = wrap_runs_impl(&anon.runs, wrap_width, anon.white_space, spacing)?;
 
         let max_font_size = wrapped_lines
             .iter()
@@ -1448,10 +1447,7 @@ impl LayoutInner {
         // `orphans` and `widows` are carried on the style and trivially
         // honored: since we never split a paragraph across pages, all lines
         // always stay together on one page.
-        let avoid_split = !matches!(
-            style.page_break_inside,
-            Some(css::PageBreakInside::Auto)
-        );
+        let avoid_split = !matches!(style.page_break_inside, Some(css::PageBreakInside::Auto));
         if avoid_split
             && state.cursor_y - block_total_height < self.margin_bottom
             && state.cursor_y < state.content_top

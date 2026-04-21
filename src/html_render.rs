@@ -696,72 +696,72 @@ impl<'a> HtmlRenderer<'a> {
                 // resolve `::before` / `::after` pseudo-element styles; those
                 // only produce a visible injection when their `content`
                 // property is a non-empty string.
-                let (merged_style, pseudo_before, pseudo_after) = if self.stylesheet.rules.is_empty()
-                {
-                    (inline_style, None, None)
-                } else {
-                    let (classes, id, attrs_owned) = extract_element_attrs(handle);
-                    let ancestors_owned = build_ancestors(handle);
-                    let ancestors: Vec<css::AncestorInfo<'_>> = ancestors_owned
-                        .iter()
-                        .map(|(t, c, i, a)| {
-                            (
-                                t.as_str(),
-                                c.iter().map(String::as_str).collect(),
-                                i.as_deref(),
-                                a.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect(),
-                            )
-                        })
-                        .collect();
-                    let preceding: Vec<SiblingRecord<'_>> = preceding_siblings
-                        .iter()
-                        .map(|s| SiblingRecord {
-                            tag: s.tag.as_str(),
-                            classes: s.classes.iter().map(String::as_str).collect(),
-                            id: s.id.as_deref(),
-                            attributes: s
-                                .attributes
+                let (merged_style, pseudo_before, pseudo_after) =
+                    if self.stylesheet.rules.is_empty() {
+                        (inline_style, None, None)
+                    } else {
+                        let (classes, id, attrs_owned) = extract_element_attrs(handle);
+                        let ancestors_owned = build_ancestors(handle);
+                        let ancestors: Vec<css::AncestorInfo<'_>> = ancestors_owned
+                            .iter()
+                            .map(|(t, c, i, a)| {
+                                (
+                                    t.as_str(),
+                                    c.iter().map(String::as_str).collect(),
+                                    i.as_deref(),
+                                    a.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect(),
+                                )
+                            })
+                            .collect();
+                        let preceding: Vec<SiblingRecord<'_>> = preceding_siblings
+                            .iter()
+                            .map(|s| SiblingRecord {
+                                tag: s.tag.as_str(),
+                                classes: s.classes.iter().map(String::as_str).collect(),
+                                id: s.id.as_deref(),
+                                attributes: s
+                                    .attributes
+                                    .iter()
+                                    .map(|(n, v)| (n.as_str(), v.as_str()))
+                                    .collect(),
+                                sibling_index: s.sibling_index,
+                                sibling_count: s.sibling_count,
+                            })
+                            .collect();
+                        let elem = ElementInfo {
+                            tag,
+                            classes: classes.iter().map(String::as_str).collect(),
+                            id: id.as_deref(),
+                            attributes: attrs_owned
                                 .iter()
                                 .map(|(n, v)| (n.as_str(), v.as_str()))
                                 .collect(),
-                            sibling_index: s.sibling_index,
-                            sibling_count: s.sibling_count,
-                        })
-                        .collect();
-                    let elem = ElementInfo {
-                        tag,
-                        classes: classes.iter().map(String::as_str).collect(),
-                        id: id.as_deref(),
-                        attributes: attrs_owned
-                            .iter()
-                            .map(|(n, v)| (n.as_str(), v.as_str()))
-                            .collect(),
-                        ancestors,
-                        sibling_index,
-                        sibling_count,
-                        preceding_siblings: preceding,
+                            ancestors,
+                            sibling_index,
+                            sibling_count,
+                            preceding_siblings: preceding,
+                        };
+                        let mut matched = css::match_rules(&elem, &self.stylesheet);
+                        if let Some(inline) = &inline_style {
+                            css::merge_style(&mut matched, inline);
+                        }
+                        let resolve_pseudo = |pseudo: css::PseudoElement| {
+                            let style = css::match_pseudo_rules(&elem, &self.stylesheet, pseudo);
+                            style
+                                .pseudo_content
+                                .clone()
+                                .filter(|s| !s.is_empty())
+                                .map(|text| (text, style))
+                        };
+                        let before = resolve_pseudo(css::PseudoElement::Before);
+                        let after = resolve_pseudo(css::PseudoElement::After);
+                        let style_opt = if matched.has_any_property() {
+                            Some(matched)
+                        } else {
+                            inline_style
+                        };
+                        (style_opt, before, after)
                     };
-                    let mut matched = css::match_rules(&elem, &self.stylesheet);
-                    if let Some(inline) = &inline_style {
-                        css::merge_style(&mut matched, inline);
-                    }
-                    let resolve_pseudo = |pseudo: css::PseudoElement| {
-                        let style = css::match_pseudo_rules(&elem, &self.stylesheet, pseudo);
-                        style
-                            .pseudo_content
-                            .clone()
-                            .filter(|s| !s.is_empty())
-                            .map(|text| (text, style))
-                    };
-                    let before = resolve_pseudo(css::PseudoElement::Before);
-                    let after = resolve_pseudo(css::PseudoElement::After);
-                    let style_opt = if matched.has_any_property() {
-                        Some(matched)
-                    } else {
-                        inline_style
-                    };
-                    (style_opt, before, after)
-                };
 
                 // Skip elements with display: none (and their entire subtree)
                 if let Some(ref style) = merged_style
