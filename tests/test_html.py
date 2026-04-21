@@ -4420,6 +4420,77 @@ with describe("overflow"):
         expect(content.find(b"\nQ\n", w_idx)).to_be_greater_than(-1)
 
 
+with describe("position: relative"):
+    # spec: CSS 2.1 §9.4.3; behaviors: vfm-position-relative, vfm-offsets
+
+    @test
+    def relative_top_shifts_box_down():
+        """`position: relative; top: 10pt` emits a negative-y translate
+        (PDF y grows upward, CSS top grows downward)."""
+        html = "<div style='position: relative; top: 10pt;'>Shifted down</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 0 -10 cm")
+        expect(content).to_contain(b"Shifted down")
+
+    @test
+    def relative_left_shifts_box_right():
+        """`position: relative; left: 15pt` emits a positive-x translate."""
+        html = "<div style='position: relative; left: 15pt;'>Shifted right</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 15 0 cm")
+
+    @test
+    def relative_top_and_left_combined():
+        """Both `top` and `left` contribute to a single translation matrix."""
+        html = "<div style='position: relative; top: 5pt; left: 20pt;'>x</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 20 -5 cm")
+
+    @test
+    def relative_does_not_disturb_siblings():
+        """A relatively-positioned box does not shift the sibling that
+        follows it — the translate is wrapped in q…Q."""
+        html = (
+            "<div style='position: relative; top: 100pt;'>First</div><div>Second</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        cm_idx = content.find(b"1 0 0 1 0 -100 cm")
+        expect(cm_idx).to_be_greater_than(-1)
+        # There is a Q (restore) between the translate and the sibling's
+        # text — the translate's effect is scoped to the first box only.
+        second_idx = content.find(b"Second", cm_idx)
+        expect(second_idx).to_be_greater_than(-1)
+        expect(content.rfind(b"\nQ\n", cm_idx, second_idx)).to_be_greater_than(-1)
+
+    @test
+    def relative_without_offsets_emits_no_translate():
+        """`position: relative` with no `top`/`left`/etc. is a no-op — no
+        translate op is emitted."""
+        html = "<div style='position: relative;'>Plain</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(b"1 0 0 1 0 0 cm" in content).to_equal(False)
+
+    @test
+    def absolute_falls_back_to_static_and_does_not_crash():
+        """`position: absolute` is not yet implemented — it currently falls
+        back to static layout without crashing."""
+        html = "<div style='position: absolute; top: 10px; left: 20px;'>A</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # The document renders successfully and contains the text.
+        expect(content_stream(data)).to_contain(b"A")
+
+
 with describe("float and clear"):
 
     @test

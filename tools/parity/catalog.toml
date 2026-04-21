@@ -509,7 +509,7 @@ title = "Visual formatting model"
   title = "position: relative"
   section = "9.3.1"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "vfm-position-absolute"
@@ -530,7 +530,7 @@ title = "Visual formatting model"
   title = "top / right / bottom / left offsets"
   section = "9.3.2"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
 # =============================================================================
 # CSS 2.1 §10 — Visual formatting model details
