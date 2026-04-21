@@ -1354,7 +1354,8 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 // Only the literal-string form of `content`. `none` and the
                 // CSS-wide idents like `normal`/`inherit` are treated as
                 // "no content" (which is also the default).
-                if let Ok(s) = input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string()))
+                if let Ok(s) =
+                    input.try_parse(|i| i.expect_string().map(|s| s.as_ref().to_string()))
                 {
                     self.style.pseudo_content = Some(s);
                 } else if let Ok(ident) =
@@ -1991,13 +1992,8 @@ fn parse_pseudo_class(name: &str, arg: Option<&str>) -> Option<(PseudoClass, (u1
             let mut cls_c = 0u16;
             let mut typ_c = 0u16;
             let mut discard: Option<PseudoElement> = None;
-            let compound = parse_compound_from_text(
-                arg,
-                &mut id_c,
-                &mut cls_c,
-                &mut typ_c,
-                &mut discard,
-            );
+            let compound =
+                parse_compound_from_text(arg, &mut id_c, &mut cls_c, &mut typ_c, &mut discard);
             if compound.parts.is_empty() {
                 return None;
             }
