@@ -1,3 +1,5 @@
+use std::sync::{Mutex, OnceLock};
+
 use cssparser::{
     AtRuleParser, CowRcStr, DeclarationParser, ParseError, Parser, ParserInput,
     QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, Token,
@@ -22,6 +24,48 @@ pub enum CssLength {
     /// reference value for the property (content width for horizontal
     /// margins/paddings/widths, content height for heights, etc.).
     Pct(f32),
+    /// CSS Values 3 `calc()` expression. The `u32` indexes into a
+    /// process-wide intern arena (`CALC_ARENA`). This keeps `CssLength`
+    /// `Copy`, so the 56 existing `resolve_ctx` call sites and the
+    /// `ComputedStyle` merge macro don't need to change. Arena entries
+    /// are never freed — bounded by stylesheet size per process.
+    Calc(u32),
+}
+
+/// Nodes of a parsed `calc()` expression tree. Stored in `CALC_ARENA`
+/// and referenced by index from `CssLength::Calc`. Operands are
+/// themselves `CssLength` values (including nested `Calc` indices), so
+/// the tree can recurse arbitrarily.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CalcOp {
+    /// `a + b` where both are lengths (or nested calcs).
+    Add(CssLength, CssLength),
+    /// `a - b` where both are lengths (or nested calcs).
+    Sub(CssLength, CssLength),
+    /// `a * n` where `a` is a length and `n` is a unitless number.
+    Mul(CssLength, f32),
+    /// `a / n` where `a` is a length and `n` is a unitless number.
+    Div(CssLength, f32),
+}
+
+static CALC_ARENA: OnceLock<Mutex<Vec<CalcOp>>> = OnceLock::new();
+
+fn calc_arena() -> &'static Mutex<Vec<CalcOp>> {
+    CALC_ARENA.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Intern a calc node and return its arena index.
+fn intern_calc(op: CalcOp) -> u32 {
+    let mut arena = calc_arena().lock().unwrap();
+    let idx = u32::try_from(arena.len()).expect("calc arena overflow");
+    arena.push(op);
+    idx
+}
+
+/// Look up a calc node by index. Clones out so the mutex is released
+/// before recursive resolution.
+fn get_calc(idx: u32) -> CalcOp {
+    calc_arena().lock().unwrap()[idx as usize]
 }
 
 /// Per-element context needed to resolve relative CSS lengths to points.
@@ -87,6 +131,12 @@ impl CssLength {
             CssLength::Vw(v) => v * ctx.vw / 100.0,
             CssLength::Vh(v) => v * ctx.vh / 100.0,
             CssLength::Pct(v) => v * ctx.container / 100.0,
+            CssLength::Calc(idx) => match get_calc(idx) {
+                CalcOp::Add(a, b) => a.resolve_ctx(ctx) + b.resolve_ctx(ctx),
+                CalcOp::Sub(a, b) => a.resolve_ctx(ctx) - b.resolve_ctx(ctx),
+                CalcOp::Mul(a, n) => a.resolve_ctx(ctx) * n,
+                CalcOp::Div(a, n) => a.resolve_ctx(ctx) / n,
+            },
         }
     }
 }
@@ -708,7 +758,125 @@ fn parse_css_length<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseEr
         }
         Token::Number { value, .. } if *value == 0.0 => Ok(CssLength::Px(0.0)),
         Token::Percentage { unit_value, .. } => Ok(CssLength::Pct(*unit_value * 100.0)),
+        Token::Function(name) if name.eq_ignore_ascii_case("calc") => {
+            input.parse_nested_block(|i| parse_calc_expression(i))
+        }
         _ => Err(location.new_custom_error(())),
+    }
+}
+
+/// Parse the body of a `calc()` expression (the tokens inside the
+/// parentheses). Handles `+ - * /` with standard precedence and
+/// parenthesised sub-expressions. Returns a `CssLength::Calc(idx)` into
+/// the process-wide arena unless the result collapses to a literal —
+/// we keep the literal when possible to avoid arena churn on trivial
+/// expressions like `calc(10px)`.
+fn parse_calc_expression<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseError<'i, ()>> {
+    parse_calc_sum(input)
+}
+
+/// `sum := product ( ('+' | '-') product )*`
+///
+/// CSS Values §10: `+` and `-` in a calc require whitespace on both
+/// sides. cssparser tokenises `a - b` differently from `a-b` — the
+/// latter becomes a single identifier/number — so we just consume the
+/// operator token. `a-b` simply won't parse as a subtraction.
+fn parse_calc_sum<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseError<'i, ()>> {
+    let mut lhs = parse_calc_product(input)?;
+    loop {
+        let state = input.state();
+        let op = match input.next() {
+            Ok(Token::Delim('+')) => '+',
+            Ok(Token::Delim('-')) => '-',
+            _ => {
+                input.reset(&state);
+                break;
+            }
+        };
+        let rhs = parse_calc_product(input)?;
+        let node = match op {
+            '+' => CalcOp::Add(lhs, rhs),
+            '-' => CalcOp::Sub(lhs, rhs),
+            _ => unreachable!(),
+        };
+        lhs = CssLength::Calc(intern_calc(node));
+    }
+    Ok(lhs)
+}
+
+/// `product := unit ( ('*' | '/') unit )*`
+///
+/// `*` and `/` have stricter operand rules per CSS Values §10: at least
+/// one side must be a unitless number. We accept `<length> * <number>`,
+/// `<number> * <length>`, and `<length> / <number>`. Division by a
+/// length is not permitted and returns a parse error.
+fn parse_calc_product<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseError<'i, ()>> {
+    let location = input.current_source_location();
+    let mut lhs = parse_calc_atom(input)?;
+    loop {
+        let state = input.state();
+        let op = match input.next() {
+            Ok(Token::Delim('*')) => '*',
+            Ok(Token::Delim('/')) => '/',
+            _ => {
+                input.reset(&state);
+                break;
+            }
+        };
+        // Peek for a numeric operand. If the next token is a number we
+        // parse it directly; otherwise the operand must be a unit and
+        // `lhs` must already be a number — in that case we swap.
+        let after_op = input.state();
+        let rhs_number = if let Ok(Token::Number { value, .. }) = input.next() {
+            Some(*value)
+        } else {
+            input.reset(&after_op);
+            None
+        };
+        let (operand, factor) = if let Some(n) = rhs_number {
+            (lhs, n)
+        } else if let CssLength::Pt(n_guess) = lhs {
+            // `lhs` was produced from a bare number (see parse_calc_atom
+            // which encodes bare numbers as Pt — only valid here as a
+            // multiplier, not as a real length).
+            let rhs = parse_calc_atom(input)?;
+            (rhs, n_guess)
+        } else {
+            return Err(location.new_custom_error(()));
+        };
+        let node = match op {
+            '*' => CalcOp::Mul(operand, factor),
+            '/' if op == '/' => {
+                if rhs_number.is_none() {
+                    return Err(location.new_custom_error(()));
+                }
+                CalcOp::Div(operand, factor)
+            }
+            _ => unreachable!(),
+        };
+        lhs = CssLength::Calc(intern_calc(node));
+    }
+    Ok(lhs)
+}
+
+/// `atom := length | percentage | number | '(' sum ')' | 'calc' '(' sum ')'`
+///
+/// Bare numbers are temporarily encoded as `CssLength::Pt(n)` so they
+/// can flow through the same pipeline as lengths; `parse_calc_product`
+/// recognises them by shape when combining with `*` or `/`.
+fn parse_calc_atom<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseError<'i, ()>> {
+    let location = input.current_source_location();
+    let state = input.state();
+    match input.next()?.clone() {
+        Token::ParenthesisBlock => input.parse_nested_block(|i| parse_calc_sum(i)),
+        Token::Function(name) if name.eq_ignore_ascii_case("calc") => {
+            input.parse_nested_block(|i| parse_calc_sum(i))
+        }
+        Token::Number { value, .. } => Ok(CssLength::Pt(value)),
+        _ => {
+            input.reset(&state);
+            parse_css_length(input).map_err(|_| location.new_custom_error(()))
+        }
     }
 }
 
@@ -727,6 +895,11 @@ fn parse_non_negative_length<'i>(
         | CssLength::Vw(v)
         | CssLength::Vh(v)
         | CssLength::Pct(v) => v,
+        // `calc()` can produce any sign at resolve time — accept and let
+        // downstream layout clamp if needed. This matches CSS Values 3:
+        // negative `calc()` results for border-width are resolved to 0 at
+        // used-value time, not rejected at parse time.
+        CssLength::Calc(_) => 0.0,
     };
     if value < 0.0 {
         return Err(location.new_custom_error(()));
