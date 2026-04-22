@@ -38,3 +38,6 @@ target
 /build/
 /dist/
 .maturin/
+
+# Zensical docs build output
+/site/

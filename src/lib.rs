@@ -1,3 +1,9 @@
+//! pdfun — pure-Rust HTML/CSS to PDF renderer, exposed to Python via `PyO3`.
+//!
+//! Pipeline: HTML (`scraper`) → CSS cascade (`css`) → box tree (`box_tree`) →
+//! layout (`layout`) → paint ops → PDF bytes (`pdf-writer`). See the
+//! architecture page at <https://thejchap.github.io/pdfun/architecture/>.
+
 #![allow(clippy::cast_possible_truncation)] // f64->f32 at PyO3 boundary is intentional
 #![allow(clippy::cast_precision_loss)] // u32/usize->f32 precision loss is acceptable
 #![allow(clippy::cast_possible_wrap)] // usize->i32 for page count is fine
