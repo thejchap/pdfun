@@ -4285,6 +4285,68 @@ with describe("display: inline-block"):
         expect(content).to_contain(b"Badge")
 
 
+with describe("calc()"):
+    # spec: CSS Values 3 §10; behaviors: values3-calc
+
+    def _width_div(width_expr: str) -> bytes:
+        style = f"width: {width_expr}; background-color: red"
+        html = f'<div style="{style}">x</div>'
+        return content_stream(HtmlDocument(string=html).to_bytes())
+
+    @test
+    def calc_subtraction_in_width():
+        """`width: calc(100px - 20px)` resolves to `80px`."""
+        expect(_width_div("calc(100px - 20px)")).to_equal(_width_div("80px"))
+
+    @test
+    def calc_addition_in_width():
+        """`width: calc(50px + 30px)` resolves to `80px`."""
+        expect(_width_div("calc(50px + 30px)")).to_equal(_width_div("80px"))
+
+    @test
+    def calc_multiplication_length_times_number():
+        """`calc(10px * 2)` resolves to `20px`."""
+        expect(_width_div("calc(10px * 2)")).to_equal(_width_div("20px"))
+
+    @test
+    def calc_multiplication_number_times_length():
+        """`calc(2 * 10px)` also resolves to `20px` (operand order)."""
+        expect(_width_div("calc(2 * 10px)")).to_equal(_width_div("20px"))
+
+    @test
+    def calc_division_by_number():
+        """`calc(100px / 4)` resolves to `25px`."""
+        expect(_width_div("calc(100px / 4)")).to_equal(_width_div("25px"))
+
+    @test
+    def calc_nested_with_parens():
+        """Parenthesised sub-expression: `calc((100px - 20px) - 10px)` → `70px`."""
+        expect(_width_div("calc((100px - 20px) - 10px)")).to_equal(_width_div("70px"))
+
+    @test
+    def calc_nested_calc_call():
+        """A nested `calc(...)` inside another `calc(...)` resolves correctly."""
+        expect(_width_div("calc(calc(100px - 20px) - 10px)")).to_equal(
+            _width_div("70px")
+        )
+
+    @test
+    def calc_with_mixed_units():
+        """`calc(1em + 4px)` — 1em at the default 12pt font = 12pt, plus
+        4px (= 3pt) = 15pt. `calc(1em + 4px)` equals that literal pt
+        total."""
+        expect(_width_div("calc(1em + 4px)")).to_equal(_width_div("15pt"))
+
+    @test
+    def calc_with_percentage():
+        """`calc(50% + 10px)` resolves against the containing-block width.
+
+        The default page content area is US Letter (612pt) minus 72pt
+        margins on each side = 468pt. So `50% + 10px = 234pt + 7.5pt = 241.5pt`.
+        """
+        expect(_width_div("calc(50% + 10px)")).to_equal(_width_div("241.5pt"))
+
+
 with describe("overflow"):
     # spec: CSS 2.1 §11.1; behaviors: ve-overflow
 

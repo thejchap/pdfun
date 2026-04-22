@@ -983,7 +983,7 @@ title = "Values and units"
   title = "calc() expressions"
   section = "8.1"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
 # =============================================================================
 # CSS Lists and Counters Level 3
