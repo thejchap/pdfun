@@ -103,6 +103,11 @@ pub(crate) enum PdfOp {
     Stroke,
     Fill,
     FillAndStroke,
+    /// `W n`: intersect the current clipping path with the previously-built
+    /// path using the nonzero winding rule, then discard the path (no
+    /// fill or stroke). Used by `overflow: hidden` to clip children to
+    /// the padding box.
+    ClipNonzero,
     SaveState,
     RestoreState,
     SetDashPattern {
@@ -510,6 +515,10 @@ fn write_page_content_stream(
             }
             PdfOp::FillAndStroke => {
                 content.fill_nonzero_and_stroke();
+            }
+            PdfOp::ClipNonzero => {
+                content.clip_nonzero();
+                content.end_path();
             }
             PdfOp::SaveState => {
                 content.save_state();

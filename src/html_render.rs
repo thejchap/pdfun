@@ -1684,6 +1684,9 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(c) = style.clear {
                 block_style.clear = c;
             }
+            if let Some(ov) = style.overflow {
+                block_style.overflow = ov;
+            }
         }
 
         // Inherit letter/word-spacing and text-indent from ancestor if not
