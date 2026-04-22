@@ -2,13 +2,51 @@
 
 ## Install
 
+### Requirements
+
+Python 3.12 or newer. pdfun ships as a compiled Rust extension; wheels are published for Linux (x86_64), macOS (arm64), and Windows (x86_64). No system libraries to install.
+
+### Running without installation
+
+Try the CLI against a file without adding pdfun to your environment:
+
 ```bash
-pip install pdfun
+uvx pdfun render input.html -o output.pdf
 ```
 
-Python 3.12 or newer. pdfun ships as a compiled Rust extension; wheels are published for Linux, macOS, and Windows — no system dependencies to install.
+Or with `pipx`:
 
-For local development:
+```bash
+pipx run pdfun render input.html -o output.pdf
+```
+
+### Adding pdfun to your project (uv)
+
+```bash
+uv add pdfun
+uv run python -c "import pdfun"
+```
+
+Upgrade:
+
+```bash
+uv lock --upgrade-package pdfun
+```
+
+### Adding pdfun to your project (pip)
+
+```bash
+pip install pdfun
+python -c "import pdfun"
+```
+
+Upgrade:
+
+```bash
+pip install --upgrade pdfun
+```
+
+### From source
 
 ```bash
 git clone https://github.com/thejchap/pdfun

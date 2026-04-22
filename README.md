@@ -18,11 +18,19 @@ A pure-Rust HTML/CSS to PDF renderer with Python bindings. An alternative to [We
 
 ## Install
 
+With [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv add pdfun
+```
+
+Or with pip:
+
 ```bash
 pip install pdfun
 ```
 
-Python 3.12+. Wheels are published for Linux, macOS, and Windows — no system libraries to install.
+Python 3.12+. Wheels are published for Linux (x86_64), macOS (arm64), and Windows (x86_64) — no system libraries to install. See [Getting Started](https://thejchap.github.io/pdfun/getting-started/) for `uvx` / `pipx` one-shot usage and upgrade commands.
 
 ## Quick Start
 
