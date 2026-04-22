@@ -6,6 +6,7 @@ from pathlib import Path
 from tryke import describe, expect, test
 
 from pdfun import HtmlDocument
+from tests._pdf_helpers import content_stream
 
 
 def _make_png(width: int, height: int, rgb_bytes: bytes) -> bytes:
@@ -59,7 +60,8 @@ with describe("HtmlDocument - constructor"):
         """Plain text without tags is treated as content."""
         doc = HtmlDocument(string="Just plain text")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Just plain text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Just plain text")
 
 
 with describe("HtmlDocument - headings"):
@@ -69,7 +71,8 @@ with describe("HtmlDocument - headings"):
         """<h1> renders text in PDF."""
         doc = HtmlDocument(string="<h1>Title</h1>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Title")
+        content = content_stream(data)
+        expect(content).to_contain(b"Title")
 
     @test
     def h1_uses_bold_font():
@@ -83,14 +86,16 @@ with describe("HtmlDocument - headings"):
         """<h1> uses 24pt font size."""
         doc = HtmlDocument(string="<h1>Big</h1>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"24 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"24 Tf")
 
     @test
     def h2_uses_18pt():
         """<h2> uses 18pt font size."""
         doc = HtmlDocument(string="<h2>Sub</h2>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"18 Tf")
 
     @test
     def all_heading_levels():
@@ -109,22 +114,25 @@ with describe("HtmlDocument - paragraphs"):
         """<p> renders text."""
         doc = HtmlDocument(string="<p>Paragraph text</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Paragraph text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Paragraph text")
 
     @test
     def paragraph_uses_12pt():
         """<p> uses 12pt Helvetica."""
         doc = HtmlDocument(string="<p>Body</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"12 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"12 Tf")
 
     @test
     def multiple_paragraphs():
         """Multiple <p> elements render sequentially."""
         doc = HtmlDocument(string="<p>First</p><p>Second</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"First")
-        expect(data).to_contain(b"Second")
+        content = content_stream(data)
+        expect(content).to_contain(b"First")
+        expect(content).to_contain(b"Second")
 
     @test
     def paragraph_wraps_long_text():
@@ -132,7 +140,8 @@ with describe("HtmlDocument - paragraphs"):
         long = " ".join(["word"] * 80)
         doc = HtmlDocument(string=f"<p>{long}</p>")
         data = doc.to_bytes()
-        expect(data.count(b"Td")).to_be_greater_than(1)
+        content = content_stream(data)
+        expect(content.count(b"Td")).to_be_greater_than(1)
 
 
 with describe("HtmlDocument - div"):
@@ -142,7 +151,8 @@ with describe("HtmlDocument - div"):
         """<div> renders its text content."""
         doc = HtmlDocument(string="<div>Div content</div>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Div content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Div content")
 
 
 with describe("HtmlDocument - semantic elements"):
@@ -152,49 +162,56 @@ with describe("HtmlDocument - semantic elements"):
         """<article> renders its text content."""
         doc = HtmlDocument(string="<article>Article content</article>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Article content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Article content")
 
     @test
     def section_renders():
         """<section> renders its text content."""
         doc = HtmlDocument(string="<section>Section content</section>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Section content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Section content")
 
     @test
     def nav_renders():
         """<nav> renders its text content."""
         doc = HtmlDocument(string="<nav>Nav content</nav>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Nav content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Nav content")
 
     @test
     def header_renders():
         """<header> renders its text content."""
         doc = HtmlDocument(string="<header>Header content</header>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Header content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Header content")
 
     @test
     def footer_renders():
         """<footer> renders its text content."""
         doc = HtmlDocument(string="<footer>Footer content</footer>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Footer content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Footer content")
 
     @test
     def aside_renders():
         """<aside> renders its text content."""
         doc = HtmlDocument(string="<aside>Aside content</aside>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Aside content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Aside content")
 
     @test
     def main_renders():
         """<main> renders its text content."""
         doc = HtmlDocument(string="<main>Main content</main>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Main content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Main content")
 
     @test
     def semantic_nesting():
@@ -203,7 +220,8 @@ with describe("HtmlDocument - semantic elements"):
             string="<article><section><p>Nested text</p></section></article>"
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Nested text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Nested text")
 
 
 with describe("HtmlDocument - br"):
@@ -213,8 +231,9 @@ with describe("HtmlDocument - br"):
         """<br> creates a line break between text."""
         doc = HtmlDocument(string="<p>Line one<br>Line two</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Line one")
-        expect(data).to_contain(b"Line two")
+        content = content_stream(data)
+        expect(content).to_contain(b"Line one")
+        expect(content).to_contain(b"Line two")
 
 
 with describe("HtmlDocument - inline elements"):
@@ -224,15 +243,17 @@ with describe("HtmlDocument - inline elements"):
         """<b> text content is extracted."""
         doc = HtmlDocument(string="<p><b>Bold</b> text</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Bold")
-        expect(data).to_contain(b"text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Bold")
+        expect(content).to_contain(b"text")
 
     @test
     def nested_inline():
         """Nested inline elements extract all text."""
         doc = HtmlDocument(string="<p><b><em>Nested</em></b></p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Nested")
+        content = content_stream(data)
+        expect(content).to_contain(b"Nested")
 
     # spec: HTML; behaviors: html-span
     @test
@@ -240,7 +261,8 @@ with describe("HtmlDocument - inline elements"):
         """<span> text content is extracted."""
         doc = HtmlDocument(string="<p><span>Span</span> text</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Span text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Span text")
 
 
 with describe("HtmlDocument - inline styling"):
@@ -345,17 +367,19 @@ with describe("HtmlDocument - complex documents"):
         html = "<h1>Title</h1><p>Intro.</p><h2>Section</h2><p>Body.</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Title")
-        expect(data).to_contain(b"Intro.")
-        expect(data).to_contain(b"Section")
-        expect(data).to_contain(b"Body.")
+        content = content_stream(data)
+        expect(content).to_contain(b"Title")
+        expect(content).to_contain(b"Intro.")
+        expect(content).to_contain(b"Section")
+        expect(content).to_contain(b"Body.")
 
     @test
     def whitespace_normalization():
         """Extra whitespace in HTML is collapsed."""
         doc = HtmlDocument(string="<p>  Hello   world  </p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello world")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello world")
 
 
 with describe("HtmlDocument - edge cases"):
@@ -372,15 +396,17 @@ with describe("HtmlDocument - edge cases"):
         """HTML entities like &amp; are decoded."""
         doc = HtmlDocument(string="<p>A &amp; B</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"A & B")
+        content = content_stream(data)
+        expect(content).to_contain(b"A & B")
 
     @test
     def skip_script_content():
         """<script> content is not rendered."""
         doc = HtmlDocument(string="<script>var x = 1;</script><p>Visible</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Visible")
-        expect(data).not_.to_contain(b"var x")
+        content = content_stream(data)
+        expect(content).to_contain(b"Visible")
+        expect(content).not_.to_contain(b"var x")
 
     @test
     def skip_style_content():
@@ -388,8 +414,9 @@ with describe("HtmlDocument - edge cases"):
         html = "<style>body { color: red; }</style><p>Visible</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Visible")
-        expect(data).not_.to_contain(b"color")
+        content = content_stream(data)
+        expect(content).to_contain(b"Visible")
+        expect(content).not_.to_contain(b"color")
 
 
 with describe("HtmlDocument - lists"):
@@ -399,22 +426,25 @@ with describe("HtmlDocument - lists"):
         """<ul><li> renders item text in PDF."""
         doc = HtmlDocument(string="<ul><li>Item one</li></ul>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Item one")
+        content = content_stream(data)
+        expect(content).to_contain(b"Item one")
 
     @test
     def ul_has_bullet_marker():
         """<ul><li> has a disc bullet marker (rendered as ASCII '*')."""
         doc = HtmlDocument(string="<ul><li>Item</li></ul>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"(*)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(*)")
 
     @test
     def ul_multiple_items():
         """Multiple <li> elements render sequentially."""
         doc = HtmlDocument(string="<ul><li>First</li><li>Second</li></ul>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"First")
-        expect(data).to_contain(b"Second")
+        content = content_stream(data)
+        expect(content).to_contain(b"First")
+        expect(content).to_contain(b"Second")
 
     # spec: HTML; behaviors: html-ol
     @test
@@ -423,19 +453,21 @@ with describe("HtmlDocument - lists"):
         html = "<ol><li>Alpha</li><li>Beta</li></ol>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1.")
-        expect(data).to_contain(b"2.")
-        expect(data).to_contain(b"Alpha")
-        expect(data).to_contain(b"Beta")
+        content = content_stream(data)
+        expect(content).to_contain(b"1.")
+        expect(content).to_contain(b"2.")
+        expect(content).to_contain(b"Alpha")
+        expect(content).to_contain(b"Beta")
 
     @test
     def li_with_bold():
         """<li><b>bold</b> text uses bold font."""
         doc = HtmlDocument(string="<ul><li><b>Bold</b> item</li></ul>")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Helvetica-Bold")
-        expect(data).to_contain(b"Bold")
-        expect(data).to_contain(b"item")
+        expect(content).to_contain(b"Bold")
+        expect(content).to_contain(b"item")
 
     @test
     def li_wraps_long_text():
@@ -443,7 +475,8 @@ with describe("HtmlDocument - lists"):
         long = " ".join(["word"] * 80)
         doc = HtmlDocument(string=f"<ul><li>{long}</li></ul>")
         data = doc.to_bytes()
-        expect(data.count(b"Td")).to_be_greater_than(1)
+        content = content_stream(data)
+        expect(content.count(b"Td")).to_be_greater_than(1)
 
     # spec: HTML; behaviors: html-list-nesting
     @test
@@ -452,8 +485,9 @@ with describe("HtmlDocument - lists"):
         html = "<ul><li>Outer<ul><li>Inner</li></ul></li></ul>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Outer")
-        expect(data).to_contain(b"Inner")
+        content = content_stream(data)
+        expect(content).to_contain(b"Outer")
+        expect(content).to_contain(b"Inner")
 
     @test
     def nested_ul_different_markers():
@@ -461,9 +495,10 @@ with describe("HtmlDocument - lists"):
         html = "<ul><li>Outer<ul><li>Inner</li></ul></li></ul>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # depth 0 = disc ('*'), depth 1 = circle ('o')
-        expect(data).to_contain(b"(*)")
-        expect(data).to_contain(b"(o)")
+        expect(content).to_contain(b"(*)")
+        expect(content).to_contain(b"(o)")
 
     @test
     def nested_ol_restarts_numbering():
@@ -474,9 +509,10 @@ with describe("HtmlDocument - lists"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Inner A")
-        expect(data).to_contain(b"Inner B")
-        expect(data).to_contain(b"Second")
+        content = content_stream(data)
+        expect(content).to_contain(b"Inner A")
+        expect(content).to_contain(b"Inner B")
+        expect(content).to_contain(b"Second")
 
     @test
     def mixed_list_nesting():
@@ -484,8 +520,9 @@ with describe("HtmlDocument - lists"):
         html = "<ol><li>Numbered<ul><li>Bulleted</li></ul></li></ol>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Numbered")
-        expect(data).to_contain(b"Bulleted")
+        content = content_stream(data)
+        expect(content).to_contain(b"Numbered")
+        expect(content).to_contain(b"Bulleted")
 
     @test
     def list_between_paragraphs():
@@ -493,9 +530,10 @@ with describe("HtmlDocument - lists"):
         html = "<p>Before</p><ul><li>Item</li></ul><p>After</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Before")
-        expect(data).to_contain(b"Item")
-        expect(data).to_contain(b"After")
+        content = content_stream(data)
+        expect(content).to_contain(b"Before")
+        expect(content).to_contain(b"Item")
+        expect(content).to_contain(b"After")
 
     @test
     def empty_li_no_crash():
@@ -509,7 +547,8 @@ with describe("HtmlDocument - lists"):
         """Bare <li> outside list renders as plain paragraph."""
         doc = HtmlDocument(string="<li>Orphan</li>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Orphan")
+        content = content_stream(data)
+        expect(content).to_contain(b"Orphan")
 
 
 with describe("HtmlDocument - malformed HTML"):
@@ -519,45 +558,51 @@ with describe("HtmlDocument - malformed HTML"):
         """Unclosed <p> does not crash; text is still rendered."""
         doc = HtmlDocument(string="<p>Hello")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello")
 
     @test
     def unclosed_bold():
         """Unclosed <b> does not crash; text is rendered."""
         doc = HtmlDocument(string="<p><b>Bold text")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Bold text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Bold text")
 
     @test
     def extra_closing_tags():
         """Extra closing tags do not crash."""
         doc = HtmlDocument(string="<p>Text</p></p></div>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Text")
 
     @test
     def nested_same_block():
         """<p> inside <p> is auto-closed by html5ever."""
         doc = HtmlDocument(string="<p>First<p>Second")
         data = doc.to_bytes()
-        expect(data).to_contain(b"First")
-        expect(data).to_contain(b"Second")
+        content = content_stream(data)
+        expect(content).to_contain(b"First")
+        expect(content).to_contain(b"Second")
 
     @test
     def misnested_inline():
         """Overlapping inline tags handled gracefully."""
         doc = HtmlDocument(string="<p><b>bold <i>both</b> italic</i></p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"bold")
-        expect(data).to_contain(b"both")
-        expect(data).to_contain(b"italic")
+        content = content_stream(data)
+        expect(content).to_contain(b"bold")
+        expect(content).to_contain(b"both")
+        expect(content).to_contain(b"italic")
 
     @test
     def no_root_element():
         """Content without <html>/<body> still renders."""
         doc = HtmlDocument(string="Just text, no tags at all")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Just text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Just text")
 
     @test
     def completely_empty():
@@ -574,7 +619,8 @@ with describe("HtmlDocument - unknown and void elements"):
         """<custom-tag> content is still rendered."""
         doc = HtmlDocument(string="<custom-tag>Inside</custom-tag>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Inside")
+        content = content_stream(data)
+        expect(content).to_contain(b"Inside")
 
     @test
     def void_elements_no_crash():
@@ -582,16 +628,18 @@ with describe("HtmlDocument - unknown and void elements"):
         html = "<p>Before</p><hr><img><input><p>After</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Before")
-        expect(data).to_contain(b"After")
+        content = content_stream(data)
+        expect(content).to_contain(b"Before")
+        expect(content).to_contain(b"After")
 
     @test
     def self_closing_br():
         """<br/> (self-closing) works the same as <br>."""
         doc = HtmlDocument(string="<p>Line one<br/>Line two</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Line one")
-        expect(data).to_contain(b"Line two")
+        content = content_stream(data)
+        expect(content).to_contain(b"Line one")
+        expect(content).to_contain(b"Line two")
 
     # spec: HTML; behaviors: html-anchor
     @test
@@ -599,8 +647,9 @@ with describe("HtmlDocument - unknown and void elements"):
         """<a> tag text is rendered alongside surrounding text."""
         doc = HtmlDocument(string='<p>Click <a href="url">here</a></p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Click")
-        expect(data).to_contain(b"here")
+        content = content_stream(data)
+        expect(content).to_contain(b"Click")
+        expect(content).to_contain(b"here")
 
 
 with describe("HtmlDocument - whitespace"):
@@ -610,29 +659,33 @@ with describe("HtmlDocument - whitespace"):
         """Leading/trailing whitespace in tags is collapsed."""
         doc = HtmlDocument(string="<p>  Hello  </p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello")
 
     @test
     def newlines_collapsed():
         """Newlines within text are collapsed to spaces."""
         doc = HtmlDocument(string="<p>Hello\nworld</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello world")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello world")
 
     @test
     def tabs_collapsed():
         """Tabs are collapsed to spaces."""
         doc = HtmlDocument(string="<p>Hello\tworld</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello world")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello world")
 
     @test
     def inter_element_whitespace():
         """Whitespace between inline elements is preserved."""
         doc = HtmlDocument(string="<p><b>Bold</b> <i>italic</i></p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Bold")
-        expect(data).to_contain(b"italic")
+        content = content_stream(data)
+        expect(content).to_contain(b"Bold")
+        expect(content).to_contain(b"italic")
 
     @test
     def whitespace_only_paragraph():
@@ -646,7 +699,8 @@ with describe("HtmlDocument - whitespace"):
         """Multiple spaces between words collapse to one."""
         doc = HtmlDocument(string="<p>Hello     world</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello world")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello world")
 
 
 with describe("HtmlDocument - unicode"):
@@ -664,23 +718,26 @@ with describe("HtmlDocument - unicode"):
         """Numeric character reference &#169; is decoded."""
         doc = HtmlDocument(string="<p>&#169; 2024</p>")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(data).to_contain(b"C2A9")
+        expect(content).to_contain(b"C2A9")
 
     @test
     def hex_entity():
         """Hex character reference &#x2603; is decoded."""
         doc = HtmlDocument(string="<p>&#x2603;</p>")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(data).to_contain(b"E29883")
+        expect(content).to_contain(b"E29883")
 
     @test
     def multiple_named_entities():
         """Multiple named entities decode correctly."""
         doc = HtmlDocument(string="<p>&lt;tag&gt; &amp; &quot;quotes&quot;</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b'<tag> & "quotes"')
+        content = content_stream(data)
+        expect(content).to_contain(b'<tag> & "quotes"')
 
 
 with describe("HtmlDocument - nesting"):
@@ -691,7 +748,8 @@ with describe("HtmlDocument - nesting"):
         html = "<div>" * 50 + "Content" + "</div>" * 50
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Content")
+        content = content_stream(data)
+        expect(content).to_contain(b"Content")
 
     @test
     def deeply_nested_lists():
@@ -702,8 +760,9 @@ with describe("HtmlDocument - nesting"):
         html += "".join("</li></ul>" for _ in range(10))
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Level 0")
-        expect(data).to_contain(b"Level 9")
+        content = content_stream(data)
+        expect(content).to_contain(b"Level 0")
+        expect(content).to_contain(b"Level 9")
 
     @test
     def mixed_block_nesting():
@@ -711,8 +770,9 @@ with describe("HtmlDocument - nesting"):
         html = "<div><p>Para in div</p><div><p>Nested deeper</p></div></div>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Para in div")
-        expect(data).to_contain(b"Nested deeper")
+        content = content_stream(data)
+        expect(content).to_contain(b"Para in div")
+        expect(content).to_contain(b"Nested deeper")
 
     @test
     def inline_in_heading():
@@ -720,9 +780,10 @@ with describe("HtmlDocument - nesting"):
         html = "<h2><b>Bold</b> and <i>italic</i> heading</h2>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Bold")
-        expect(data).to_contain(b"italic")
-        expect(data).to_contain(b"heading")
+        content = content_stream(data)
+        expect(content).to_contain(b"Bold")
+        expect(content).to_contain(b"italic")
+        expect(content).to_contain(b"heading")
 
 
 with describe("HtmlDocument - large documents"):
@@ -733,8 +794,9 @@ with describe("HtmlDocument - large documents"):
         paras = "".join(f"<p>Paragraph {i}</p>" for i in range(500))
         doc = HtmlDocument(string=paras)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Paragraph 0")
-        expect(data).to_contain(b"Paragraph 499")
+        content = content_stream(data)
+        expect(content).to_contain(b"Paragraph 0")
+        expect(content).to_contain(b"Paragraph 499")
 
     @test
     def long_single_paragraph():
@@ -742,8 +804,9 @@ with describe("HtmlDocument - large documents"):
         text = " ".join(f"word{i}" for i in range(500))
         doc = HtmlDocument(string=f"<p>{text}</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"word0")
-        expect(data).to_contain(b"word499")
+        content = content_stream(data)
+        expect(content).to_contain(b"word0")
+        expect(content).to_contain(b"word499")
 
 
 with describe("HtmlDocument - inline styles"):
@@ -753,7 +816,8 @@ with describe("HtmlDocument - inline styles"):
         """style='color: red' sets text color to red."""
         doc = HtmlDocument(string='<p style="color: red">Red</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     # spec: CSS 2.1 §14.1; behaviors: color-hex
     @test
@@ -761,14 +825,16 @@ with describe("HtmlDocument - inline styles"):
         """style='color: #0000ff' sets text color to blue."""
         doc = HtmlDocument(string='<p style="color: #0000ff">Blue</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
     @test
     def inline_color_hex_short():
         """style='color: #f00' sets text color to red."""
         doc = HtmlDocument(string='<p style="color: #f00">Red</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     # spec: CSS 2.1 §14.1; behaviors: color-rgb
     @test
@@ -776,8 +842,9 @@ with describe("HtmlDocument - inline styles"):
         """style='color: rgb(0, 128, 0)' sets text color to green."""
         doc = HtmlDocument(string='<p style="color: rgb(0, 128, 0)">Green</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Green")
-        expect(data).to_contain(b"0 0.50")
+        content = content_stream(data)
+        expect(content).to_contain(b"Green")
+        expect(content).to_contain(b"0 0.50")
 
     # spec: CSS 2.1 §15.7; behaviors: font-size
     @test
@@ -785,14 +852,16 @@ with describe("HtmlDocument - inline styles"):
         """style='font-size: 18pt' uses 18pt font."""
         doc = HtmlDocument(string='<p style="font-size: 18pt">Big</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"18 Tf")
 
     @test
     def inline_font_size_px():
         """style='font-size: 24px' converts to 18pt (24 * 0.75)."""
         doc = HtmlDocument(string='<p style="font-size: 24px">Big</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"18 Tf")
 
     # spec: CSS 2.1 §15.6; behaviors: font-weight
     @test
@@ -847,22 +916,25 @@ with describe("HtmlDocument - inline styles"):
             string='<p style="background-color: #ffff00">Highlighted</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 1 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 1 0 rg")
 
     @test
     def inline_text_align_center():
         """style='text-align: center' centers text."""
         doc = HtmlDocument(string='<p style="text-align: center">Centered</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Centered")
+        content = content_stream(data)
+        expect(content).to_contain(b"Centered")
 
     @test
     def inline_multiple_properties():
         """Multiple properties in one style attribute."""
         doc = HtmlDocument(string='<p style="color: blue; font-size: 24pt">Styled</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
-        expect(data).to_contain(b"24 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
+        expect(content).to_contain(b"24 Tf")
 
     @test
     def inline_invalid_css_ignored():
@@ -871,14 +943,16 @@ with describe("HtmlDocument - inline styles"):
             string='<p style="color: notacolor; font-size: 18pt">Text</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"18 Tf")
 
     @test
     def inline_style_on_heading():
         """Inline style on heading overrides UA defaults."""
         doc = HtmlDocument(string='<h1 style="font-size: 12pt">Small H1</h1>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"12 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"12 Tf")
 
     @test
     def inline_font_weight_normal_on_heading():
@@ -894,28 +968,32 @@ with describe("HtmlDocument - inline styles"):
             string='<p>Normal <span style="color: red">red</span> normal</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def span_without_style():
         """<span> without style passes text through normally."""
         doc = HtmlDocument(string="<p>Before <span>inside</span> after</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"inside")
+        content = content_stream(data)
+        expect(content).to_contain(b"inside")
 
     @test
     def inline_padding():
         """style='padding: 10pt' adds padding to the block."""
         doc = HtmlDocument(string='<p style="padding: 10pt">Padded</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Padded")
+        content = content_stream(data)
+        expect(content).to_contain(b"Padded")
 
     @test
     def inline_border():
         """style='border: 1px solid black' renders border."""
         doc = HtmlDocument(string='<p style="border: 1px solid black">Bordered</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Bordered")
+        content = content_stream(data)
+        expect(content).to_contain(b"Bordered")
 
     @test
     def inline_margin_bottom():
@@ -924,8 +1002,9 @@ with describe("HtmlDocument - inline styles"):
             string='<p style="margin-bottom: 24pt">Spaced</p><p>Next</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Spaced")
-        expect(data).to_contain(b"Next")
+        content = content_stream(data)
+        expect(content).to_contain(b"Spaced")
+        expect(content).to_contain(b"Next")
 
 
 with describe("HtmlDocument - inline style hardening"):
@@ -939,39 +1018,44 @@ with describe("HtmlDocument - inline style hardening"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
     @test
     def span_inside_bold():
         """<b><span style='color: red'>text</span></b> applies both bold and color."""
         doc = HtmlDocument(string='<p><b><span style="color: red">text</span></b></p>')
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Helvetica-Bold")
-        expect(data).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def bold_with_color_style():
         """<b style='color: red'>text</b> applies bold font AND red color."""
         doc = HtmlDocument(string='<p><b style="color: red">text</b></p>')
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Helvetica-Bold")
-        expect(data).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def italic_with_font_size_style():
         """<i style='font-size: 18pt'>text</i> applies italic font at 18pt."""
         doc = HtmlDocument(string='<p><i style="font-size: 18pt">text</i></p>')
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Helvetica-Oblique")
-        expect(data).to_contain(b"18 Tf")
+        expect(content).to_contain(b"18 Tf")
 
     @test
     def styled_bold_does_not_leak():
         """Style on <b> does not leak to following text."""
         doc = HtmlDocument(string='<p><b style="color: red">bold</b> normal</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
-        expect(data).to_contain(b"normal")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"normal")
 
     @test
     def span_style_inside_styled_bold():
@@ -979,7 +1063,8 @@ with describe("HtmlDocument - inline style hardening"):
         html = '<p><b style="color: red"><span style="color: blue">text</span></b></p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
         expect(data).to_contain(b"/Helvetica-Bold")
 
     @test
@@ -1004,8 +1089,9 @@ with describe("HtmlDocument - inline style hardening"):
         """<li style='color: red'> renders red text."""
         doc = HtmlDocument(string='<ul><li style="color: red">Red item</li></ul>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
-        expect(data).to_contain(b"Red item")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"Red item")
 
     @test
     def li_with_background():
@@ -1014,15 +1100,17 @@ with describe("HtmlDocument - inline style hardening"):
             string='<ul><li style="background-color: #ffff00">Highlighted</li></ul>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 1 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 1 0 rg")
 
     @test
     def h2_with_color():
         """<h2 style='color: blue'> renders blue heading."""
         doc = HtmlDocument(string='<h2 style="color: blue">Blue Title</h2>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
-        expect(data).to_contain(b"Blue Title")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
+        expect(content).to_contain(b"Blue Title")
 
     @test
     def h3_with_font_weight_normal():
@@ -1036,15 +1124,17 @@ with describe("HtmlDocument - inline style hardening"):
         """<h1 style='background-color: yellow'> renders heading with background."""
         doc = HtmlDocument(string='<h1 style="background-color: #ffff00">Title</h1>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 1 0 rg")
-        expect(data).to_contain(b"Title")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 1 0 rg")
+        expect(content).to_contain(b"Title")
 
     @test
     def inline_text_align_right():
         """style='text-align: right' right-aligns text."""
         doc = HtmlDocument(string='<p style="text-align: right">Right</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Right")
+        content = content_stream(data)
+        expect(content).to_contain(b"Right")
 
     @test
     def inline_line_height():
@@ -1067,14 +1157,16 @@ with describe("HtmlDocument - inline style hardening"):
         """style='padding-left: 30pt' offsets text."""
         doc = HtmlDocument(string='<p style="padding-left: 30pt">Indented</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Indented")
+        content = content_stream(data)
+        expect(content).to_contain(b"Indented")
 
     @test
     def inline_border_width_only():
         """style='border-width: 3px' draws border."""
         doc = HtmlDocument(string='<p style="border-width: 3px">Bordered</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Bordered")
+        content = content_stream(data)
+        expect(content).to_contain(b"Bordered")
 
     @test
     def inline_border_color_only():
@@ -1083,50 +1175,57 @@ with describe("HtmlDocument - inline style hardening"):
             string='<p style="border-width: 1px; border-color: red">Red border</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0")
 
     @test
     def important_not_breaking():
         """!important does not break CSS parsing."""
         doc = HtmlDocument(string='<p style="color: red !important">Important</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def negative_font_size_ignored():
         """Negative font-size is silently ignored; default applies."""
         doc = HtmlDocument(string='<p style="font-size: -12pt">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"12 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"12 Tf")
 
     @test
     def negative_padding_ignored():
         """Negative padding is silently ignored."""
         doc = HtmlDocument(string='<p style="padding: -10px; color: red">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def uppercase_property_name():
         """Uppercase property name COLOR works."""
         doc = HtmlDocument(string='<p style="COLOR: red">Red</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def extra_semicolons_handled():
         """Extra semicolons in style attribute don't break parsing."""
         doc = HtmlDocument(string='<p style=";;color: red;;;font-size: 18pt;">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"18 Tf")
 
     @test
     def missing_value_handled():
         """Missing value after colon doesn't crash."""
         doc = HtmlDocument(string='<p style="color:; font-size: 18pt">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"18 Tf")
 
     @test
     def malformed_rgb_too_few_args():
@@ -1135,7 +1234,8 @@ with describe("HtmlDocument - inline style hardening"):
             string='<p style="color: rgb(255, 0); font-size: 18pt">Text</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"18 Tf")
 
     @test
     def span_without_style_near_styled_span():
@@ -1147,9 +1247,10 @@ with describe("HtmlDocument - inline style hardening"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"plain")
-        expect(data).to_contain(b"red")
-        expect(data).to_contain(b"plain2")
+        content = content_stream(data)
+        expect(content).to_contain(b"plain")
+        expect(content).to_contain(b"red")
+        expect(content).to_contain(b"plain2")
 
 
 with describe("HtmlDocument - code element"):
@@ -1159,8 +1260,9 @@ with describe("HtmlDocument - code element"):
         """<code> renders text with Courier font."""
         doc = HtmlDocument(string="<p><code>x = 1</code></p>")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Courier")
-        expect(data).to_contain(b"x = 1")
+        expect(content).to_contain(b"x = 1")
 
     @test
     def code_inside_bold():
@@ -1213,7 +1315,8 @@ with describe("HtmlDocument - blockquote element"):
         """<blockquote> renders text."""
         doc = HtmlDocument(string="<blockquote>Quoted text</blockquote>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Quoted text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Quoted text")
 
     @test
     def blockquote_with_style():
@@ -1222,7 +1325,8 @@ with describe("HtmlDocument - blockquote element"):
             string='<blockquote style="color: blue">Blue quote</blockquote>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
     @test
     def blockquote_nested_in_div():
@@ -1230,7 +1334,8 @@ with describe("HtmlDocument - blockquote element"):
         html = "<div><blockquote>Quoted</blockquote></div>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Quoted")
+        content = content_stream(data)
+        expect(content).to_contain(b"Quoted")
 
 
 with describe("HtmlDocument - hr element"):
@@ -1240,25 +1345,28 @@ with describe("HtmlDocument - hr element"):
         """<hr> between paragraphs doesn't crash."""
         doc = HtmlDocument(string="<p>Before</p><hr><p>After</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Before")
-        expect(data).to_contain(b"After")
+        content = content_stream(data)
+        expect(content).to_contain(b"Before")
+        expect(content).to_contain(b"After")
 
     @test
     def hr_alone():
         """<hr> alone produces valid PDF with stroke."""
         doc = HtmlDocument(string="<hr>")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(data).to_contain(b"S\n")
+        expect(content).to_contain(b"S\n")
 
     @test
     def multiple_hr():
         """Multiple <hr> elements don't crash."""
         doc = HtmlDocument(string="<p>A</p><hr><p>B</p><hr><p>C</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"A")
-        expect(data).to_contain(b"B")
-        expect(data).to_contain(b"C")
+        content = content_stream(data)
+        expect(content).to_contain(b"A")
+        expect(content).to_contain(b"B")
+        expect(content).to_contain(b"C")
 
 
 with describe("HtmlDocument - pre element"):
@@ -1268,16 +1376,18 @@ with describe("HtmlDocument - pre element"):
         """<pre> preserves multiple spaces."""
         doc = HtmlDocument(string="<pre>a  b  c</pre>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"a  b  c")
+        content = content_stream(data)
+        expect(content).to_contain(b"a  b  c")
 
     @test
     def pre_preserves_newlines():
         """<pre> preserves newlines as separate lines."""
         doc = HtmlDocument(string="<pre>line1\nline2\nline3</pre>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"line1")
-        expect(data).to_contain(b"line2")
-        expect(data).to_contain(b"line3")
+        content = content_stream(data)
+        expect(content).to_contain(b"line1")
+        expect(content).to_contain(b"line2")
+        expect(content).to_contain(b"line3")
 
     @test
     def pre_uses_courier():
@@ -1291,9 +1401,10 @@ with describe("HtmlDocument - pre element"):
         """<pre><code> works (common pattern)."""
         doc = HtmlDocument(string="<pre><code>x = 1\ny = 2</code></pre>")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Courier")
-        expect(data).to_contain(b"x = 1")
-        expect(data).to_contain(b"y = 2")
+        expect(content).to_contain(b"x = 1")
+        expect(content).to_contain(b"y = 2")
 
     @test
     def pre_followed_by_normal():
@@ -1301,7 +1412,8 @@ with describe("HtmlDocument - pre element"):
         html = "<pre>  spaced  </pre><p>Normal paragraph</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Normal paragraph")
+        content = content_stream(data)
+        expect(content).to_contain(b"Normal paragraph")
 
 
 with describe("HtmlDocument - white-space"):
@@ -1312,7 +1424,8 @@ with describe("HtmlDocument - white-space"):
         html = '<p style="white-space: pre">a  b  c</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"a  b  c")
+        content = content_stream(data)
+        expect(content).to_contain(b"a  b  c")
 
     @test
     def white_space_pre_preserves_newlines():
@@ -1320,21 +1433,26 @@ with describe("HtmlDocument - white-space"):
         html = '<p style="white-space: pre">line1\nline2</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"line1")
-        expect(data).to_contain(b"line2")
+        content = content_stream(data)
+        expect(content).to_contain(b"line1")
+        expect(content).to_contain(b"line2")
 
     @test
     def white_space_nowrap_keeps_long_text_on_one_line():
         """`white-space: nowrap` bypasses wrapping for text wider than the column."""
         words = " ".join([f"word{i}" for i in range(40)])
         normal = HtmlDocument(string=f"<p>{words}</p>").to_bytes()
+        normal_content = content_stream(normal)
         nowrap = HtmlDocument(
             string=f'<p style="white-space: nowrap">{words}</p>'
         ).to_bytes()
+        nowrap_content = content_stream(nowrap)
         # Both contain the text; nowrap's stream should have fewer text-show ops
         # than the wrapped version (one line vs many). We approximate this by
         # counting the number of `Td` operators that start a new line.
-        expect(normal.count(b" Td")).to_be_greater_than(nowrap.count(b" Td"))
+        expect(normal_content.count(b" Td")).to_be_greater_than(
+            nowrap_content.count(b" Td")
+        )
 
     @test
     def white_space_normal_collapses_whitespace():
@@ -1342,9 +1460,10 @@ with describe("HtmlDocument - white-space"):
         html = '<p style="white-space: normal">a   b   c</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # Collapsed form is "a b c"; the tripled-space form must NOT appear.
-        assert b"a   b   c" not in data
-        expect(data).to_contain(b"a b c")
+        assert b"a   b   c" not in content
+        expect(content).to_contain(b"a b c")
 
     @test
     def white_space_inherits_to_children():
@@ -1352,7 +1471,8 @@ with describe("HtmlDocument - white-space"):
         html = '<div style="white-space: pre">outer  <span>inner  text</span></div>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"outer  ")
+        content = content_stream(data)
+        expect(content).to_contain(b"outer  ")
 
 
 with describe("HtmlDocument - style blocks"):
@@ -1363,7 +1483,8 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>p { color: red }</style><p>Text</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def style_type_selector_font_size():
@@ -1371,7 +1492,8 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>p { font-size: 18pt }</style><p>Text</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"18 Tf")
 
     # spec: CSS 2.1 §5.3; behaviors: sel-universal
     @test
@@ -1380,10 +1502,11 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>* { color: red }</style><h1>H</h1><p>P</p><div>D</div>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # The red fill-color op should be emitted at least once per distinct
         # element type — we don't need to count, just verify the selector
         # matched beyond a single element.
-        expect(data.count(b"1 0 0 rg")).to_be_greater_than(1)
+        expect(content.count(b"1 0 0 rg")).to_be_greater_than(1)
 
     # spec: CSS 2.1 §5.8.3; behaviors: sel-class
     @test
@@ -1392,7 +1515,8 @@ with describe("HtmlDocument - style blocks"):
         html = '<style>.red { color: red }</style><p class="red">Text</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     # spec: CSS 2.1 §5.9; behaviors: sel-id
     @test
@@ -1401,7 +1525,8 @@ with describe("HtmlDocument - style blocks"):
         html = '<style>#title { font-size: 24pt }</style><p id="title">Text</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"24 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"24 Tf")
 
     # spec: CSS 2.1 §6.4.1; behaviors: cascade-origin
     @test
@@ -1410,7 +1535,8 @@ with describe("HtmlDocument - style blocks"):
         html = '<style>p { color: blue }</style><p style="color: red">Text</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def style_later_rule_wins():
@@ -1418,7 +1544,8 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>p { color: green } p { color: blue }</style><p>Text</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
     @test
     def style_class_beats_type():
@@ -1429,7 +1556,8 @@ with describe("HtmlDocument - style blocks"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
     # spec: CSS 2.1 §6.4.3; behaviors: cascade-specificity
     @test
@@ -1441,7 +1569,8 @@ with describe("HtmlDocument - style blocks"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
     # spec: CSS 2.1 §5.2.1; behaviors: sel-selector-list
     @test
@@ -1450,7 +1579,8 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>h1, h2 { color: red }</style><h1>A</h1><h2>B</h2>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     # spec: CSS 2.1 §5.5; behaviors: sel-descendant
     @test
@@ -1459,7 +1589,8 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>div p { color: red }</style><div><p>Text</p></div>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def style_descendant_no_match():
@@ -1467,7 +1598,8 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>div p { color: red }</style><p>Text</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"1 0 0 rg" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"1 0 0 rg" not in content).to_equal(True)
 
     # spec: CSS 2.1 §5.6; behaviors: sel-child
     @test
@@ -1476,7 +1608,8 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>div > p { color: red }</style><div><p>Text</p></div>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def style_child_no_match_grandchild():
@@ -1487,7 +1620,8 @@ with describe("HtmlDocument - style blocks"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"1 0 0 rg" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"1 0 0 rg" not in content).to_equal(True)
 
     # spec: CSS 2.1 §5.2; behaviors: sel-compound
     @test
@@ -1499,14 +1633,16 @@ with describe("HtmlDocument - style blocks"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def style_no_style_block():
         """Document without <style> block still works."""
         doc = HtmlDocument(string="<p>Text</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Text")
 
     @test
     def style_multiple_style_blocks():
@@ -1518,7 +1654,8 @@ with describe("HtmlDocument - style blocks"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"18 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"18 Tf")
 
     @test
     def style_font_weight():
@@ -1534,7 +1671,8 @@ with describe("HtmlDocument - style blocks"):
         html = "<style>p { background-color: yellow }</style><p>Text</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 1 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 1 0 rg")
 
 
 with describe("@media and @import"):
@@ -1545,7 +1683,8 @@ with describe("@media and @import"):
         html = "<style>@media print { p { color: red } }</style><p>Hello</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def media_screen_only_rules_skipped():
@@ -1553,7 +1692,8 @@ with describe("@media and @import"):
         html = "<style>@media screen { p { color: red } }</style><p>Hello</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        assert b"1 0 0 rg" not in data
+        content = content_stream(data)
+        assert b"1 0 0 rg" not in content
 
     @test
     def media_all_rules_apply():
@@ -1561,7 +1701,8 @@ with describe("@media and @import"):
         html = "<style>@media all { p { color: red } }</style><p>Hello</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def media_not_screen_applies_to_print():
@@ -1569,7 +1710,8 @@ with describe("@media and @import"):
         html = "<style>@media not screen { p { color: red } }</style><p>Hello</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def media_comma_list_matches_if_any_clause_matches():
@@ -1577,7 +1719,8 @@ with describe("@media and @import"):
         html = "<style>@media screen, print { p { color: red } }</style><p>Hello</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     # spec: CSS 2.1 §6.3; behaviors: at-import
     @test
@@ -1586,8 +1729,9 @@ with describe("@media and @import"):
         html = '<style>@import url("other.css"); p { color: red }</style><p>Hello</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # The rule that followed @import should still apply.
-        expect(data).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def multiple_imports_tolerated():
@@ -1600,7 +1744,8 @@ with describe("@media and @import"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
 
 with describe("body CSS inheritance"):
@@ -1630,7 +1775,8 @@ with describe("body CSS inheritance"):
         html = "<style>body { font-size: 10pt }</style><p>Text</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"10 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"10 Tf")
 
     @test
     def body_line_height_inherits():
@@ -1649,7 +1795,8 @@ with describe("CSS inheritance"):
         html = '<div style="color: red"><p>Red text</p></div>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def font_weight_inherits():
@@ -1690,7 +1837,8 @@ with describe("CSS inheritance"):
         html = '<div style="font-size: 20pt"><p>Big text</p></div>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"20 Tf")
+        content = content_stream(data)
+        expect(content).to_contain(b"20 Tf")
 
     @test
     def multi_level_inheritance():
@@ -1698,7 +1846,8 @@ with describe("CSS inheritance"):
         html = '<div style="color: red"><div><p>Still red</p></div></div>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def child_overrides_parent():
@@ -1706,7 +1855,8 @@ with describe("CSS inheritance"):
         html = '<div style="color: red"><p style="color: blue">Blue wins</p></div>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
     @test
     def background_does_not_inherit():
@@ -1728,7 +1878,8 @@ with describe("CSS inheritance"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def inheritance_does_not_leak_to_siblings():
@@ -1780,8 +1931,9 @@ with describe("@page rule"):
         html = "<style>@page { size: letter } p { color: red }</style><p>Text</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/MediaBox [0 0 612 792]")
-        expect(data).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def inch_unit_in_margin():
@@ -1806,7 +1958,8 @@ with describe("@page margin boxes"):
         </style><p>Body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(My Document)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(My Document)")
 
     @test
     def bottom_right_string_literal():
@@ -1820,7 +1973,8 @@ with describe("@page margin boxes"):
         </style><p>Body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(Confidential)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(Confidential)")
 
     # spec: CSS Paged Media 3 §4.3; behaviors: paged3-counters
     @test
@@ -1835,8 +1989,9 @@ with describe("@page margin boxes"):
         </style><p>Body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # The shown text is literally "1"
-        expect(data).to_contain(b"(1)")
+        expect(content).to_contain(b"(1)")
 
     @test
     def counter_pages_renders_total_page_count():
@@ -1850,7 +2005,8 @@ with describe("@page margin boxes"):
         </style><p>Body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(Total: 1)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(Total: 1)")
 
     @test
     def page_n_of_m_format():
@@ -1866,8 +2022,9 @@ with describe("@page margin boxes"):
         </style><p>Body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # Items are concatenated into a single Tj literal.
-        expect(data).to_contain(b"(Page 1 of 1)")
+        expect(content).to_contain(b"(Page 1 of 1)")
 
     @test
     def multi_page_document_numbers_sequentially():
@@ -1886,11 +2043,12 @@ with describe("@page margin boxes"):
         <p>Page three body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # Each page's counter resolves to its own 1-indexed number, and
         # counter(pages) resolves to the total (3) on every page.
-        expect(data).to_contain(b"(1 / 3)")
-        expect(data).to_contain(b"(2 / 3)")
-        expect(data).to_contain(b"(3 / 3)")
+        expect(content).to_contain(b"(1 / 3)")
+        expect(content).to_contain(b"(2 / 3)")
+        expect(content).to_contain(b"(3 / 3)")
 
     @test
     def top_left_and_top_right_coexist():
@@ -1905,8 +2063,9 @@ with describe("@page margin boxes"):
         </style><p>Body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(Left)")
-        expect(data).to_contain(b"(Right)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(Left)")
+        expect(content).to_contain(b"(Right)")
 
     # spec: CSS Paged Media 3 §5; behaviors: paged3-margin-boxes
     @test
@@ -1925,9 +2084,10 @@ with describe("@page margin boxes"):
         </style><p>Body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(Styled)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(Styled)")
         # Red fill color "1 0 0 rg" emitted before the text.
-        expect(data).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def margin_box_does_not_break_other_page_properties():
@@ -1941,8 +2101,9 @@ with describe("@page margin boxes"):
         </style><p>Body</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/MediaBox [0 0 595 842]")
-        expect(data).to_contain(b"(Header)")
+        expect(content).to_contain(b"(Header)")
 
 
 with describe("multi-column layout"):
@@ -1955,8 +2116,9 @@ with describe("multi-column layout"):
         <p>Second paragraph also with some text content.</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(data).to_contain(b"First paragraph")
+        expect(content).to_contain(b"First paragraph")
 
     @test
     def column_rule_renders():
@@ -1972,8 +2134,9 @@ with describe("multi-column layout"):
         <p>This should overflow.</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # Column rules produce stroke ops with the specified color
-        expect(data).to_contain(b"0.8 0.8 0.8 RG")
+        expect(content).to_contain(b"0.8 0.8 0.8 RG")
 
     @test
     def column_gap_respected():
@@ -2009,9 +2172,10 @@ with describe("multi-column layout"):
         <p>An article about something interesting.</p>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/MediaBox [0 0 612 792]")
         expect(data).to_contain(b"/Courier")
-        expect(data).to_contain(b"Hacker News Summary")
+        expect(content).to_contain(b"Hacker News Summary")
 
 
 with describe("display: none"):
@@ -2021,8 +2185,9 @@ with describe("display: none"):
         """An element with inline display:none is not rendered."""
         doc = HtmlDocument(string='<p style="display:none">Hidden</p><p>Visible</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Visible")
-        assert b"Hidden" not in data
+        content = content_stream(data)
+        expect(content).to_contain(b"Visible")
+        assert b"Hidden" not in content
 
     # spec: CSS 2.1 §9.2.4; behaviors: vfm-display-none
     @test
@@ -2032,8 +2197,9 @@ with describe("display: none"):
             string='<div style="display:none"><p>Deep hidden</p></div><p>Visible</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Visible")
-        assert b"Deep hidden" not in data
+        content = content_stream(data)
+        expect(content).to_contain(b"Visible")
+        assert b"Deep hidden" not in content
 
     @test
     def display_none_via_style_block():
@@ -2042,15 +2208,17 @@ with describe("display: none"):
         <body><p class="hide">Hidden</p><p>Visible</p></body></html>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Visible")
-        assert b"Hidden" not in data
+        content = content_stream(data)
+        expect(content).to_contain(b"Visible")
+        assert b"Hidden" not in content
 
     @test
     def display_block_still_renders():
         """display:block does not hide the element."""
         doc = HtmlDocument(string='<p style="display:block">Shown</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Shown")
+        content = content_stream(data)
+        expect(content).to_contain(b"Shown")
 
     # spec: CSS 2.1 §9.3.1; behaviors: vfm-position-static
     @test
@@ -2110,35 +2278,40 @@ with describe("CSS margins"):
         """margin-top on an element produces valid PDF output."""
         doc = HtmlDocument(string='<p style="margin-top: 50pt">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Text")
 
     @test
     def margin_left_renders():
         """margin-left on an element produces valid PDF output."""
         doc = HtmlDocument(string='<p style="margin-left: 50pt">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Text")
 
     @test
     def margin_right_renders():
         """margin-right on an element produces valid PDF output."""
         doc = HtmlDocument(string='<p style="margin-right: 50pt">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Text")
 
     @test
     def margin_shorthand_all_four():
         """margin shorthand sets all four sides."""
         doc = HtmlDocument(string='<p style="margin: 10pt 20pt 30pt 40pt">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Text")
 
     @test
     def margin_shorthand_two_values():
         """margin: 10pt 20pt sets top/bottom=10 and left/right=20."""
         doc = HtmlDocument(string='<p style="margin: 10pt 20pt">Text</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Text")
 
     @test
     def adjacent_sibling_margins_collapse_to_max():
@@ -2236,9 +2409,10 @@ with describe("hsl colors"):
         html = '<p style="color: hsl(0, 100%, 50%)">red</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"red")
+        content = content_stream(data)
+        expect(content).to_contain(b"red")
         # Pure red in PDF fill color op: "1 0 0 rg"
-        expect(data).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def hsl_green_renders():
@@ -2246,7 +2420,8 @@ with describe("hsl colors"):
         html = '<p style="color: hsl(120, 100%, 50%)">green</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 1 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 1 0 rg")
 
     # spec: CSS Color 3 §4.2.4; behaviors: color-hsla
     @test
@@ -2255,7 +2430,8 @@ with describe("hsl colors"):
         html = '<p style="color: hsla(240, 100%, 50%, 0.5)">blue</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
     # spec: CSS Color 3 §4.2.1; behaviors: color-rgba
     @test
@@ -2264,7 +2440,8 @@ with describe("hsl colors"):
         html = '<p style="color: rgba(255, 0, 0, 0.5)">red</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
 
 with describe("semantic block elements"):
@@ -2274,13 +2451,15 @@ with describe("semantic block elements"):
         """<article> renders its text content as a block."""
         doc = HtmlDocument(string="<article>Article text</article>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Article text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Article text")
 
     @test
     def section_renders_as_block():
         doc = HtmlDocument(string="<section>Section text</section>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Section text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Section text")
 
     @test
     def nested_semantic_margins_collapse():
@@ -2295,7 +2474,8 @@ with describe("semantic block elements"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello")
         # 200pt collapses to 200pt — everything fits on one page
         expect(data).to_contain(b"/Count 1")
 
@@ -2311,7 +2491,8 @@ with describe("text-indent"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"First line indented")
+        content = content_stream(data)
+        expect(content).to_contain(b"First line indented")
 
     @test
     def text_indent_inherits_from_parent():
@@ -2319,7 +2500,8 @@ with describe("text-indent"):
         html = '<div style="text-indent: 24pt"><p>Indented nested text.</p></div>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Indented nested")
+        content = content_stream(data)
+        expect(content).to_contain(b"Indented nested")
 
 
 with describe("text-transform"):
@@ -2330,8 +2512,9 @@ with describe("text-transform"):
         html = '<p style="text-transform: uppercase">hello world</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"HELLO WORLD")
-        assert b"hello world" not in data
+        content = content_stream(data)
+        expect(content).to_contain(b"HELLO WORLD")
+        assert b"hello world" not in content
 
     @test
     def lowercase_transforms_text():
@@ -2339,8 +2522,9 @@ with describe("text-transform"):
         html = '<p style="text-transform: lowercase">HELLO World</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"hello world")
-        assert b"HELLO World" not in data
+        content = content_stream(data)
+        expect(content).to_contain(b"hello world")
+        assert b"HELLO World" not in content
 
     @test
     def capitalize_transforms_text():
@@ -2348,7 +2532,8 @@ with describe("text-transform"):
         html = '<p style="text-transform: capitalize">hello world</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hello World")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hello World")
 
     @test
     def text_transform_inherits_from_parent():
@@ -2357,7 +2542,8 @@ with describe("text-transform"):
             string='<div style="text-transform: uppercase"><p>nested</p></div>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"NESTED")
+        content = content_stream(data)
+        expect(content).to_contain(b"NESTED")
 
 
 with describe("text-decoration"):
@@ -2369,7 +2555,8 @@ with describe("text-decoration"):
             string='<p style="text-decoration: underline">Underlined</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Underlined")
+        content = content_stream(data)
+        expect(content).to_contain(b"Underlined")
         # The PDF should contain stroke operations for the underline
         # (MoveTo + LineTo + Stroke pattern in content stream)
 
@@ -2378,7 +2565,8 @@ with describe("text-decoration"):
         """text-decoration: line-through draws a line through text."""
         doc = HtmlDocument(string='<p style="text-decoration: line-through">Struck</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Struck")
+        content = content_stream(data)
+        expect(content).to_contain(b"Struck")
 
     @test
     def underline_and_line_through_combined():
@@ -2387,7 +2575,8 @@ with describe("text-decoration"):
             string='<p style="text-decoration: underline line-through">Both</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Both")
+        content = content_stream(data)
+        expect(content).to_contain(b"Both")
 
     @test
     def decoration_none_overrides_inherited():
@@ -2402,7 +2591,8 @@ with describe("text-decoration"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Plain")
+        content = content_stream(data)
+        expect(content).to_contain(b"Plain")
 
     @test
     def underline_via_style_block():
@@ -2413,7 +2603,8 @@ with describe("text-decoration"):
         <body><p class="ul">Styled underline</p></body></html>"""
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Styled underline")
+        content = content_stream(data)
+        expect(content).to_contain(b"Styled underline")
 
 
 with describe("border-style"):
@@ -2423,14 +2614,16 @@ with describe("border-style"):
         """border with solid style renders normally."""
         doc = HtmlDocument(string='<p style="border: 2px solid black">Solid border</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Solid border")
+        content = content_stream(data)
+        expect(content).to_contain(b"Solid border")
 
     @test
     def border_dashed_renders():
         """border with dashed style renders."""
         doc = HtmlDocument(string='<p style="border: 2px dashed red">Dashed border</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Dashed border")
+        content = content_stream(data)
+        expect(content).to_contain(b"Dashed border")
 
     @test
     def border_dotted_renders():
@@ -2439,7 +2632,8 @@ with describe("border-style"):
             string='<p style="border: 2px dotted blue">Dotted border</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Dotted border")
+        content = content_stream(data)
+        expect(content).to_contain(b"Dotted border")
 
     @test
     def border_style_none_suppresses_border():
@@ -2465,7 +2659,8 @@ with describe("border-style"):
             )
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Styled")
+        content = content_stream(data)
+        expect(content).to_contain(b"Styled")
 
 
 with describe("clickable links"):
@@ -2477,7 +2672,8 @@ with describe("clickable links"):
             string='<p>Visit <a href="https://example.com">our site</a> today</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"our site")
+        content = content_stream(data)
+        expect(content).to_contain(b"our site")
         expect(data).to_contain(b"/Link")
         expect(data).to_contain(b"https://example.com")
 
@@ -2494,7 +2690,8 @@ with describe("clickable links"):
         """An <a> without href does not create an annotation."""
         doc = HtmlDocument(string="<p><a>no link</a> here</p>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"no link")
+        content = content_stream(data)
+        expect(content).to_contain(b"no link")
         assert b"/Link" not in data
 
     @test
@@ -2519,9 +2716,10 @@ with describe("clickable links"):
             string='<p>before <a href="https://x.com">linked</a> after</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"before")
-        expect(data).to_contain(b"linked")
-        expect(data).to_contain(b"after")
+        content = content_stream(data)
+        expect(content).to_contain(b"before")
+        expect(content).to_contain(b"linked")
+        expect(content).to_contain(b"after")
 
     @test
     def link_with_inline_style():
@@ -2530,8 +2728,9 @@ with describe("clickable links"):
             string='<a href="https://example.com" style="color: blue">styled link</a>'
         )
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"/Link")
-        expect(data).to_contain(b"styled link")
+        expect(content).to_contain(b"styled link")
 
 
 with describe("list-style-type"):
@@ -2541,8 +2740,9 @@ with describe("list-style-type"):
         """<ol> defaults to decimal markers."""
         doc = HtmlDocument(string="<ol><li>One</li><li>Two</li></ol>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"(1.)")
-        expect(data).to_contain(b"(2.)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(1.)")
+        expect(content).to_contain(b"(2.)")
 
     @test
     def lower_alpha_marker():
@@ -2554,8 +2754,9 @@ with describe("list-style-type"):
             )
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"(a.)")
-        expect(data).to_contain(b"(b.)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(a.)")
+        expect(content).to_contain(b"(b.)")
 
     @test
     def upper_alpha_marker():
@@ -2566,8 +2767,9 @@ with describe("list-style-type"):
             )
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"(A.)")
-        expect(data).to_contain(b"(B.)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(A.)")
+        expect(content).to_contain(b"(B.)")
 
     @test
     def lower_roman_marker():
@@ -2579,9 +2781,10 @@ with describe("list-style-type"):
             )
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"(i.)")
-        expect(data).to_contain(b"(ii.)")
-        expect(data).to_contain(b"(iii.)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(i.)")
+        expect(content).to_contain(b"(ii.)")
+        expect(content).to_contain(b"(iii.)")
 
     @test
     def upper_roman_marker():
@@ -2592,8 +2795,9 @@ with describe("list-style-type"):
             )
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"(I.)")
-        expect(data).to_contain(b"(II.)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(I.)")
+        expect(content).to_contain(b"(II.)")
 
     @test
     def disc_marker_explicit():
@@ -2602,7 +2806,8 @@ with describe("list-style-type"):
             string='<ul style="list-style-type: disc"><li>Item</li></ul>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"(*)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(*)")
 
     @test
     def square_marker():
@@ -2611,23 +2816,26 @@ with describe("list-style-type"):
             string='<ul style="list-style-type: square"><li>Item</li></ul>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"(#)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(#)")
 
     @test
     def none_marker_suppresses_bullet():
         """list-style-type: none produces no marker."""
         doc_with = HtmlDocument(string="<ul><li>Item</li></ul>")
         data_with = doc_with.to_bytes()
+        data_with_content = content_stream(data_with)
         doc_none = HtmlDocument(
             string='<ul style="list-style-type: none"><li>Item</li></ul>'
         )
         data_none = doc_none.to_bytes()
+        data_none_content = content_stream(data_none)
         # Both contain "Item" but the "none" variant has no marker
-        expect(data_with).to_contain(b"Item")
-        expect(data_none).to_contain(b"Item")
+        expect(data_with_content).to_contain(b"Item")
+        expect(data_none_content).to_contain(b"Item")
         # The marker ShowText call is absent in the "none" version
-        assert b"(*)" in data_with
-        assert b"(*)" not in data_none
+        assert b"(*)" in data_with_content
+        assert b"(*)" not in data_none_content
 
     @test
     def decimal_via_stylesheet():
@@ -2641,8 +2849,9 @@ with describe("list-style-type"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(a.)")
-        expect(data).to_contain(b"(b.)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(a.)")
+        expect(content).to_contain(b"(b.)")
 
     @test
     def roman_numerals_compound():
@@ -2652,8 +2861,9 @@ with describe("list-style-type"):
             string=f'<ol style="list-style-type: lower-roman">{items}</ol>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"(iv.)")
-        expect(data).to_contain(b"(ix.)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(iv.)")
+        expect(content).to_contain(b"(ix.)")
 
 
 with describe("list-style-position"):
@@ -2663,8 +2873,9 @@ with describe("list-style-position"):
         """Default list-style-position is outside (marker hangs left of text)."""
         doc = HtmlDocument(string="<ul><li>Item</li></ul>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Item")
-        expect(data).to_contain(b"(*)")
+        content = content_stream(data)
+        expect(content).to_contain(b"Item")
+        expect(content).to_contain(b"(*)")
 
     @test
     def inside_renders_marker_and_text():
@@ -2673,8 +2884,9 @@ with describe("list-style-position"):
             string='<ul style="list-style-position: inside"><li>Item</li></ul>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Item")
-        expect(data).to_contain(b"(*)")
+        content = content_stream(data)
+        expect(content).to_contain(b"Item")
+        expect(content).to_contain(b"(*)")
 
     # spec: CSS Lists 3 §3; behaviors: lists-style-position
     @test
@@ -2700,8 +2912,9 @@ with describe("list-style-position"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Item")
-        expect(data).to_contain(b"(*)")
+        content = content_stream(data)
+        expect(content).to_contain(b"Item")
+        expect(content).to_contain(b"(*)")
 
 
 with describe("definition lists and figures"):
@@ -2711,8 +2924,9 @@ with describe("definition lists and figures"):
         """<dl><dt><dd> renders both term and definition text."""
         doc = HtmlDocument(string="<dl><dt>Term</dt><dd>Definition</dd></dl>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Term")
-        expect(data).to_contain(b"Definition")
+        content = content_stream(data)
+        expect(content).to_contain(b"Term")
+        expect(content).to_contain(b"Definition")
 
     @test
     def dd_is_indented():
@@ -2720,7 +2934,8 @@ with describe("definition lists and figures"):
         doc = HtmlDocument(string="<dl><dt>Term</dt><dd>Definition</dd></dl>")
         # Rendering must succeed and contain the definition text.
         data = doc.to_bytes()
-        expect(data).to_contain(b"Definition")
+        content = content_stream(data)
+        expect(content).to_contain(b"Definition")
         # A plain paragraph version should differ from the dd-indented one.
         doc_plain = HtmlDocument(string="<p>Term</p><p>Definition</p>")
         assert doc_plain.to_bytes() != data
@@ -2733,8 +2948,9 @@ with describe("definition lists and figures"):
             string="<figure><p>Body</p><figcaption>Caption</figcaption></figure>"
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Body")
-        expect(data).to_contain(b"Caption")
+        content = content_stream(data)
+        expect(content).to_contain(b"Body")
+        expect(content).to_contain(b"Caption")
 
     @test
     def multiple_dt_dd_pairs():
@@ -2743,10 +2959,11 @@ with describe("definition lists and figures"):
             string=("<dl><dt>One</dt><dd>First</dd><dt>Two</dt><dd>Second</dd></dl>")
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"One")
-        expect(data).to_contain(b"First")
-        expect(data).to_contain(b"Two")
-        expect(data).to_contain(b"Second")
+        content = content_stream(data)
+        expect(content).to_contain(b"One")
+        expect(content).to_contain(b"First")
+        expect(content).to_contain(b"Two")
+        expect(content).to_contain(b"Second")
 
 
 with describe("page-break"):
@@ -2821,7 +3038,8 @@ with describe("page-break"):
             string='<p style="page-break-inside: avoid">Keep together</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"Keep together")
+        content = content_stream(data)
+        expect(content).to_contain(b"Keep together")
         expect(data).to_contain(b"/Count 1")
 
     # spec: CSS 2.1 §13.3.1; behaviors: paged-page-break-inside
@@ -2830,7 +3048,8 @@ with describe("page-break"):
         """break-inside (CSS3 alias) with avoid is accepted."""
         doc = HtmlDocument(string='<p style="break-inside: avoid">Keep</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Keep")
+        content = content_stream(data)
+        expect(content).to_contain(b"Keep")
 
     # spec: CSS 2.1 §13.3.1; behaviors: paged-page-break-inside
     @test
@@ -2857,7 +3076,8 @@ with describe("page-break"):
         """orphans: N is accepted with any positive integer."""
         doc = HtmlDocument(string='<p style="orphans: 3">Body</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Body")
+        content = content_stream(data)
+        expect(content).to_contain(b"Body")
 
     # spec: CSS 2.1 §13.3.2; behaviors: paged-orphans-widows
     @test
@@ -2865,7 +3085,8 @@ with describe("page-break"):
         """widows: N is accepted with any positive integer."""
         doc = HtmlDocument(string='<p style="widows: 4">Body</p>')
         data = doc.to_bytes()
-        expect(data).to_contain(b"Body")
+        content = content_stream(data)
+        expect(content).to_contain(b"Body")
 
     # spec: CSS 2.1 §13.3.2; behaviors: paged-orphans-widows
     @test
@@ -2880,7 +3101,8 @@ with describe("page-break"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Paragraph text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Paragraph text")
 
 
 with describe("text-align: justify"):
@@ -2891,8 +3113,9 @@ with describe("text-align: justify"):
         long_text = "word " * 30
         doc = HtmlDocument(string=f'<p style="text-align: justify">{long_text}</p>')
         data = doc.to_bytes()
+        content = content_stream(data)
         # Tw is the PDF word spacing operator
-        expect(data).to_contain(b" Tw")
+        expect(content).to_contain(b" Tw")
 
     # spec: CSS 2.1 §16.4; behaviors: text-letter-spacing
     @test
@@ -2900,9 +3123,10 @@ with describe("text-align: justify"):
         """letter-spacing emits a Tc (character spacing) operator in the stream."""
         doc = HtmlDocument(string='<p style="letter-spacing: 5px">abc</p>')
         data = doc.to_bytes()
+        content = content_stream(data)
         # Tc is the PDF character spacing operator. 5px == 3.75pt.
-        expect(data).to_contain(b" Tc")
-        expect(data).to_contain(b"3.75 Tc")
+        expect(content).to_contain(b" Tc")
+        expect(content).to_contain(b"3.75 Tc")
 
     @test
     def justify_last_line_not_widened():
@@ -2910,8 +3134,9 @@ with describe("text-align: justify"):
         # Short single-line paragraph: no spacing needed, no Tw emitted
         doc = HtmlDocument(string='<p style="text-align: justify">Short line only</p>')
         data = doc.to_bytes()
+        content = content_stream(data)
         # Single-line para has no lines to widen → no Tw
-        assert b" Tw" not in data
+        assert b" Tw" not in content
 
     @test
     def justify_left_aligns_single_line():
@@ -2937,7 +3162,8 @@ with describe("text-align: justify"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b" Tw")
+        content = content_stream(data)
+        expect(content).to_contain(b" Tw")
 
     @test
     def justify_resets_word_spacing_after_line():
@@ -2945,8 +3171,9 @@ with describe("text-align: justify"):
         long_text = "word " * 30
         doc = HtmlDocument(string=f'<p style="text-align: justify">{long_text}</p>')
         data = doc.to_bytes()
+        content = content_stream(data)
         # A reset to 0 should appear somewhere in the stream
-        expect(data).to_contain(b"0 Tw")
+        expect(content).to_contain(b"0 Tw")
 
 
 with describe("tables"):
@@ -2962,10 +3189,11 @@ with describe("tables"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Alice")
-        expect(data).to_contain(b"Bob")
-        expect(data).to_contain(b"(30)")
-        expect(data).to_contain(b"(25)")
+        content = content_stream(data)
+        expect(content).to_contain(b"Alice")
+        expect(content).to_contain(b"Bob")
+        expect(content).to_contain(b"(30)")
+        expect(content).to_contain(b"(25)")
 
     @test
     def table_header_uses_bold_font():
@@ -2978,8 +3206,9 @@ with describe("tables"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data).to_contain(b"Helvetica-Bold")
-        expect(data).to_contain(b"Name")
+        expect(content).to_contain(b"Name")
 
     @test
     def table_draws_cell_borders():
@@ -2987,8 +3216,9 @@ with describe("tables"):
         html = "<table><tr><td>A</td><td>B</td></tr></table>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # Stroke operator (uppercase S) should appear
-        expect(data).to_contain(b"\nS\n")
+        expect(content).to_contain(b"\nS\n")
 
     @test
     def table_columns_sized_by_content():
@@ -3003,8 +3233,9 @@ with describe("tables"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"short")
-        expect(data).to_contain(b"this is a much wider cell content")
+        content = content_stream(data)
+        expect(content).to_contain(b"short")
+        expect(content).to_contain(b"this is a much wider cell content")
 
     @test
     def table_inside_thead_tbody():
@@ -3017,8 +3248,9 @@ with describe("tables"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Header")
-        expect(data).to_contain(b"Body")
+        content = content_stream(data)
+        expect(content).to_contain(b"Header")
+        expect(content).to_contain(b"Body")
 
     @test
     def table_with_long_content_wraps_in_cell():
@@ -3027,9 +3259,10 @@ with describe("tables"):
         html = f"<table><tr><td>{long_text}</td><td>short</td></tr></table>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # Should render without error and contain both cells
-        expect(data).to_contain(b"short")
-        expect(data).to_contain(b"word")
+        expect(content).to_contain(b"short")
+        expect(content).to_contain(b"word")
 
     @test
     def empty_table_renders_without_error():
@@ -3046,9 +3279,10 @@ with describe("tables"):
         html = '<table><tr><td style="color: red">Red</td></tr></table>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Red")
+        content = content_stream(data)
+        expect(content).to_contain(b"Red")
         # The fill color for red should be emitted somewhere
-        expect(data).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def table_multiple_rows_stacked_vertically():
@@ -3062,9 +3296,10 @@ with describe("tables"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Row1")
-        expect(data).to_contain(b"Row2")
-        expect(data).to_contain(b"Row3")
+        content = content_stream(data)
+        expect(content).to_contain(b"Row1")
+        expect(content).to_contain(b"Row2")
+        expect(content).to_contain(b"Row3")
 
     @test
     def table_cells_with_padding():
@@ -3074,8 +3309,9 @@ with describe("tables"):
         html = "<table><tr><td>Left</td><td>Right</td></tr></table>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Left")
-        expect(data).to_contain(b"Right")
+        content = content_stream(data)
+        expect(content).to_contain(b"Left")
+        expect(content).to_contain(b"Right")
 
 
 with describe("images"):
@@ -3090,11 +3326,12 @@ with describe("images"):
         try:
             doc = HtmlDocument(string=f'<img src="{path}" width="50" height="50">')
             data = doc.to_bytes()
+            content = content_stream(data)
             expect(data).to_contain(b"/XObject")
             expect(data).to_contain(b"/Subtype /Image")
             expect(data).to_contain(b"/FlateDecode")
             expect(data).to_contain(b"/DeviceRGB")
-            expect(data).to_contain(b"/Im0 Do")
+            expect(content).to_contain(b"/Im0 Do")
         finally:
             Path(path).unlink()
 
@@ -3113,10 +3350,11 @@ with describe("images"):
         try:
             doc = HtmlDocument(string=f'<img src="{path}" width="50" height="50">')
             data = doc.to_bytes()
+            content = content_stream(data)
             expect(data).to_contain(b"/XObject")
             expect(data).to_contain(b"/Subtype /Image")
             expect(data).to_contain(b"/DCTDecode")
-            expect(data).to_contain(b"/Im0 Do")
+            expect(content).to_contain(b"/Im0 Do")
         finally:
             Path(path).unlink()
 
@@ -3186,9 +3424,10 @@ with describe("images"):
         try:
             doc = HtmlDocument(string=f'<img src="{path}" width="100">')
             data = doc.to_bytes()
+            content = content_stream(data)
             # A 100-wide image should become 50 tall (preserving 2:1 ratio)
             # The CTM is written as "100 0 0 50 x y cm"
-            expect(data).to_contain(b"100 0 0 50")
+            expect(content).to_contain(b"100 0 0 50")
         finally:
             Path(path).unlink()
 
@@ -3199,8 +3438,9 @@ with describe("images"):
             string='<p>before</p><img src="/nonexistent/image.png"><p>after</p>'
         )
         data = doc.to_bytes()
-        expect(data).to_contain(b"before")
-        expect(data).to_contain(b"after")
+        content = content_stream(data)
+        expect(content).to_contain(b"before")
+        expect(content).to_contain(b"after")
         # No image XObject should appear
         assert b"/Subtype /Image" not in data
 
@@ -3232,8 +3472,9 @@ with describe("images"):
         try:
             doc = HtmlDocument(string=f'<img src="{p1}"><img src="{p2}">')
             data = doc.to_bytes()
-            expect(data).to_contain(b"/Im0 Do")
-            expect(data).to_contain(b"/Im1 Do")
+            content = content_stream(data)
+            expect(content).to_contain(b"/Im0 Do")
+            expect(content).to_contain(b"/Im1 Do")
         finally:
             Path(p1).unlink()
             Path(p2).unlink()
@@ -3250,7 +3491,8 @@ with describe("attribute selectors"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def attr_equals_no_match():
@@ -3261,7 +3503,8 @@ with describe("attribute selectors"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"1 0 0 rg" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"1 0 0 rg" not in content).to_equal(True)
 
     @test
     def attr_includes_whitespace_list():
@@ -3272,7 +3515,8 @@ with describe("attribute selectors"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def attr_includes_no_substring_match():
@@ -3280,7 +3524,8 @@ with describe("attribute selectors"):
         html = '<style>[class~="note"] { color: red }</style><p class="notepad">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"1 0 0 rg" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"1 0 0 rg" not in content).to_equal(True)
 
     @test
     def attr_dashmatch_en():
@@ -3288,7 +3533,8 @@ with describe("attribute selectors"):
         html = '<style>[lang|="en"] { color: red }</style><p lang="en">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def attr_dashmatch_en_us():
@@ -3296,7 +3542,8 @@ with describe("attribute selectors"):
         html = '<style>[lang|="en"] { color: red }</style><p lang="en-US">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def attr_dashmatch_english_no_match():
@@ -3304,7 +3551,8 @@ with describe("attribute selectors"):
         html = '<style>[lang|="en"] { color: red }</style><p lang="english">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"1 0 0 rg" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"1 0 0 rg" not in content).to_equal(True)
 
     @test
     def attr_exists_any_value():
@@ -3312,7 +3560,8 @@ with describe("attribute selectors"):
         html = '<style>[data-x] { color: red }</style><p data-x="whatever">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def attr_exists_empty_value():
@@ -3320,7 +3569,8 @@ with describe("attribute selectors"):
         html = '<style>[data-x] { color: red }</style><p data-x="">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def attr_compound_with_type():
@@ -3328,7 +3578,8 @@ with describe("attribute selectors"):
         html = '<style>p[class="foo"] { color: red }</style><p class="foo">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def attr_compound_with_type_no_match():
@@ -3336,7 +3587,8 @@ with describe("attribute selectors"):
         html = '<style>p[class="foo"] { color: red }</style><div class="foo">X</div>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"1 0 0 rg" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"1 0 0 rg" not in content).to_equal(True)
 
     # spec: CSS 2.1 §5.8; behaviors: sel-attribute
     @test
@@ -3348,7 +3600,8 @@ with describe("attribute selectors"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def attr_suffix_match():
@@ -3356,13 +3609,15 @@ with describe("attribute selectors"):
         html = '<style>[src$=".png"] { color: red }</style><p src="picture.png">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
 
 def _td_y_for_needle(data: bytes, needle: bytes) -> float:
     """Return the y coordinate of the Td (next_line) that immediately
-    precedes the given `(needle) Tj` showtext. pdfun writes its content
-    streams uncompressed, so a simple bytes scan recovers baselines.
+    precedes the given `(needle) Tj` showtext. Caller passes the
+    decompressed content stream (via `content_stream(...)`), so a simple
+    bytes scan recovers baselines.
     """
     marker = b"(" + needle + b") Tj"
     idx = data.find(marker)
@@ -3399,7 +3654,7 @@ with describe("table vertical-align"):
     def _two_cell_table(va_for_short: str | None) -> bytes:
         va_attr = f' style="vertical-align: {va_for_short}"' if va_for_short else ""
         html = f"<table><tr><td{va_attr}>X</td><td>{_LONG_BLOB}</td></tr></table>"
-        return HtmlDocument(string=html).to_bytes()
+        return content_stream(HtmlDocument(string=html).to_bytes())
 
     @test
     def vertical_align_default_is_top():
@@ -3470,9 +3725,10 @@ with describe("table vertical-align"):
             "</tr></table>"
         )
         data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
         assert b"%PDF" in data
-        short_y = _td_y_for_needle(data, b"X")
-        top_y = max(_all_td_ys(data))
+        short_y = _td_y_for_needle(content, b"X")
+        top_y = max(_all_td_ys(content))
         assert abs(short_y - top_y) < 1.0
 
 
@@ -3485,9 +3741,10 @@ with describe("table border-collapse"):
             "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>"
         )
         data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
         # Each cell emits a `re\nS\n` (rect + stroke) pair for its border.
         # With 4 cells we expect at least 4 such stroke rectangles.
-        expect(data.count(b" re\nS\n")).to_be_greater_than(3)
+        expect(content.count(b" re\nS\n")).to_be_greater_than(3)
 
     @test
     def border_collapse_collapse_reduces_stroke_count():
@@ -3504,9 +3761,11 @@ with describe("table border-collapse"):
             "</table>"
         )
         sep = HtmlDocument(string=sep_html).to_bytes()
+        sep_content = content_stream(sep)
         col = HtmlDocument(string=col_html).to_bytes()
-        sep_rects = sep.count(b" re\nS\n")
-        col_rects = col.count(b" re\nS\n")
+        col_content = content_stream(col)
+        sep_rects = sep_content.count(b" re\nS\n")
+        col_rects = col_content.count(b" re\nS\n")
         # Separate draws at least 4 bordered cells; collapse draws exactly
         # one outer rectangle plus `m`/`l`/`S` for internal gridlines.
         assert sep_rects >= 4, f"expected >=4 stroke rects, got {sep_rects}"
@@ -3524,13 +3783,14 @@ with describe("table border-collapse"):
             "</table>"
         )
         data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
         # 3 columns -> 2 internal vertical gridlines
         # 3 rows -> 2 internal horizontal gridlines
         # Each gridline emits an `l\nS\n` (line + stroke) pair.
-        expect(data.count(b" l\nS\n")).to_be_greater_than(3)
+        expect(content.count(b" l\nS\n")).to_be_greater_than(3)
         # Text still renders.
-        expect(data).to_contain(b"(A)")
-        expect(data).to_contain(b"(I)")
+        expect(content).to_contain(b"(A)")
+        expect(content).to_contain(b"(I)")
 
     @test
     def border_collapse_separate_explicit_matches_default():
@@ -3542,8 +3802,10 @@ with describe("table border-collapse"):
             "<tr><td>A</td><td>B</td></tr></table>"
         )
         d1 = HtmlDocument(string=default_html).to_bytes()
+        d1_content = content_stream(d1)
         d2 = HtmlDocument(string=explicit_html).to_bytes()
-        assert d1.count(b" re\nS\n") == d2.count(b" re\nS\n")
+        d2_content = content_stream(d2)
+        assert d1_content.count(b" re\nS\n") == d2_content.count(b" re\nS\n")
 
     @test
     def border_collapse_single_row_single_col():
@@ -3551,9 +3813,10 @@ with describe("table border-collapse"):
         and its single cell's content."""
         html = '<table style="border-collapse: collapse"><tr><td>Solo</td></tr></table>'
         data = HtmlDocument(string=html).to_bytes()
-        expect(data).to_contain(b"(Solo)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(Solo)")
         # Exactly one rectangle (the outer border) and no gridlines.
-        assert data.count(b" re\nS\n") == 1
+        assert content.count(b" re\nS\n") == 1
 
     @test
     def attr_substring_match():
@@ -3561,7 +3824,8 @@ with describe("table border-collapse"):
         html = '<style>[class*="big"] { color: red }</style><p class="thebigone">X</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
 
 with describe("pseudo-classes and sibling combinators"):
@@ -3575,7 +3839,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def first_child_skips_second_p():
@@ -3588,8 +3853,9 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"0 0 1 rg")
 
     @test
     def last_child_matches_last_p():
@@ -3600,7 +3866,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def only_child_matches_single_child():
@@ -3608,7 +3875,8 @@ with describe("pseudo-classes and sibling combinators"):
         html = "<style>p:only-child { color: red }</style><div><p>alone</p></div>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def only_child_no_match_when_siblings():
@@ -3616,7 +3884,8 @@ with describe("pseudo-classes and sibling combinators"):
         html = "<style>p:only-child { color: red }</style><div><p>a</p><p>b</p></div>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"1 0 0 rg" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"1 0 0 rg" not in content).to_equal(True)
 
     # spec: CSS 2.1 §5.11.3; behaviors: sel-pseudo-nth-child
     @test
@@ -3628,7 +3897,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def nth_child_odd_hits_odd_positions():
@@ -3639,7 +3909,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def nth_child_literal_three():
@@ -3650,7 +3921,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     # spec: CSS 2.1 §5.11.4; behaviors: sel-pseudo-not
     @test
@@ -3662,7 +3934,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
         # And 'two' should not be red — but we can only tell structurally.
         # Count red-set ops: exactly one fill-color set should appear for the
         # matching p. (The second paragraph falls back to default color.)
@@ -3677,7 +3950,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def adjacent_sibling_no_match_when_not_adjacent():
@@ -3688,7 +3962,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"1 0 0 rg" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"1 0 0 rg" not in content).to_equal(True)
 
     # spec: CSS 2.1 §5.7; behaviors: sel-general-sibling
     @test
@@ -3700,7 +3975,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
     @test
     def pseudo_composes_with_child_combinator():
@@ -3711,7 +3987,8 @@ with describe("pseudo-classes and sibling combinators"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
 
 
 with describe("sup and sub"):
@@ -3722,8 +3999,9 @@ with describe("sup and sub"):
         html = "<p>E=mc<sup>2</sup></p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"E=mc")
-        expect(data).to_contain(b"2")
+        content = content_stream(data)
+        expect(content).to_contain(b"E=mc")
+        expect(content).to_contain(b"2")
 
     @test
     def sub_renders_text():
@@ -3731,9 +4009,10 @@ with describe("sup and sub"):
         html = "<p>H<sub>2</sub>O</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(H")
-        expect(data).to_contain(b"2")
-        expect(data).to_contain(b"O)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(H")
+        expect(content).to_contain(b"2")
+        expect(content).to_contain(b"O)")
 
 
 with describe("table caption"):
@@ -3744,8 +4023,9 @@ with describe("table caption"):
         html = "<table><caption>My Data</caption><tr><td>a</td><td>b</td></tr></table>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(My Data)")
-        expect(data).to_contain(b"(a)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(My Data)")
+        expect(content).to_contain(b"(a)")
 
     @test
     def caption_without_rows_still_renders():
@@ -3753,7 +4033,8 @@ with describe("table caption"):
         html = "<table><caption>Orphan</caption></table>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(Orphan)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(Orphan)")
 
 
 with describe("min-height and max-height"):
@@ -3764,7 +4045,8 @@ with describe("min-height and max-height"):
         html = '<div style="min-height: 100pt; background-color: red">short</div>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(short)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(short)")
 
     @test
     def max_height_clamps_tall_block():
@@ -3775,7 +4057,8 @@ with describe("min-height and max-height"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"0 0 1 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 1 rg")
 
 
 with describe("per-corner border-radius"):
@@ -3789,7 +4072,8 @@ with describe("per-corner border-radius"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(rounded)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(rounded)")
 
     @test
     def border_top_left_radius_longhand():
@@ -3800,7 +4084,8 @@ with describe("per-corner border-radius"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(corner)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(corner)")
 
     @test
     def per_corner_radii_all_four_longhands():
@@ -3814,7 +4099,8 @@ with describe("per-corner border-radius"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"(corners)")
+        content = content_stream(data)
+        expect(content).to_contain(b"(corners)")
 
 
 with describe("opacity"):
@@ -3825,7 +4111,8 @@ with describe("opacity"):
         html = '<p style="opacity: 0.5">faded</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"/Gs1 gs")
+        content = content_stream(data)
+        expect(content).to_contain(b"/Gs1 gs")
         expect(data).to_contain(b"/ExtGState")
 
     @test
@@ -3834,7 +4121,8 @@ with describe("opacity"):
         html = '<p style="opacity: 1">opaque</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(b"/Gs1 gs" not in data).to_equal(True)
+        content = content_stream(data)
+        expect(b"/Gs1 gs" not in content).to_equal(True)
 
     @test
     def opacity_clamped_zero_one():
@@ -3842,7 +4130,8 @@ with describe("opacity"):
         html = '<p style="opacity: 0.25">quarter</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"/Gs1 gs")
+        content = content_stream(data)
+        expect(content).to_contain(b"/Gs1 gs")
 
 
 with describe("inline decoration tags"):
@@ -3853,8 +4142,9 @@ with describe("inline decoration tags"):
         html = "<p>This is <u>underlined</u> text</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # text_decoration underline draws a line, which uses S (stroke)
-        expect(data).to_contain(b"underlined")
+        expect(content).to_contain(b"underlined")
 
     @test
     def ins_tag_is_underlined_like_u():
@@ -3862,7 +4152,8 @@ with describe("inline decoration tags"):
         html = "<p>Marked <ins>insertion</ins></p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"insertion")
+        content = content_stream(data)
+        expect(content).to_contain(b"insertion")
 
     @test
     def del_tag_emits_strikethrough():
@@ -3870,7 +4161,8 @@ with describe("inline decoration tags"):
         html = "<p>removed <del>crossed out</del> here</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"crossed out")
+        content = content_stream(data)
+        expect(content).to_contain(b"crossed out")
 
     @test
     def s_tag_is_strikethrough_like_del():
@@ -3878,7 +4170,8 @@ with describe("inline decoration tags"):
         html = "<p><s>old price</s></p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"old price")
+        content = content_stream(data)
+        expect(content).to_contain(b"old price")
 
 
 with describe("details and summary"):
@@ -3892,8 +4185,9 @@ with describe("details and summary"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Click me")
-        expect(data).to_contain(b"Hidden by default")
+        content = content_stream(data)
+        expect(content).to_contain(b"Click me")
+        expect(content).to_contain(b"Hidden by default")
 
     @test
     def details_body_always_visible_in_pdf():
@@ -3901,7 +4195,8 @@ with describe("details and summary"):
         html = "<details><summary>S</summary><div>Body text</div></details>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Body text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Body text")
 
 
 with describe("display: inline-block"):
@@ -3912,9 +4207,10 @@ with describe("display: inline-block"):
         html = "<p>Before <span style='display:inline-block;'>Badge</span> after.</p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Before")
-        expect(data).to_contain(b"Badge")
-        expect(data).to_contain(b"after")
+        content = content_stream(data)
+        expect(content).to_contain(b"Before")
+        expect(content).to_contain(b"Badge")
+        expect(content).to_contain(b"after")
 
     # spec: CSS 2.1 §9.2.4; behaviors: vfm-display-inline-block
     @test
@@ -3925,9 +4221,10 @@ with describe("display: inline-block"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Hi")
-        expect(data).to_contain(b"Foo")
-        expect(data).to_contain(b"bar")
+        content = content_stream(data)
+        expect(content).to_contain(b"Hi")
+        expect(content).to_contain(b"Foo")
+        expect(content).to_contain(b"bar")
 
     @test
     def inline_block_with_background_color():
@@ -3940,9 +4237,10 @@ with describe("display: inline-block"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         # The red fill color should appear in the content stream
-        expect(data).to_contain(b"1 0 0 rg")
-        expect(data).to_contain(b"ERR")
+        expect(content).to_contain(b"1 0 0 rg")
+        expect(content).to_contain(b"ERR")
 
     @test
     def inline_block_with_border():
@@ -3955,9 +4253,10 @@ with describe("display: inline-block"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"tag")
+        content = content_stream(data)
+        expect(content).to_contain(b"tag")
         # A stroked rectangle should appear somewhere in the content stream
-        expect(data).to_contain(b" re\n")
+        expect(content).to_contain(b" re\n")
 
     @test
     def inline_block_preserves_surrounding_text_order():
@@ -3971,9 +4270,10 @@ with describe("display: inline-block"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"One")
-        expect(data).to_contain(b"Two")
-        expect(data).to_contain(b"Three")
+        content = content_stream(data)
+        expect(content).to_contain(b"One")
+        expect(content).to_contain(b"Two")
+        expect(content).to_contain(b"Three")
 
     @test
     def inline_block_never_splits_across_lines():
@@ -3981,7 +4281,8 @@ with describe("display: inline-block"):
         html = "<p>x <span style='display:inline-block; width: 50px;'>Badge</span></p>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Badge")
+        content = content_stream(data)
+        expect(content).to_contain(b"Badge")
 
 
 with describe("float and clear"):
@@ -3997,8 +4298,9 @@ with describe("float and clear"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Floated")
-        expect(data).to_contain(b"Following text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Floated")
+        expect(content).to_contain(b"Following text")
 
     @test
     def right_float_renders_at_right_edge():
@@ -4008,8 +4310,9 @@ with describe("float and clear"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Side")
-        expect(data).to_contain(b"Main body text")
+        content = content_stream(data)
+        expect(content).to_contain(b"Side")
+        expect(content).to_contain(b"Main body text")
 
     @test
     def float_does_not_advance_cursor():
@@ -4021,8 +4324,9 @@ with describe("float and clear"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Text next to float")
-        expect(data).to_contain(b"Second paragraph")
+        content = content_stream(data)
+        expect(content).to_contain(b"Text next to float")
+        expect(content).to_contain(b"Second paragraph")
 
     # spec: CSS 2.1 §9.5.2; behaviors: vfm-clear
     @test
@@ -4036,7 +4340,8 @@ with describe("float and clear"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Below both")
+        content = content_stream(data)
+        expect(content).to_contain(b"Below both")
 
     @test
     def clear_left_only_affects_left_floats():
@@ -4047,7 +4352,8 @@ with describe("float and clear"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"After clear")
+        content = content_stream(data)
+        expect(content).to_contain(b"After clear")
 
     @test
     def multiple_floats_stack_on_same_side():
@@ -4059,7 +4365,8 @@ with describe("float and clear"):
         )
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        expect(data).to_contain(b"Flowing")
+        content = content_stream(data)
+        expect(content).to_contain(b"Flowing")
 
 
 with describe("bookmarks and internal links"):
@@ -4076,7 +4383,8 @@ with describe("bookmarks and internal links"):
         """The heading text is emitted in an outline item /Title."""
         doc = HtmlDocument(string="<h1>Introduction</h1>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Introduction")
+        content = content_stream(data)
+        expect(content).to_contain(b"Introduction")
         # Outlines dictionary marker.
         expect(data).to_contain(b"/Outlines")
 
@@ -4092,9 +4400,10 @@ with describe("bookmarks and internal links"):
         """An h2 following an h1 becomes a child of the h1 (parent reference)."""
         doc = HtmlDocument(string="<h1>Parent</h1><h2>Child</h2><h2>Sibling</h2>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Parent")
-        expect(data).to_contain(b"Child")
-        expect(data).to_contain(b"Sibling")
+        content = content_stream(data)
+        expect(content).to_contain(b"Parent")
+        expect(content).to_contain(b"Child")
+        expect(content).to_contain(b"Sibling")
         # The h1 is the outline parent; its item should have /First and /Last
         # attributes pointing at its two h2 children. We check for the
         # generic /First and /Last markers on an outline item.
@@ -4107,8 +4416,9 @@ with describe("bookmarks and internal links"):
         """Two h1s produce two top-level outline items with /Next/Prev siblings."""
         doc = HtmlDocument(string="<h1>Alpha</h1><h1>Beta</h1>")
         data = doc.to_bytes()
-        expect(data).to_contain(b"Alpha")
-        expect(data).to_contain(b"Beta")
+        content = content_stream(data)
+        expect(content).to_contain(b"Alpha")
+        expect(content).to_contain(b"Beta")
         expect(data).to_contain(b"/Next")
         expect(data).to_contain(b"/Prev")
 
@@ -4144,8 +4454,9 @@ with describe("bookmarks and internal links"):
         html = '<p><a href="#nope">broken</a></p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(data).to_contain(b"broken")
+        expect(content).to_contain(b"broken")
         # Annotation is emitted (rect present) but without a GoTo action.
         expect(data).to_contain(b"/Link")
         assert b"/GoTo" not in data
@@ -4219,9 +4530,10 @@ with describe("pseudo-elements ::before and ::after"):
         # and the body text stays in the default fill.
         html = '<style>p::before { content: "[R]"; color: red }</style><p>body</p>'
         data = HtmlDocument(string=html).to_bytes()
-        expect(data).to_contain(b"1 0 0 rg")
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
         # One red rg operator, for just the pseudo-element's run.
-        expect(data.count(b"1 0 0 rg")).to_equal(1)
+        expect(content.count(b"1 0 0 rg")).to_equal(1)
 
     @test
     def non_matching_pseudo_rule_is_inert():
@@ -4258,10 +4570,11 @@ with describe("table of contents"):
             "<h1>Wrap up</h1><p>bye</p>"
         )
         data = HtmlDocument(string=html, toc=True).to_bytes()
-        expect(data).to_contain(b"Table of Contents")
-        expect(data).to_contain(b"Intro")
-        expect(data).to_contain(b"Details")
-        expect(data).to_contain(b"Wrap up")
+        content = content_stream(data)
+        expect(content).to_contain(b"Table of Contents")
+        expect(content).to_contain(b"Intro")
+        expect(content).to_contain(b"Details")
+        expect(content).to_contain(b"Wrap up")
 
     # spec: pdfun; behaviors: pdf-toc
     @test
@@ -4286,8 +4599,9 @@ with describe("table of contents"):
         """Passing a string to `toc` uses it as the heading text."""
         html = "<h1>Chapter</h1><p>body</p>"
         data = HtmlDocument(string=html, toc="Contents").to_bytes()
-        expect(data).to_contain(b"Contents")
-        assert b"Table of Contents" not in data
+        content = content_stream(data)
+        expect(content).to_contain(b"Contents")
+        assert b"Table of Contents" not in content
 
     # spec: pdfun; behaviors: pdf-toc
     @test
