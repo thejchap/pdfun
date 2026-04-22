@@ -19,6 +19,9 @@ dev = [
     "tryke",
     "ty>=0.0.26",
 ]
+docs = [
+    "zensical>=0.0.19",
+]
 
 [project.scripts]
 pdfun = "pdfun:main"
@@ -37,7 +40,7 @@ tryke = { git = "https://github.com/thejchap/tryke", branch = "main" }
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = ["FBT", "D203", "D213", "COM812"]
-per-file-ignores = { "tests/*" = ["D", "ANN201", "PLR2004", "PLC0415", "S101", "ERA001"], "src/pdfun/html.py" = ["N802"], "tools/*" = ["T201"] }
+per-file-ignores = { "tests/*" = ["D", "ANN201", "PLR2004", "PLC0415", "S101", "ERA001"], "src/pdfun/html.py" = ["N802"], "tools/*" = ["T201"], "examples/*" = ["T201", "INP001", "E501"] }
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
