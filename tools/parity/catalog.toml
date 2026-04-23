@@ -516,14 +516,14 @@ title = "Visual formatting model"
   title = "position: absolute"
   section = "9.3.1"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "vfm-position-fixed"
   title = "position: fixed"
   section = "9.3.1"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "vfm-offsets"
