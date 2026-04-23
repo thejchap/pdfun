@@ -276,6 +276,52 @@ impl Overflow {
     }
 }
 
+/// CSS `background-repeat`. Controls how a background image is tiled
+/// across the padding box.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum BackgroundRepeat {
+    /// Tile horizontally and vertically to fill the padding box.
+    #[default]
+    Repeat,
+    /// Paint the image exactly once.
+    NoRepeat,
+    /// Tile horizontally only.
+    RepeatX,
+    /// Tile vertically only.
+    RepeatY,
+}
+
+/// CSS `background-size`. Controls the painted size of each tile.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum BackgroundSize {
+    /// Use the image's intrinsic pixel dimensions (1px = 1pt).
+    #[default]
+    Auto,
+    /// Scale the image to fully cover the padding box, preserving aspect ratio.
+    Cover,
+    /// Scale the image to fit inside the padding box, preserving aspect ratio.
+    Contain,
+    /// Explicit width and height. `None` for either dimension means "auto".
+    Length(Option<CssLength>, Option<CssLength>),
+}
+
+/// CSS `background-position`. Anchor point of the first tile. Each axis
+/// is a length (resolved against the padding box) or a percentage.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackgroundPosition {
+    pub x: CssLength,
+    pub y: CssLength,
+}
+
+impl Default for BackgroundPosition {
+    fn default() -> Self {
+        BackgroundPosition {
+            x: CssLength::Pct(0.0),
+            y: CssLength::Pct(0.0),
+        }
+    }
+}
+
 /// CSS `white-space` property. Controls whitespace collapsing and line
 /// wrapping for inline content.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -524,6 +570,10 @@ macro_rules! with_style_fields {
             (right,             copy,  no),
             (bottom,            copy,  no),
             (left,              copy,  no),
+            (background_image,  clone, no),
+            (background_repeat, copy,  no),
+            (background_size,   copy,  no),
+            (background_position, copy, no),
             (pseudo_content,    clone, no),
         }
     };
@@ -644,6 +694,14 @@ pub struct ComputedStyle {
     pub right: Option<CssLength>,
     pub bottom: Option<CssLength>,
     pub left: Option<CssLength>,
+    /// Parsed URL of `background-image: url(...)`. `None` here after
+    /// parsing `background-image: none`. Resolution happens in
+    /// `html_render::apply_block_css_from` against the document's
+    /// `base_dir` (mirroring how `<img src>` is resolved).
+    pub background_image: Option<String>,
+    pub background_repeat: Option<BackgroundRepeat>,
+    pub background_size: Option<BackgroundSize>,
+    pub background_position: Option<BackgroundPosition>,
     /// String value of the CSS `content` property, used for `::before` /
     /// `::after` pseudo-elements. Lives here so `merge_style` can cascade
     /// it like any other property. Only the literal-string form is parsed
@@ -902,6 +960,144 @@ fn parse_calc_atom<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseErr
             input.reset(&state);
             parse_css_length(input).map_err(|_| location.new_custom_error(()))
         }
+    }
+}
+
+/// Parse a CSS URL token. Accepts both the unquoted `url(foo)` form and
+/// the quoted `url("foo")` / `url('foo')` form.
+fn parse_url<'i>(input: &mut Parser<'i, '_>) -> Result<String, ParseError<'i, ()>> {
+    let location = input.current_source_location();
+    let token = input.next()?.clone();
+    match &token {
+        Token::UnquotedUrl(s) => Ok(s.to_string()),
+        Token::Function(name) if name.eq_ignore_ascii_case("url") => input
+            .parse_nested_block(|i: &mut Parser<'_, '_>| {
+                let s = i.expect_string()?.to_string();
+                Ok::<_, ParseError<'_, ()>>(s)
+            })
+            .map_err(|_| location.new_custom_error(())),
+        _ => Err(location.new_custom_error(())),
+    }
+}
+
+/// Parse a `background-size` value. Accepts `cover` / `contain` / `auto`,
+/// or one or two length/percentage values (each of which may be the
+/// keyword `auto`, meaning intrinsic for that axis).
+fn parse_background_size<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<BackgroundSize, ParseError<'i, ()>> {
+    // Try a bare keyword first.
+    let state = input.state();
+    if let Ok(ident) = input.try_parse(|i: &mut Parser<'i, '_>| i.expect_ident_cloned()) {
+        match ident.to_ascii_lowercase().as_str() {
+            "cover" => return Ok(BackgroundSize::Cover),
+            "contain" => return Ok(BackgroundSize::Contain),
+            "auto" => {
+                // Either the shorthand `auto` (auto x auto), or the first
+                // component of a two-value form. Try parsing a second one.
+                if let Ok(h) = input.try_parse(parse_auto_or_length) {
+                    return Ok(BackgroundSize::Length(None, h));
+                }
+                return Ok(BackgroundSize::Auto);
+            }
+            _ => input.reset(&state),
+        }
+    }
+    let w = parse_auto_or_length(input)?;
+    let h = input.try_parse(parse_auto_or_length).ok().unwrap_or(None);
+    Ok(BackgroundSize::Length(w, h))
+}
+
+/// Helper: parse a single background-size component — either `auto`
+/// (returning `None`) or a length/percentage (returning `Some(len)`).
+fn parse_auto_or_length<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<Option<CssLength>, ParseError<'i, ()>> {
+    let state = input.state();
+    if let Ok(ident) = input.try_parse(|i: &mut Parser<'i, '_>| i.expect_ident_cloned())
+        && ident.eq_ignore_ascii_case("auto")
+    {
+        return Ok(None);
+    }
+    input.reset(&state);
+    Ok(Some(parse_css_length(input)?))
+}
+
+/// Parse a `background-position` value. Accepts one or two components.
+/// Each component is either a length/percentage or one of the keywords
+/// `left`/`right`/`top`/`bottom`/`center`. A missing second component
+/// defaults to `center` (50%) per CSS 2.1 §14.2.1.
+fn parse_background_position<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<BackgroundPosition, ParseError<'i, ()>> {
+    let first = parse_bg_pos_component(input)?;
+    let second = input.try_parse(parse_bg_pos_component).ok();
+
+    let (x_val, y_val) = match (first, second) {
+        // Two keyword-components can appear in either order; sort by axis.
+        (BgPosToken::Keyword(a), Some(BgPosToken::Keyword(b))) => {
+            let (xk, yk) = sort_bg_keywords(a, b);
+            (keyword_to_pct(xk, true), keyword_to_pct(yk, false))
+        }
+        (BgPosToken::Keyword(a), Some(BgPosToken::Len(l))) => (keyword_to_pct(a, true), l),
+        (BgPosToken::Len(l), Some(BgPosToken::Keyword(b))) => (l, keyword_to_pct(b, false)),
+        (BgPosToken::Len(lx), Some(BgPosToken::Len(ly))) => (lx, ly),
+        (BgPosToken::Keyword(a), None) => (keyword_to_pct(a, true), CssLength::Pct(50.0)),
+        (BgPosToken::Len(l), None) => (l, CssLength::Pct(50.0)),
+    };
+    Ok(BackgroundPosition { x: x_val, y: y_val })
+}
+
+enum BgPosToken {
+    Keyword(BgKeyword),
+    Len(CssLength),
+}
+
+#[derive(Clone, Copy)]
+enum BgKeyword {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+}
+
+fn parse_bg_pos_component<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<BgPosToken, ParseError<'i, ()>> {
+    let state = input.state();
+    if let Ok(ident) = input.try_parse(|i: &mut Parser<'i, '_>| i.expect_ident_cloned()) {
+        let kw = match ident.to_ascii_lowercase().as_str() {
+            "left" => BgKeyword::Left,
+            "right" => BgKeyword::Right,
+            "top" => BgKeyword::Top,
+            "bottom" => BgKeyword::Bottom,
+            "center" => BgKeyword::Center,
+            _ => {
+                input.reset(&state);
+                return Ok(BgPosToken::Len(parse_css_length(input)?));
+            }
+        };
+        return Ok(BgPosToken::Keyword(kw));
+    }
+    Ok(BgPosToken::Len(parse_css_length(input)?))
+}
+
+fn sort_bg_keywords(a: BgKeyword, b: BgKeyword) -> (BgKeyword, BgKeyword) {
+    // Return (x-axis, y-axis). Center is ambiguous and is resolved by
+    // whichever slot the other keyword occupies. Two y-axis keywords
+    // (or two x-axis keywords) are technically invalid per spec, but we
+    // fall back to treating them as written rather than rejecting the
+    // declaration — the rendered position is approximate in that case.
+    let is_y = |k: BgKeyword| matches!(k, BgKeyword::Top | BgKeyword::Bottom);
+    if is_y(a) && !is_y(b) { (b, a) } else { (a, b) }
+}
+
+fn keyword_to_pct(kw: BgKeyword, _is_x: bool) -> CssLength {
+    match kw {
+        BgKeyword::Left | BgKeyword::Top => CssLength::Pct(0.0),
+        BgKeyword::Right | BgKeyword::Bottom => CssLength::Pct(100.0),
+        BgKeyword::Center => CssLength::Pct(50.0),
     }
 }
 
@@ -1505,6 +1701,38 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
             }
             "left" => {
                 self.style.left = Some(parse_css_length(input)?);
+            }
+            "background-image" => {
+                let location = input.current_source_location();
+                if let Ok(ident) = input.try_parse(|i: &mut Parser<'i, '_>| i.expect_ident_cloned())
+                {
+                    if ident.eq_ignore_ascii_case("none") {
+                        self.style.background_image = None;
+                    } else {
+                        return Err(location.new_custom_error(()));
+                    }
+                } else {
+                    let url = parse_url(input)?;
+                    self.style.background_image = Some(url);
+                }
+            }
+            "background-repeat" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let rep = match ident.to_ascii_lowercase().as_str() {
+                    "repeat" => BackgroundRepeat::Repeat,
+                    "no-repeat" => BackgroundRepeat::NoRepeat,
+                    "repeat-x" => BackgroundRepeat::RepeatX,
+                    "repeat-y" => BackgroundRepeat::RepeatY,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.background_repeat = Some(rep);
+            }
+            "background-size" => {
+                self.style.background_size = Some(parse_background_size(input)?);
+            }
+            "background-position" => {
+                self.style.background_position = Some(parse_background_position(input)?);
             }
             "list-style-type" => {
                 let location = input.current_source_location();

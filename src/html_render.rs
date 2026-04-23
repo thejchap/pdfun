@@ -581,6 +581,11 @@ struct HtmlRenderer<'a> {
     base_dir: Option<std::path::PathBuf>,
     /// Non-fatal issues collected during rendering (image load failures, etc.).
     warnings: Vec<String>,
+    /// URL → (image arena index, intrinsic width, intrinsic height) cache,
+    /// so a `background-image` referenced by multiple blocks (or the same
+    /// block visited twice via the container + paragraph paths) loads and
+    /// registers its pixels exactly once per document.
+    bg_image_cache: std::collections::BTreeMap<String, (usize, f32, f32)>,
     /// Stack of `(tag, BlockStyle)` for currently-open block containers
     /// that have emitted a `ContainerStart` sentinel. The top of the stack
     /// is the innermost container. `handle_end_tag` pops the matching entry
@@ -631,6 +636,7 @@ impl<'a> HtmlRenderer<'a> {
             warnings: Vec::new(),
             container_stack: Vec::new(),
             pending_anchor_id: None,
+            bg_image_cache: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1163,7 +1169,8 @@ impl<'a> HtmlRenderer<'a> {
         }
 
         let runs = std::mem::take(&mut self.runs);
-        let tag = self.current_tag.as_deref();
+        let tag_owned = self.current_tag.clone();
+        let tag = tag_owned.as_deref();
 
         // List item: add marker and indentation
         // Not collapsed: bare <li> outside a list falls through to plain paragraph
@@ -1561,7 +1568,7 @@ impl<'a> HtmlRenderer<'a> {
             })
     }
 
-    fn apply_block_css(&self, block_style: &mut BlockStyle) {
+    fn apply_block_css(&mut self, block_style: &mut BlockStyle) {
         let css_style = self.block_style.clone();
         self.apply_block_css_from(block_style, css_style.as_ref());
     }
@@ -1571,7 +1578,7 @@ impl<'a> HtmlRenderer<'a> {
     /// `emit_container_start_for` to build a container sentinel's
     /// `BlockStyle` without disturbing the single-slot `self.block_style`
     /// that `flush()` later consumes.
-    fn apply_block_css_from(&self, block_style: &mut BlockStyle, src: Option<&ComputedStyle>) {
+    fn apply_block_css_from(&mut self, block_style: &mut BlockStyle, src: Option<&ComputedStyle>) {
         let inherited = self.inherit_stack.last();
         let ctx = self.length_context();
         let resolve = |len: css::CssLength| len.resolve_ctx(&ctx);
@@ -1695,6 +1702,43 @@ impl<'a> HtmlRenderer<'a> {
             }
             if let Some(len) = style.left {
                 block_style.position_left = Some(resolve(len));
+            }
+            if let Some(url) = style.background_image.as_deref() {
+                let cached = self.bg_image_cache.get(url).copied();
+                let entry = if let Some(cached) = cached {
+                    Some(cached)
+                } else {
+                    let path = if let Some(base) = &self.base_dir {
+                        base.join(url)
+                    } else {
+                        std::path::PathBuf::from(url)
+                    };
+                    match crate::image::load_from_path(&path) {
+                        Ok(img_data) => {
+                            let intrinsic_width = img_data.width as f32;
+                            let intrinsic_height = img_data.height as f32;
+                            let index = self.layout.images.len();
+                            self.layout.images.push(img_data);
+                            let entry = (index, intrinsic_width, intrinsic_height);
+                            self.bg_image_cache.insert(url.to_string(), entry);
+                            Some(entry)
+                        }
+                        Err(e) => {
+                            self.warnings.push(format!("background-image {url}: {e}"));
+                            None
+                        }
+                    }
+                };
+                if let Some((index, iw, ih)) = entry {
+                    block_style.background_image = Some(crate::layout::BackgroundImageParams {
+                        index,
+                        intrinsic_width: iw,
+                        intrinsic_height: ih,
+                        repeat: style.background_repeat.unwrap_or_default(),
+                        size: style.background_size.unwrap_or_default(),
+                        position: style.background_position.unwrap_or_default(),
+                    });
+                }
             }
         }
 
