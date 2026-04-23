@@ -3322,7 +3322,9 @@ with describe("images"):
         png = _make_png(2, 2, bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             doc = HtmlDocument(string=f'<img src="{path}" width="50" height="50">')
             data = doc.to_bytes()
@@ -3384,7 +3386,9 @@ with describe("images"):
         png = _make_png_rgba(2, 2, rgba)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             doc = HtmlDocument(string=f'<img src="{path}">')
             data = doc.to_bytes()
@@ -3401,7 +3405,9 @@ with describe("images"):
         png = _make_png(4, 3, rgb)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             doc = HtmlDocument(string=f'<img src="{path}">')
             data = doc.to_bytes()
@@ -3420,7 +3426,9 @@ with describe("images"):
         png = _make_png(4, 2, rgb)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             doc = HtmlDocument(string=f'<img src="{path}" width="100">')
             data = doc.to_bytes()
@@ -4502,7 +4510,9 @@ with describe("background-image"):
         png = _make_png(2, 2, bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             doc = HtmlDocument(
                 string=(
@@ -4526,7 +4536,9 @@ with describe("background-image"):
         png = _make_png(1, 1, bytes([0, 0, 0]))
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             doc = HtmlDocument(
                 string=(
@@ -4549,7 +4561,9 @@ with describe("background-image"):
         png = _make_png(1, 1, bytes([0, 0, 0]))
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             # Intrinsic 1px = 0.75pt tile. In a 30ptx30pt box we expect
             # 40x40 = 1600 tiles.
@@ -4574,7 +4588,9 @@ with describe("background-image"):
         png = _make_png(2, 2, bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             doc = HtmlDocument(
                 string=(
@@ -4601,7 +4617,9 @@ with describe("background-image"):
         png = _make_png(1, 1, bytes([0, 0, 0]))
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             f.write(png)
-            path = f.name
+            # CSS url(...) treats `\` as an escape character, so Windows
+            # paths with backslashes get corrupted. Normalise to POSIX.
+            path = Path(f.name).as_posix()
         try:
             doc = HtmlDocument(
                 string=(
