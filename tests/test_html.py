@@ -5107,3 +5107,104 @@ with describe("table of contents"):
         data_no_toc = HtmlDocument(string=html).to_bytes()
         data_toc = HtmlDocument(string=html, toc=True).to_bytes()
         expect(data_no_toc).to_equal(data_toc)
+
+
+with describe("custom properties (var())"):
+    # spec: CSS Variables §3; behaviors: values3-custom-props
+
+    @test
+    def var_in_same_rule_resolves_to_literal():
+        """A `var(--x)` reference in the same rule block resolves to the
+        custom property's declared value."""
+        html_var = "<div style='--fg: #ff0000; color: var(--fg)'>hi</div>"
+        html_literal = "<div style='color: #ff0000'>hi</div>"
+        expect(content_stream(HtmlDocument(string=html_var).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=html_literal).to_bytes())
+        )
+
+    @test
+    def var_inherits_from_root():
+        """Custom properties inherit, so `var()` in a descendant resolves
+        against an ancestor's declaration."""
+        html_var = (
+            "<style>:root { --accent: rgb(0, 128, 0); } "
+            "p { color: var(--accent); }</style>"
+            "<p>text</p>"
+        )
+        html_literal = "<style>p { color: rgb(0, 128, 0); }</style><p>text</p>"
+        expect(content_stream(HtmlDocument(string=html_var).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=html_literal).to_bytes())
+        )
+
+    @test
+    def var_fallback_used_when_undefined():
+        """`var(--missing, blue)` falls back to the second argument when
+        no custom property with that name is in scope."""
+        html_fallback = "<div style='color: var(--missing, blue)'>text</div>"
+        html_literal = "<div style='color: blue'>text</div>"
+        expect(content_stream(HtmlDocument(string=html_fallback).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=html_literal).to_bytes())
+        )
+
+    @test
+    def var_in_length_property_resolves():
+        """`var()` works in length contexts like `width`, not just color."""
+        html_var = (
+            "<div style='--w: 80px; width: var(--w); background-color: red'>x</div>"
+        )
+        html_literal = "<div style='width: 80px; background-color: red'>x</div>"
+        expect(content_stream(HtmlDocument(string=html_var).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=html_literal).to_bytes())
+        )
+
+    @test
+    def var_inside_calc_resolves():
+        """`calc(var(--w) - 10px)` substitutes the var first, then evaluates
+        the calc expression."""
+        html_var = (
+            "<div style='--w: 50px; width: calc(var(--w) + 30px); "
+            "background-color: red'>x</div>"
+        )
+        html_literal = "<div style='width: 80px; background-color: red'>x</div>"
+        expect(content_stream(HtmlDocument(string=html_var).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=html_literal).to_bytes())
+        )
+
+    @test
+    def nested_var_chain_resolves():
+        """A custom property whose value is itself `var(--other)` resolves
+        through the chain."""
+        html_chained = (
+            "<div style='--primary: teal; --fg: var(--primary); "
+            "color: var(--fg)'>x</div>"
+        )
+        html_literal = "<div style='color: teal'>x</div>"
+        expect(content_stream(HtmlDocument(string=html_chained).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=html_literal).to_bytes())
+        )
+
+    @test
+    def unresolved_var_drops_declaration():
+        """If `var()` has no custom-property match and no fallback, the
+        whole declaration is invalid at computed-value time (dropped)."""
+        # No `--missing` in scope, no fallback → `color` declaration is
+        # dropped, leaving the default (black).
+        html_drop = "<div style='color: var(--missing)'>x</div>"
+        html_default = "<div>x</div>"
+        expect(content_stream(HtmlDocument(string=html_drop).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=html_default).to_bytes())
+        )
+
+    @test
+    def child_var_override_shadows_ancestor():
+        """A custom property redeclared on the child shadows the inherited
+        ancestor value for that subtree."""
+        html_shadow = (
+            "<style>:root { --fg: red; } "
+            "p { color: var(--fg); }</style>"
+            "<div style='--fg: blue'><p>x</p></div>"
+        )
+        html_literal = "<style>p { color: blue; }</style><div><p>x</p></div>"
+        expect(content_stream(HtmlDocument(string=html_shadow).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=html_literal).to_bytes())
+        )

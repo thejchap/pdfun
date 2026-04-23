@@ -976,7 +976,7 @@ title = "Values and units"
   title = "Custom properties (var())"
   section = ""
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "values3-calc"

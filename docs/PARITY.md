@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 116/133 behaviors implemented · 113/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 117/133 behaviors implemented · 114/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -241,7 +241,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| Custom properties (var()) | — | ✅ | ❌ | — |
+| Custom properties (var()) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::var_in_same_rule_resolves_to_literal` |
 | calc() expressions | 8.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::_width_div` |
 
 ## CSS Lists 3 — Lists and counters

@@ -704,7 +704,23 @@ impl<'a> HtmlRenderer<'a> {
                 // property is a non-empty string.
                 let (merged_style, pseudo_before, pseudo_after) =
                     if self.stylesheet.rules.is_empty() {
-                        (inline_style, None, None)
+                        // Fast path: no stylesheet. Still need to resolve
+                        // `var()` references against the element's own
+                        // custom_props and any inherited ancestor props.
+                        let resolved = inline_style.map(|mut s| {
+                            if !s.var_decls.is_empty() {
+                                if let Some(parent) = self.inherit_stack.last() {
+                                    for (k, v) in &parent.custom_props {
+                                        s.custom_props
+                                            .entry(k.clone())
+                                            .or_insert_with(|| v.clone());
+                                    }
+                                }
+                                s.resolve_vars();
+                            }
+                            s
+                        });
+                        (resolved, None, None)
                     } else {
                         let (classes, id, attrs_owned) = extract_element_attrs(handle);
                         let ancestors_owned = build_ancestors(handle);
@@ -751,8 +767,37 @@ impl<'a> HtmlRenderer<'a> {
                         if let Some(inline) = &inline_style {
                             css::merge_style(&mut matched, inline);
                         }
+                        // Pull ancestor custom properties into scope so
+                        // this element's `var()` references resolve
+                        // against the full inherited chain, then run
+                        // `var()` substitution.
+                        if !matched.var_decls.is_empty() {
+                            if let Some(parent) = self.inherit_stack.last() {
+                                for (k, v) in &parent.custom_props {
+                                    matched
+                                        .custom_props
+                                        .entry(k.clone())
+                                        .or_insert_with(|| v.clone());
+                                }
+                            }
+                            matched.resolve_vars();
+                        }
                         let resolve_pseudo = |pseudo: css::PseudoElement| {
-                            let style = css::match_pseudo_rules(&elem, &self.stylesheet, pseudo);
+                            let mut style =
+                                css::match_pseudo_rules(&elem, &self.stylesheet, pseudo);
+                            if !style.var_decls.is_empty() {
+                                // Pseudo-elements inherit custom props
+                                // from their originating element; use
+                                // the element's matched custom_props
+                                // (which already includes its ancestors).
+                                for (k, v) in &matched.custom_props {
+                                    style
+                                        .custom_props
+                                        .entry(k.clone())
+                                        .or_insert_with(|| v.clone());
+                                }
+                                style.resolve_vars();
+                            }
                             style
                                 .pseudo_content
                                 .clone()
@@ -1871,7 +1916,8 @@ fn build_table_cell(
     // Cell's inline style only (no stylesheet matching for MVP)
     let cell_style: Option<ComputedStyle> = extract_style_attr(handle);
 
-    let merged_inherited = inherited.inherit_into(cell_style.as_ref());
+    let mut merged_inherited = inherited.inherit_into(cell_style.as_ref());
+    merged_inherited.resolve_vars();
     // Table cells currently resolve lengths against a fallback context.
     // This is a known limitation — `rem`/`vw`/`vh` inside cells won't see
     // the real root font size or viewport. Threading the renderer's
