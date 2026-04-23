@@ -134,18 +134,29 @@ pub struct BlockStyle {
     /// padding box via a `W n` path after the normal border/background
     /// draw. In a paged medium, `scroll`/`auto` collapse to `hidden`.
     pub overflow: css::Overflow,
-    /// CSS `position`. Only `Static` (default, no-op) and `Relative`
-    /// affect rendering — `Relative` shifts the painted box by
+    /// CSS `position`. `Static` (default, no-op) and `Relative` keep
+    /// the box in normal flow — `Relative` shifts the painted box by
     /// `(position_left, -position_top)` without disturbing siblings.
-    /// `Absolute` / `Fixed` parse but fall back to `Static`.
+    /// `Absolute` and `Fixed` take the box out of flow and paint it
+    /// relative to the page (the initial containing block). `Fixed`
+    /// additionally replays onto every page.
     pub position: css::Position,
-    /// CSS `top` offset in points. Applied only when `position` is
-    /// `Relative`. Positive values shift the painted box downward in
-    /// CSS / PDF space (–y in PDF coords).
+    /// CSS `top` offset in points. For `Relative`, shifts the painted
+    /// box downward. For `Absolute` / `Fixed`, anchors the box's top
+    /// edge this far below the page's top.
     pub position_top: Option<f32>,
-    /// CSS `left` offset in points. Applied only when `position` is
-    /// `Relative`. Positive values shift the painted box to the right.
+    /// CSS `left` offset in points. For `Relative`, shifts the painted
+    /// box rightward. For `Absolute` / `Fixed`, anchors the box's left
+    /// edge this far from the page's left.
     pub position_left: Option<f32>,
+    /// CSS `right` offset in points. Used by `Absolute` / `Fixed` when
+    /// `left` is absent — anchors the box's right edge this far from
+    /// the page's right. Ignored in normal flow / `Relative`.
+    pub position_right: Option<f32>,
+    /// CSS `bottom` offset in points. Used by `Absolute` / `Fixed`
+    /// when `top` is absent — anchors the box's bottom edge this far
+    /// from the page's bottom. Ignored in normal flow / `Relative`.
+    pub position_bottom: Option<f32>,
     /// Resolved background image parameters. `None` means no background
     /// image was specified (or loading failed). Present value carries the
     /// arena index of the loaded image plus the repeat/size/position
@@ -207,6 +218,8 @@ impl Default for BlockStyle {
             position: css::Position::default(),
             position_top: None,
             position_left: None,
+            position_right: None,
+            position_bottom: None,
             background_image: None,
         }
     }
@@ -1024,6 +1037,15 @@ fn parse_padding(padding: Option<&Bound<'_, PyAny>>) -> Result<(f32, f32, f32, f
 
 // ── LayoutInner (non-PyO3) ────────────────────────────────────
 
+/// A captured `position: fixed` block. Collected during the main
+/// layout walk; the stored `ops` are stamped onto every page after the
+/// normal flow finishes. `fonts` lists the font names the ops reference
+/// so each page can register them before serialisation.
+struct FixedBlock {
+    ops: Vec<PdfOp>,
+    fonts: Vec<String>,
+}
+
 pub struct LayoutInner {
     pub margin_top: f32,
     pub margin_right: f32,
@@ -1041,6 +1063,9 @@ pub struct LayoutInner {
     /// Stamped onto every page after the main render loop completes so
     /// that `counter(pages)` can resolve to the final page count.
     pub margin_boxes: css::MarginBoxes,
+    /// Collected `position: fixed` blocks. Stamped onto every page in
+    /// `finish()` so the box appears across the full document.
+    fixed_blocks: Vec<FixedBlock>,
 }
 
 impl LayoutInner {
@@ -1066,6 +1091,7 @@ impl LayoutInner {
             column_rule_color: None,
             images: Vec::new(),
             margin_boxes: css::MarginBoxes::default(),
+            fixed_blocks: Vec::new(),
         }
     }
 
@@ -1159,6 +1185,16 @@ impl LayoutInner {
             col_gap,
             col_count,
         );
+
+        // Stamp @page margin boxes (headers/footers) onto every page.
+        // Done after the main render so `counter(pages)` resolves to the
+        // final page count.
+        self.stamp_margin_boxes(doc);
+
+        // Stamp `position: fixed` blocks onto every page. Captured ops
+        // already include their SaveState/Translate/RestoreState wrapper,
+        // so no additional scoping is needed.
+        self.stamp_fixed_blocks(doc);
 
         Ok(())
     }
@@ -1649,12 +1685,42 @@ impl LayoutInner {
 
         let is_relative_positioned = style.position == css::Position::Relative
             && (style.position_top.is_some() || style.position_left.is_some());
+        let is_absolute_or_fixed = matches!(
+            style.position,
+            css::Position::Absolute | css::Position::Fixed
+        );
+        // Absolute / fixed paint relative to the page (the initial
+        // containing block). Resolve target page coords and derive the
+        // translate delta from the box's natural (in-flow) position.
+        let abs_translate = if is_absolute_or_fixed {
+            let target_left_x = if let Some(l) = style.position_left {
+                l
+            } else if let Some(r) = style.position_right {
+                self.page_width - r - box_width
+            } else {
+                box_x
+            };
+            let target_top_y = if let Some(t) = style.position_top {
+                self.page_height - t
+            } else if let Some(b) = style.position_bottom {
+                b + box_height
+            } else {
+                state.cursor_y
+            };
+            Some((target_left_x - box_x, target_top_y - state.cursor_y))
+        } else {
+            None
+        };
         let needs_state_wrap = style.has_any_styling()
             || style.overflow.clips()
             || is_relative_positioned
+            || is_absolute_or_fixed
             || anon.runs.iter().any(|r| r.color.is_some());
         let cursor_y = state.cursor_y;
+        let is_fixed = style.position == css::Position::Fixed;
         let mut page = state.current_page.lock().unwrap();
+        let ops_capture_start = page.operations.len();
+        let fonts_capture_start = page.fonts_used.len();
 
         for line in &wrapped_lines {
             for seg in &line.segments {
@@ -1689,6 +1755,14 @@ impl LayoutInner {
                 if dx != 0.0 || dy != 0.0 {
                     page.operations.push(PdfOp::Translate { dx, dy });
                 }
+            }
+            // CSS 2.1 §9.6: `position: absolute` / `fixed` paint at a
+            // page-relative target computed above. The box retains its
+            // natural layout metrics — only the paint origin shifts.
+            if let Some((dx, dy)) = abs_translate
+                && (dx != 0.0 || dy != 0.0)
+            {
+                page.operations.push(PdfOp::Translate { dx, dy });
             }
         }
 
@@ -2031,6 +2105,25 @@ impl LayoutInner {
             state.pending_bottom = saved_pending_bottom;
             return Ok(());
         }
+        if is_absolute_or_fixed {
+            // Out of flow: siblings must see the cursor/pending_bottom
+            // exactly as it was on entry. For `fixed`, pull the captured
+            // ops off the current page and stash them for per-page replay
+            // in `finish()`.
+            if is_fixed {
+                let mut page = state.current_page.lock().unwrap();
+                let captured_ops = page.operations.split_off(ops_capture_start);
+                let captured_fonts: Vec<String> = page.fonts_used[fonts_capture_start..].to_vec();
+                drop(page);
+                self.fixed_blocks.push(FixedBlock {
+                    ops: captured_ops,
+                    fonts: captured_fonts,
+                });
+            }
+            state.cursor_y = saved_cursor_y;
+            state.pending_bottom = saved_pending_bottom;
+            return Ok(());
+        }
         state.cursor_y -= box_height + style.margin_bottom + anon.spacing_after;
         state.pending_bottom = style.margin_bottom;
 
@@ -2048,12 +2141,24 @@ impl LayoutInner {
             state.pending_bottom = 0.0;
         }
 
-        // Stamp @page margin boxes (headers/footers) onto every page.
-        // We do this after the main loop so `counter(pages)` can resolve
-        // to the final page count.
-        self.stamp_margin_boxes(doc);
-
         Ok(())
+    }
+
+    fn stamp_fixed_blocks(&self, doc: &mut PdfDocument) {
+        if self.fixed_blocks.is_empty() {
+            return;
+        }
+        for page_arc in &doc.pages {
+            let mut page = page_arc.lock().unwrap();
+            for fb in &self.fixed_blocks {
+                for font in &fb.fonts {
+                    if !page.fonts_used.contains(font) {
+                        page.fonts_used.push(font.clone());
+                    }
+                }
+                page.operations.extend(fb.ops.iter().cloned());
+            }
+        }
     }
 
     /// Iterate `doc.pages` and render any `@page` margin boxes onto each

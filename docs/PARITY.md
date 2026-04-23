@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 114/133 behaviors implemented · 111/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 116/133 behaviors implemented · 113/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -127,9 +127,9 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | clear property | 9.5.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::clear_both_drops_below_floats` |
 | position: static | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::position_static_ignores_offsets` |
 | position: relative | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::relative_top_shifts_box_down` |
-| position: absolute | 9.3.1 | ✅ | ❌ | — |
-| position: fixed | 9.3.1 | ✅ | ❌ | — |
-| top / right / bottom / left offsets | 9.3.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::relative_top_shifts_box_down` |
+| position: absolute | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page` |
+| position: fixed | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::fixed_paints_on_every_page` |
+| top / right / bottom / left offsets | 9.3.2 | ✅ | ✅ | ✅ (3) `tests/test_html.py::relative_top_shifts_box_down`, `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page`, `tests/test_html.py::fixed_paints_on_every_page` |
 
 ## CSS 2.1 §10 — Visual formatting model details
 

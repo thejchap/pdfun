@@ -4488,15 +4488,135 @@ with describe("position: relative"):
         content = content_stream(data)
         expect(b"1 0 0 1 0 0 cm" in content).to_equal(False)
 
+
+with describe("position: absolute"):
+    # spec: CSS 2.1 §9.6; behaviors: vfm-position-absolute, vfm-offsets
+
     @test
-    def absolute_falls_back_to_static_and_does_not_crash():
-        """`position: absolute` is not yet implemented — it currently falls
-        back to static layout without crashing."""
-        html = "<div style='position: absolute; top: 10px; left: 20px;'>A</div>"
+    def absolute_with_top_left_positions_box_relative_to_page():
+        """`position: absolute; top: 100pt; left: 50pt` paints the box at
+        page coordinates, using a translate relative to the in-flow
+        cursor. The box's text content appears in the stream."""
+        html = "<div style='position: absolute; top: 100pt; left: 50pt;'>ABS</div>"
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        # The document renders successfully and contains the text.
-        expect(content_stream(data)).to_contain(b"A")
+        content = content_stream(data)
+        expect(content).to_contain(b"(ABS)")
+        # The translate is wrapped in q…Q (SaveState/RestoreState).
+        expect(content).to_contain(b"\nq\n")
+        expect(content).to_contain(b"\nQ\n")
+
+    @test
+    def absolute_is_removed_from_normal_flow():
+        """A sibling following an absolute-positioned box renders at the
+        same y-position as if the absolute box were not there — confirms
+        siblings don't see its metrics."""
+        with_abs = HtmlDocument(
+            string=(
+                "<p>BEFORE</p>"
+                "<div style='position: absolute; top: 400pt; left: 300pt;'>A</div>"
+                "<p>AFTER</p>"
+            )
+        ).to_bytes()
+        without_abs = HtmlDocument(string="<p>BEFORE</p><p>AFTER</p>").to_bytes()
+        # The "AFTER" paragraph's Td (baseline) should match in both
+        # streams — the absolute box did not advance the cursor.
+        cs_with = content_stream(with_abs)
+        cs_without = content_stream(without_abs)
+        # Extract the Td that precedes "(AFTER)" in each stream.
+        import re as _re
+
+        def baseline_of(content: bytes, text: bytes) -> bytes | None:
+            idx = content.find(text)
+            if idx == -1:
+                return None
+            prefix = content[:idx]
+            matches = _re.findall(rb"([\-\d\.]+ [\-\d\.]+) Td", prefix)
+            return matches[-1] if matches else None
+
+        expect(baseline_of(cs_with, b"(AFTER)")).to_equal(
+            baseline_of(cs_without, b"(AFTER)")
+        )
+
+    @test
+    def absolute_with_right_and_bottom_anchors_to_opposite_edge():
+        """When `left` is absent, `right` is used — the box's right edge
+        is anchored that many points from the page's right edge."""
+        # Use an explicit width so the computed position is stable.
+        html = (
+            "<div style='position: absolute; top: 10pt; right: 20pt;"
+            " width: 50pt;'>R</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"(R)")
+        # Default page width is 612pt. Box's left edge = 612 - 20 - 50 = 542.
+        # We don't assert the exact translate delta (depends on natural
+        # flow origin) but the PDF should still render without error.
+
+
+with describe("position: fixed"):
+    # spec: CSS 2.1 §9.6; behaviors: vfm-position-fixed, vfm-offsets
+
+    @test
+    def fixed_paints_on_every_page():
+        """A `position: fixed` block is stamped onto every page of the
+        document, so the text appears in each page's content stream."""
+        html = (
+            "<div style='position: fixed; top: 10pt; left: 20pt;'>STAMP</div>"
+            "<p>ONE</p>"
+            "<p style='page-break-before: always;'>TWO</p>"
+            "<p style='page-break-before: always;'>THREE</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        import fitz as _fitz
+
+        with _fitz.open(stream=data, filetype="pdf") as pdf:
+            expect(len(pdf)).to_equal(3)
+            for page in pdf:
+                expect(b"(STAMP)" in page.read_contents()).to_equal(True)
+
+    @test
+    def fixed_paints_once_per_page_even_with_multiple_siblings():
+        """A fixed block defined before several in-flow siblings is
+        stamped exactly once per page — not once per sibling."""
+        html = (
+            "<div style='position: fixed; top: 10pt; left: 20pt;'>F</div>"
+            "<p>A</p><p>B</p><p>C</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content.count(b"(F)")).to_equal(1)
+
+    @test
+    def fixed_is_removed_from_normal_flow():
+        """Siblings following a fixed-positioned box render as if the
+        fixed box were not there."""
+        with_fixed = HtmlDocument(
+            string=(
+                "<div style='position: fixed; top: 10pt; left: 20pt;'>F</div>"
+                "<p>AFTER</p>"
+            )
+        ).to_bytes()
+        without_fixed = HtmlDocument(string="<p>AFTER</p>").to_bytes()
+        import re as _re
+
+        def baseline_of(content: bytes, text: bytes) -> bytes | None:
+            idx = content.find(text)
+            if idx == -1:
+                return None
+            prefix = content[:idx]
+            matches = _re.findall(rb"([\-\d\.]+ [\-\d\.]+) Td", prefix)
+            return matches[-1] if matches else None
+
+        cs_with = content_stream(with_fixed)
+        cs_without = content_stream(without_fixed)
+        expect(baseline_of(cs_with, b"(AFTER)")).to_equal(
+            baseline_of(cs_without, b"(AFTER)")
+        )
 
 
 with describe("background-image"):

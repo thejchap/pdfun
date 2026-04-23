@@ -51,6 +51,7 @@ pub(crate) const BUILTIN_FONTS: &[&str] = &[
 
 // ── Internal types ─────────────────────────────────────────────
 
+#[derive(Clone)]
 pub(crate) enum PdfOp {
     BeginText,
     EndText,

@@ -1703,6 +1703,12 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(len) = style.left {
                 block_style.position_left = Some(resolve(len));
             }
+            if let Some(len) = style.right {
+                block_style.position_right = Some(resolve(len));
+            }
+            if let Some(len) = style.bottom {
+                block_style.position_bottom = Some(resolve(len));
+            }
             if let Some(url) = style.background_image.as_deref() {
                 let cached = self.bg_image_cache.get(url).copied();
                 let entry = if let Some(cached) = cached {
