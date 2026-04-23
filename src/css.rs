@@ -172,6 +172,21 @@ pub enum DisplayValue {
     None,
 }
 
+/// CSS `position` values (CSS 2.1 §9.3). Only `static` (initial) and
+/// `relative` are rendered today. `absolute` and `fixed` parse and
+/// cascade but fall back to `static` at layout time — the box stays in
+/// the normal flow.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Position {
+    #[default]
+    Static,
+    Relative,
+    /// Parsed but not rendered — falls back to static.
+    Absolute,
+    /// Parsed but not rendered — falls back to static.
+    Fixed,
+}
+
 /// CSS `float` values. `None` is the initial state (not floated); `Left`
 /// and `Right` take the element out of the normal flow and push it to the
 /// corresponding edge of its containing block.
@@ -504,6 +519,11 @@ macro_rules! with_style_fields {
             (vertical_align,    copy,  no),
             (border_collapse,   copy,  no),
             (overflow,          copy,  no),
+            (position,          copy,  no),
+            (top,               copy,  no),
+            (right,             copy,  no),
+            (bottom,            copy,  no),
+            (left,              copy,  no),
             (pseudo_content,    clone, no),
         }
     };
@@ -619,6 +639,11 @@ pub struct ComputedStyle {
     pub vertical_align: Option<VerticalAlignValue>,
     pub border_collapse: Option<BorderCollapseValue>,
     pub overflow: Option<Overflow>,
+    pub position: Option<Position>,
+    pub top: Option<CssLength>,
+    pub right: Option<CssLength>,
+    pub bottom: Option<CssLength>,
+    pub left: Option<CssLength>,
     /// String value of the CSS `content` property, used for `::before` /
     /// `::after` pseudo-elements. Lives here so `merge_style` can cascade
     /// it like any other property. Only the literal-string form is parsed
@@ -1456,6 +1481,30 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     _ => return Err(location.new_custom_error(())),
                 };
                 self.style.overflow = Some(ov);
+            }
+            "position" => {
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let pos = match ident.to_ascii_lowercase().as_str() {
+                    "static" => Position::Static,
+                    "relative" => Position::Relative,
+                    "absolute" => Position::Absolute,
+                    "fixed" => Position::Fixed,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.position = Some(pos);
+            }
+            "top" => {
+                self.style.top = Some(parse_css_length(input)?);
+            }
+            "right" => {
+                self.style.right = Some(parse_css_length(input)?);
+            }
+            "bottom" => {
+                self.style.bottom = Some(parse_css_length(input)?);
+            }
+            "left" => {
+                self.style.left = Some(parse_css_length(input)?);
             }
             "list-style-type" => {
                 let location = input.current_source_location();

@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 108/133 behaviors implemented · 107/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 110/133 behaviors implemented · 109/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -126,10 +126,10 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | float: right with text wrap | 9.5.1 | ✅ | ✅ | ✅ (1) `tests/visual/float_right.html` |
 | clear property | 9.5.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::clear_both_drops_below_floats` |
 | position: static | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::position_static_ignores_offsets` |
-| position: relative | 9.3.1 | ✅ | ❌ | — |
+| position: relative | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::relative_top_shifts_box_down` |
 | position: absolute | 9.3.1 | ✅ | ❌ | — |
 | position: fixed | 9.3.1 | ✅ | ❌ | — |
-| top / right / bottom / left offsets | 9.3.2 | ✅ | ❌ | — |
+| top / right / bottom / left offsets | 9.3.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::relative_top_shifts_box_down` |
 
 ## CSS 2.1 §10 — Visual formatting model details
 

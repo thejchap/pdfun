@@ -1687,6 +1687,15 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(ov) = style.overflow {
                 block_style.overflow = ov;
             }
+            if let Some(pos) = style.position {
+                block_style.position = pos;
+            }
+            if let Some(len) = style.top {
+                block_style.position_top = Some(resolve(len));
+            }
+            if let Some(len) = style.left {
+                block_style.position_left = Some(resolve(len));
+            }
         }
 
         // Inherit letter/word-spacing and text-indent from ancestor if not

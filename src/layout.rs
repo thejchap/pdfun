@@ -134,6 +134,18 @@ pub struct BlockStyle {
     /// padding box via a `W n` path after the normal border/background
     /// draw. In a paged medium, `scroll`/`auto` collapse to `hidden`.
     pub overflow: css::Overflow,
+    /// CSS `position`. Only `Static` (default, no-op) and `Relative`
+    /// affect rendering — `Relative` shifts the painted box by
+    /// `(position_left, -position_top)` without disturbing siblings.
+    /// `Absolute` / `Fixed` parse but fall back to `Static`.
+    pub position: css::Position,
+    /// CSS `top` offset in points. Applied only when `position` is
+    /// `Relative`. Positive values shift the painted box downward in
+    /// CSS / PDF space (–y in PDF coords).
+    pub position_top: Option<f32>,
+    /// CSS `left` offset in points. Applied only when `position` is
+    /// `Relative`. Positive values shift the painted box to the right.
+    pub position_left: Option<f32>,
 }
 
 impl Default for BlockStyle {
@@ -174,6 +186,9 @@ impl Default for BlockStyle {
             float: css::FloatValue::default(),
             clear: css::ClearValue::default(),
             overflow: css::Overflow::default(),
+            position: css::Position::default(),
+            position_top: None,
+            position_left: None,
         }
     }
 }
@@ -1487,8 +1502,11 @@ impl LayoutInner {
             state.cursor_y -= collapsed_top_delta(state.pending_bottom, style.margin_top);
         }
 
+        let is_relative_positioned = style.position == css::Position::Relative
+            && (style.position_top.is_some() || style.position_left.is_some());
         let needs_state_wrap = style.has_any_styling()
             || style.overflow.clips()
+            || is_relative_positioned
             || anon.runs.iter().any(|r| r.color.is_some());
         let cursor_y = state.cursor_y;
         let mut page = state.current_page.lock().unwrap();
@@ -1516,6 +1534,16 @@ impl LayoutInner {
                 && alpha < 1.0
             {
                 page.operations.push(PdfOp::SetAlpha { alpha });
+            }
+            // CSS 2.1 §9.4.3: `position: relative` shifts the painted box
+            // by (+left, -top) without disturbing flow. Emit the translation
+            // inside the save/restore so siblings are unaffected.
+            if is_relative_positioned {
+                let dx = style.position_left.unwrap_or(0.0);
+                let dy = -style.position_top.unwrap_or(0.0);
+                if dx != 0.0 || dy != 0.0 {
+                    page.operations.push(PdfOp::Translate { dx, dy });
+                }
             }
         }
 

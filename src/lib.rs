@@ -131,6 +131,12 @@ pub(crate) enum PdfOp {
     SetAlpha {
         alpha: f32,
     },
+    /// Concat a pure translation `1 0 0 1 dx dy cm` onto the current
+    /// transformation matrix. Used to implement `position: relative` offsets.
+    Translate {
+        dx: f32,
+        dy: f32,
+    },
 }
 
 pub(crate) struct LinkAnnotation {
@@ -555,6 +561,9 @@ fn write_page_content_stream(
                     .unwrap_or(0);
                 let resource_name = format!("Gs{}", idx + 1);
                 content.set_parameters(Name(resource_name.as_bytes()));
+            }
+            PdfOp::Translate { dx, dy } => {
+                content.transform([1.0, 0.0, 0.0, 1.0, *dx, *dy]);
             }
         }
     }
