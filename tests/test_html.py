@@ -1770,6 +1770,50 @@ with describe("body CSS inheritance"):
         expect(data).to_contain(b"/Courier")
 
     @test
+    def font_family_unknown_first_falls_through_to_next_known():
+        """An unknown family at the head of the chain is skipped in favor of
+        the next available family. spec:fonts3-fallback"""
+        html = "<style>p { font-family: 'NotInstalledFont', serif }</style><p>Text</p>"
+        data = HtmlDocument(string=html).to_bytes()
+        expect(data).to_contain(b"/Times-Roman")
+
+    @test
+    def font_family_all_unknown_falls_back_to_ua_default():
+        """If no family in the chain is available, the user-agent default
+        font is used. For <p>, that's the body default (Helvetica).
+        spec:fonts3-fallback"""
+        html = "<style>p { font-family: 'FakeA', 'FakeB', 'FakeC' }</style><p>Text</p>"
+        data = HtmlDocument(string=html).to_bytes()
+        expect(data).to_contain(b"/Helvetica")
+
+    @test
+    def font_family_fallback_honors_bold_weight():
+        """Fallback picks up `font-weight: bold` from the same rule — the
+        resolved family's bold variant is selected. spec:fonts3-fallback"""
+        html = (
+            "<style>p { font-family: 'FakeFont', serif;"
+            " font-weight: bold }</style><p>Text</p>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        expect(data).to_contain(b"/Times-Bold")
+
+    @test
+    def font_family_unquoted_unknown_skipped():
+        """Unquoted unknown family idents are skipped just like quoted ones.
+        spec:fonts3-fallback"""
+        html = "<style>p { font-family: CustomFont, monospace }</style><p>Text</p>"
+        data = HtmlDocument(string=html).to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+    @test
+    def font_family_case_insensitive_generic():
+        """Generic family keywords match case-insensitively.
+        spec:fonts3-fallback"""
+        html = "<style>p { font-family: 'Unknown', Monospace }</style><p>Text</p>"
+        data = HtmlDocument(string=html).to_bytes()
+        expect(data).to_contain(b"/Courier")
+
+    @test
     def body_font_size_inherits():
         """font-size on body inherits to child elements."""
         html = "<style>body { font-size: 10pt }</style><p>Text</p>"

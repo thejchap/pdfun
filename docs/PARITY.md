@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 118/133 behaviors implemented · 114/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 119/133 behaviors implemented · 114/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -222,7 +222,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | @font-face (web fonts) | 4.1 | ✅ | ❌ | — |
 | Variable fonts | — | 🟡 | ❌ | — |
 | OpenType features (ligatures, alternates) | 6 | ✅ | ❌ | — |
-| Font fallback chains | 4.2 | ✅ | ❌ | — |
+| Font fallback chains | 4.2 | ✅ | ✅ | ⚠️ untested |
 
 ## CSS Multi-column 1 — Multi-column layout
 

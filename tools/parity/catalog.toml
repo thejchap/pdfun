@@ -921,7 +921,7 @@ title = "Fonts Level 3"
   title = "Font fallback chains"
   section = "4.2"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
 # =============================================================================
 # CSS Multi-column Level 1
