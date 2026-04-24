@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 117/133 behaviors implemented · 114/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 118/133 behaviors implemented · 114/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -199,7 +199,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
 | border-radius | 5.1 | ✅ | ✅ | ✅ (1) `tests/visual/border_radius.html` |
-| box-shadow | 7.1 | ✅ | ❌ | — |
+| box-shadow | 7.1 | ✅ | ✅ | ⚠️ untested |
 | background-image | 3.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::background_image_url_emits_xobject` |
 | background-repeat | 3.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::background_image_url_emits_xobject` |
 | background-size | 3.9 | ✅ | ✅ | ⚠️ untested |

@@ -103,6 +103,10 @@ pub(crate) enum PdfOp {
     },
     Stroke,
     Fill,
+    /// Fill the current path with the even-odd rule (`f*`). Used for
+    /// annular paths like inset `box-shadow`, where one rectangle is
+    /// nested inside another and only the region between them should fill.
+    FillEvenOdd,
     FillAndStroke,
     /// `W n`: intersect the current clipping path with the previously-built
     /// path using the nonzero winding rule, then discard the path (no
@@ -519,6 +523,9 @@ fn write_page_content_stream(
             }
             PdfOp::Fill => {
                 content.fill_nonzero();
+            }
+            PdfOp::FillEvenOdd => {
+                content.fill_even_odd();
             }
             PdfOp::FillAndStroke => {
                 content.fill_nonzero_and_stroke();
