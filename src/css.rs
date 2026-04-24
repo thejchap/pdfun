@@ -424,6 +424,22 @@ pub enum ContentItem {
     CounterPages,
 }
 
+/// A single `box-shadow` layer (Backgrounds & Borders 3 §7). Lengths are
+/// unresolved so `em`/`rem`/`%` can be computed against the box at paint
+/// time. `blur` is parsed and stored for parity but not rendered — PDF has
+/// no native gaussian blur and the soft-mask approximation WeasyPrint uses
+/// is not implemented yet, so blurred shadows paint as sharp shadows of the
+/// same offset/spread.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxShadow {
+    pub offset_x: CssLength,
+    pub offset_y: CssLength,
+    pub blur: CssLength,
+    pub spread: CssLength,
+    pub color: (f32, f32, f32),
+    pub inset: bool,
+}
+
 /// Position of a `@page` margin box. Only the six most common positions
 /// are supported; the four corner / side boxes from the CSS spec are out
 /// of scope for now.
@@ -608,6 +624,9 @@ macro_rules! gen_merge {
         /// Merge non-None fields from `source` into `target`.
         pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
             $( merge_one!($kind, target, source, $name); )*
+            if source.box_shadow.is_some() {
+                target.box_shadow.clone_from(&source.box_shadow);
+            }
             for (k, v) in &source.custom_props {
                 target.custom_props.insert(k.clone(), v.clone());
             }
@@ -623,6 +642,7 @@ macro_rules! gen_style_impl {
             pub fn has_any_property(&self) -> bool {
                 false
                     $( || self.$name.is_some() )*
+                    || self.box_shadow.is_some()
                     || !self.custom_props.is_empty()
                     || !self.var_decls.is_empty()
             }
@@ -724,6 +744,11 @@ pub struct ComputedStyle {
     /// it like any other property. Only the literal-string form is parsed
     /// today; `counter()`, `attr()`, and `url()` are not.
     pub pseudo_content: Option<String>,
+    /// `box-shadow` layers, painted back-to-front (last item paints first).
+    /// `None` = property not set; `Some(empty)` = `box-shadow: none` which
+    /// clears any inherited list. Not inherited per spec, but stored outside
+    /// the macro table because it's a list rather than a scalar.
+    pub box_shadow: Option<Vec<BoxShadow>>,
     /// CSS custom properties (`--foo: bar`). Unlike the typed fields above,
     /// custom properties store raw token-stream text and are substituted
     /// into `var()` invocations at cascade time. They always inherit
@@ -1255,6 +1280,86 @@ fn parse_border_radius_shorthand<'i>(
     })
 }
 
+/// Parse a `box-shadow` property value: `none` or a comma-separated list of
+/// shadow layers. Each layer is `[inset]? <x> <y> [<blur> [<spread>]]?
+/// [<color>]?`, where `inset` and the color may appear in any order and the
+/// lengths must appear in the fixed order above. Returns `Ok(None)` for the
+/// `none` keyword, `Ok(Some(vec))` otherwise.
+fn parse_box_shadow_list<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<Option<Vec<BoxShadow>>, ParseError<'i, ()>> {
+    if input
+        .try_parse(|i| {
+            let ident = i.expect_ident()?;
+            if ident.eq_ignore_ascii_case("none") {
+                Ok(())
+            } else {
+                Err(i.new_custom_error::<_, ()>(()))
+            }
+        })
+        .is_ok()
+    {
+        return Ok(Some(Vec::new()));
+    }
+    let mut shadows = Vec::new();
+    loop {
+        shadows.push(parse_box_shadow_one(input)?);
+        if input.try_parse(cssparser::Parser::expect_comma).is_err() {
+            break;
+        }
+    }
+    Ok(Some(shadows))
+}
+
+fn parse_box_shadow_one<'i>(input: &mut Parser<'i, '_>) -> Result<BoxShadow, ParseError<'i, ()>> {
+    let mut inset = false;
+    let mut color: Option<(f32, f32, f32)> = None;
+    let mut lengths: Vec<CssLength> = Vec::with_capacity(4);
+
+    loop {
+        if lengths.len() < 4
+            && let Ok(len) = input.try_parse(parse_css_length)
+        {
+            lengths.push(len);
+            continue;
+        }
+        if !inset
+            && input
+                .try_parse(|i| {
+                    let ident = i.expect_ident()?;
+                    if ident.eq_ignore_ascii_case("inset") {
+                        Ok(())
+                    } else {
+                        Err(i.new_custom_error::<_, ()>(()))
+                    }
+                })
+                .is_ok()
+        {
+            inset = true;
+            continue;
+        }
+        if color.is_none()
+            && let Ok(c) = input.try_parse(parse_css_color)
+        {
+            color = Some(c);
+            continue;
+        }
+        break;
+    }
+
+    if lengths.len() < 2 {
+        return Err(input.new_custom_error::<_, ()>(()));
+    }
+    Ok(BoxShadow {
+        offset_x: lengths[0],
+        offset_y: lengths[1],
+        blur: lengths.get(2).copied().unwrap_or(CssLength::Px(0.0)),
+        spread: lengths.get(3).copied().unwrap_or(CssLength::Px(0.0)),
+        color: color.unwrap_or((0.0, 0.0, 0.0)),
+        inset,
+    })
+}
+
 /// Non-negative variant of `parse_box_shorthand` for padding.
 fn parse_non_negative_box_shorthand<'i>(
     input: &mut Parser<'i, '_>,
@@ -1667,6 +1772,9 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     _ => return Err(location.new_custom_error(())),
                 };
                 self.style.opacity = Some(alpha.clamp(0.0, 1.0));
+            }
+            "box-shadow" => {
+                self.style.box_shadow = parse_box_shadow_list(input)?;
             }
             "text-transform" => {
                 let location = input.current_source_location();

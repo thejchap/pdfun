@@ -1791,6 +1791,19 @@ impl<'a> HtmlRenderer<'a> {
                     });
                 }
             }
+            if let Some(shadows) = &style.box_shadow {
+                block_style.box_shadow = shadows
+                    .iter()
+                    .map(|sh| crate::layout::ResolvedBoxShadow {
+                        offset_x: sh.offset_x.resolve_ctx(&ctx),
+                        offset_y: sh.offset_y.resolve_ctx(&ctx),
+                        blur: sh.blur.resolve_ctx(&ctx),
+                        spread: sh.spread.resolve_ctx(&ctx),
+                        color: sh.color,
+                        inset: sh.inset,
+                    })
+                    .collect();
+            }
         }
 
         // Inherit letter/word-spacing and text-indent from ancestor if not

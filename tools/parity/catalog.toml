@@ -812,7 +812,7 @@ title = "Backgrounds and borders"
   title = "box-shadow"
   section = "7.1"
   weasyprint = "full"
-  implemented = false
+  implemented = true
 
   [[section.behavior]]
   id = "bb3-bg-image"

@@ -4142,6 +4142,93 @@ with describe("opacity"):
         expect(content).to_contain(b"/Gs1 gs")
 
 
+with describe("box-shadow"):
+
+    @test
+    def box_shadow_emits_offset_fill():
+        """box-shadow: 5pt 5pt black paints a filled rect offset from the
+        block before the block's own background. spec:bb3-box-shadow"""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " background-color: rgb(200, 200, 200);"
+            " box-shadow: 5pt 5pt 0 0 rgb(0, 0, 0)'>x</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        # Shadow is black (0 0 0 rg) and must precede the grey background.
+        idx_shadow = content.index(b"0 0 0 rg")
+        idx_bg = content.index(b"0.78431374 0.78431374 0.78431374 rg")
+        expect(idx_shadow < idx_bg).to_equal(True)
+
+    @test
+    def box_shadow_none_paints_no_shadow():
+        """box-shadow: none emits no extra fill ops. spec:bb3-box-shadow"""
+        base = "<div style='width: 60pt; height: 40pt'>x</div>"
+        none = "<div style='width: 60pt; height: 40pt; box-shadow: none'>x</div>"
+        expect(content_stream(HtmlDocument(string=base).to_bytes())).to_equal(
+            content_stream(HtmlDocument(string=none).to_bytes())
+        )
+
+    @test
+    def box_shadow_multiple_layers_back_to_front():
+        """Multiple comma-separated shadows paint last-first so the
+        first-declared layer lands on top. spec:bb3-box-shadow"""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " box-shadow: 2pt 2pt 0 0 rgb(255, 0, 0),"
+            " 10pt 10pt 0 0 rgb(0, 255, 0)'>x</div>"
+        )
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        # Green is declared second but must paint first (back).
+        idx_red = content.index(b"1 0 0 rg")
+        idx_green = content.index(b"0 1 0 rg")
+        expect(idx_green < idx_red).to_equal(True)
+
+    @test
+    def box_shadow_spread_inflates_shadow_rect():
+        """Positive spread inflates the shadow rect equally on all sides.
+        spec:bb3-box-shadow"""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " box-shadow: 0 0 0 5pt rgb(0, 0, 0)'>x</div>"
+        )
+        html_no_spread = (
+            "<div style='width: 60pt; height: 40pt;"
+            " box-shadow: 0 0 0 0 rgb(0, 0, 0)'>x</div>"
+        )
+        with_spread = content_stream(HtmlDocument(string=html).to_bytes())
+        without = content_stream(HtmlDocument(string=html_no_spread).to_bytes())
+        # With spread=5pt, the shadow rect width grows by 2*5=10pt.
+        expect(with_spread).to_contain(b" 70 ")
+        expect(without).to_contain(b" 60 ")
+
+    @test
+    def box_shadow_inset_uses_even_odd_fill():
+        """An inset shadow paints an annulus inside the padding box using
+        the even-odd fill operator (f*). spec:bb3-box-shadow"""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " box-shadow: inset 4pt 4pt 0 0 rgb(0, 0, 0)'>x</div>"
+        )
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"f*")
+
+    @test
+    def box_shadow_inset_uses_clip_for_containment():
+        """An inset shadow wraps its paint in a save/clip/restore bracket so
+        it can't spill outside the padding box. spec:bb3-box-shadow"""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " box-shadow: inset 4pt 4pt 0 0 rgb(0, 0, 0)'>x</div>"
+        )
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        # q ... W n ... f* ... Q sequence for the inset.
+        expect(content).to_contain(b"q\n")
+        expect(content).to_contain(b"W\nn\n")
+        expect(content).to_contain(b"f*\n")
+        expect(content).to_contain(b"Q\n")
+
+
 with describe("inline decoration tags"):
 
     @test

@@ -162,6 +162,24 @@ pub struct BlockStyle {
     /// arena index of the loaded image plus the repeat/size/position
     /// parameters needed to emit the tile grid at paint time.
     pub background_image: Option<BackgroundImageParams>,
+    /// Resolved `box-shadow` layers in CSS declaration order. Paint order
+    /// is back-to-front (last layer paints first, so the first-declared
+    /// shadow sits on top). Empty = no shadows.
+    pub box_shadow: Vec<ResolvedBoxShadow>,
+}
+
+/// Paint-time `box-shadow` layer with all lengths resolved to points.
+/// Blur is stored but currently painted as sharp — we have no soft-mask
+/// emitter yet.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedBoxShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    #[allow(dead_code)]
+    pub blur: f32,
+    pub spread: f32,
+    pub color: (f32, f32, f32),
+    pub inset: bool,
 }
 
 /// Paint-time parameters for a block's `background-image`. The image has
@@ -221,6 +239,7 @@ impl Default for BlockStyle {
             position_right: None,
             position_bottom: None,
             background_image: None,
+            box_shadow: Vec::new(),
         }
     }
 }
@@ -1785,6 +1804,26 @@ impl LayoutInner {
                 }),
             };
 
+        // CSS Backgrounds & Borders 3 §7: outset `box-shadow` layers paint
+        // behind the box (below its background). Spec paint order is back-
+        // to-front so the first-declared layer lands on top — iterate the
+        // list in reverse. Blur is parsed but not rendered yet: shadows
+        // come out sharp (documented limitation; a soft-mask emitter would
+        // be required for a true gaussian blur).
+        for sh in style.box_shadow.iter().rev().filter(|s| !s.inset) {
+            let (r, g, b) = sh.color;
+            let shadow_w = box_width + 2.0 * sh.spread;
+            let shadow_h = box_height + 2.0 * sh.spread;
+            if shadow_w <= 0.0 || shadow_h <= 0.0 {
+                continue;
+            }
+            let shadow_x = box_x + sh.offset_x - sh.spread;
+            let shadow_y = cursor_y - box_height - sh.offset_y - sh.spread;
+            page.operations.push(PdfOp::SetFillColor { r, g, b });
+            emit_rect_path(&mut page.operations, shadow_x, shadow_y, shadow_w, shadow_h);
+            page.operations.push(PdfOp::Fill);
+        }
+
         if let Some((r, g, b)) = style.background_color {
             page.operations.push(PdfOp::SetFillColor { r, g, b });
             emit_rect_path(
@@ -1830,6 +1869,56 @@ impl LayoutInner {
                 box_height,
             );
             page.operations.push(PdfOp::Stroke);
+        }
+
+        // CSS Backgrounds & Borders 3 §7: inset shadows paint inside the
+        // padding box, above the background and border but below content.
+        // The filled region is an annulus between the padding box and a
+        // cutout rectangle shifted by (offset_x, offset_y) and shrunk by
+        // `spread`. Emitted as two rectangle subpaths filled with the
+        // even-odd rule. Clipped to the padding box so the shadow never
+        // paints outside the element.
+        let inset_shadows_present = style.box_shadow.iter().any(|s| s.inset);
+        if inset_shadows_present {
+            let pad_x = box_x + style.border_width;
+            let pad_y = cursor_y - box_height + style.border_width;
+            let pad_w = (box_width - 2.0 * style.border_width).max(0.0);
+            let pad_h = (box_height - 2.0 * style.border_width).max(0.0);
+            if pad_w > 0.0 && pad_h > 0.0 {
+                page.operations.push(PdfOp::SaveState);
+                page.operations.push(PdfOp::Rectangle {
+                    x: pad_x,
+                    y: pad_y,
+                    width: pad_w,
+                    height: pad_h,
+                });
+                page.operations.push(PdfOp::ClipNonzero);
+                for sh in style.box_shadow.iter().rev().filter(|s| s.inset) {
+                    let (r, g, b) = sh.color;
+                    // Cutout rectangle (the unfilled hole). CSS y grows
+                    // down, so a positive offset_y shifts the cutout down
+                    // which in PDF coordinates means subtracting from y.
+                    let cutout_w = (pad_w - 2.0 * sh.spread).max(0.0);
+                    let cutout_h = (pad_h - 2.0 * sh.spread).max(0.0);
+                    let cutout_x = pad_x + sh.offset_x + sh.spread;
+                    let cutout_y = pad_y - sh.offset_y + sh.spread;
+                    page.operations.push(PdfOp::SetFillColor { r, g, b });
+                    page.operations.push(PdfOp::Rectangle {
+                        x: pad_x,
+                        y: pad_y,
+                        width: pad_w,
+                        height: pad_h,
+                    });
+                    page.operations.push(PdfOp::Rectangle {
+                        x: cutout_x,
+                        y: cutout_y,
+                        width: cutout_w,
+                        height: cutout_h,
+                    });
+                    page.operations.push(PdfOp::FillEvenOdd);
+                }
+                page.operations.push(PdfOp::RestoreState);
+            }
         }
 
         // CSS 2.1 §14.2.1: paint `background-image` tiles over the
