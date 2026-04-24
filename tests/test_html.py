@@ -2488,6 +2488,76 @@ with describe("hsl colors"):
         expect(content).to_contain(b"1 0 0 rg")
 
 
+with describe("cmyk colors"):
+    # spec: CSS Color 4 §5.1; behaviors: color-cmyk
+    @test
+    def device_cmyk_pure_cyan_renders_as_rgb():
+        """device-cmyk(1 0 0 0) is pure cyan; we flatten to sRGB (0, 1, 1)."""
+        html = '<p style="color: device-cmyk(1 0 0 0)">cyan</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"0 1 1 rg")
+
+    @test
+    def cmyk_alias_is_accepted():
+        """cmyk() is the short spelling accepted alongside device-cmyk()."""
+        html = '<p style="color: cmyk(0 1 0 0)">magenta</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 1 rg")
+
+    @test
+    def device_cmyk_pure_black_via_k():
+        """device-cmyk(0 0 0 1) collapses all channels to black."""
+        html = '<p style="color: device-cmyk(0 0 0 1)">black</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"0 0 0 rg")
+
+    @test
+    def device_cmyk_percentage_components_are_accepted():
+        """Percentage components are in [0,100] and match the numeric form."""
+        html = '<p style="color: device-cmyk(0% 100% 100% 0%)">red</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+
+    @test
+    def device_cmyk_legacy_comma_syntax_is_accepted():
+        """Legacy comma-separated form parses the same as whitespace-separated."""
+        html = '<p style="color: device-cmyk(0, 1, 1, 0)">red</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+
+    @test
+    def device_cmyk_alpha_component_is_ignored():
+        """Optional alpha (`/ <number>`) parses and is dropped."""
+        html = '<p style="color: device-cmyk(0 1 1 0 / 0.5)">red</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+
+    @test
+    def device_cmyk_works_as_background_color():
+        """device-cmyk() is accepted anywhere a <color> is, e.g. background-color."""
+        html = (
+            '<p style="background-color: device-cmyk(1 0 0 0); '
+            'color: rgb(0, 0, 0)">cyan bg</p>'
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # background fill: cyan (0, 1, 1)
+        expect(content).to_contain(b"0 1 1 rg")
+
+
 with describe("semantic block elements"):
 
     @test
