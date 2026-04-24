@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 use cssparser::{
@@ -607,6 +608,10 @@ macro_rules! gen_merge {
         /// Merge non-None fields from `source` into `target`.
         pub fn merge_style(target: &mut ComputedStyle, source: &ComputedStyle) {
             $( merge_one!($kind, target, source, $name); )*
+            for (k, v) in &source.custom_props {
+                target.custom_props.insert(k.clone(), v.clone());
+            }
+            target.var_decls.extend(source.var_decls.iter().cloned());
         }
     };
 }
@@ -616,7 +621,10 @@ macro_rules! gen_style_impl {
         impl ComputedStyle {
             /// Returns true if any property is set (non-None).
             pub fn has_any_property(&self) -> bool {
-                false $( || self.$name.is_some() )*
+                false
+                    $( || self.$name.is_some() )*
+                    || !self.custom_props.is_empty()
+                    || !self.var_decls.is_empty()
             }
 
             /// Build inherited style for a child element. Inheritable
@@ -625,6 +633,15 @@ macro_rules! gen_style_impl {
             pub fn inherit_into(&self, child: Option<&ComputedStyle>) -> ComputedStyle {
                 let mut result = ComputedStyle::default();
                 $( inherit_one!($kind, $inh, result, child, self, $name); )*
+                // Custom properties always inherit: parent's map is the
+                // base, child's entries override.
+                result.custom_props = self.custom_props.clone();
+                if let Some(c) = child {
+                    for (k, v) in &c.custom_props {
+                        result.custom_props.insert(k.clone(), v.clone());
+                    }
+                    result.var_decls = c.var_decls.clone();
+                }
                 result
             }
         }
@@ -707,6 +724,16 @@ pub struct ComputedStyle {
     /// it like any other property. Only the literal-string form is parsed
     /// today; `counter()`, `attr()`, and `url()` are not.
     pub pseudo_content: Option<String>,
+    /// CSS custom properties (`--foo: bar`). Unlike the typed fields above,
+    /// custom properties store raw token-stream text and are substituted
+    /// into `var()` invocations at cascade time. They always inherit
+    /// (per CSS Variables §3) and never appear in the type-specific macros.
+    pub custom_props: BTreeMap<String, String>,
+    /// Raw (name, value) text of regular declarations whose value contains
+    /// a `var()` reference. These bypass the typed parser at declaration-
+    /// parse time and are resolved by `resolve_vars` once the full
+    /// `custom_props` scope is known (including inherited ancestors).
+    pub var_decls: Vec<(String, String)>,
 }
 
 // ── Color parsing ───────────────────────────────────────────
@@ -1897,10 +1924,289 @@ fn parse_declarations(input: &mut Parser<'_, '_>) -> ComputedStyle {
 
 /// Parse a CSS inline style attribute value into a `ComputedStyle`.
 /// Invalid or unsupported declarations are silently ignored (per CSS spec).
+///
+/// Custom properties (`--foo: value`) and declarations whose value
+/// references `var(...)` are routed around the typed parser: they are
+/// stored as raw text on `ComputedStyle::custom_props` and
+/// `ComputedStyle::var_decls` respectively, and resolved later by
+/// [`ComputedStyle::resolve_vars`] once the full inherited scope is known.
 pub fn parse_inline_style(style_str: &str) -> ComputedStyle {
-    let mut parser_input = ParserInput::new(style_str);
-    let mut parser = Parser::new(&mut parser_input);
-    parse_declarations(&mut parser)
+    let mut style = ComputedStyle::default();
+    let mut regular_buf = String::new();
+    for decl in split_top_level_semicolons(style_str) {
+        let decl_trim = decl.trim();
+        if decl_trim.is_empty() {
+            continue;
+        }
+        let Some(colon_pos) = decl_trim.find(':') else {
+            continue;
+        };
+        let name = decl_trim[..colon_pos].trim();
+        let value = decl_trim[colon_pos + 1..].trim();
+        if name.starts_with("--") {
+            // Custom property. Store the raw value (minus any trailing
+            // `!important`, which we don't model). CSS idents are case-
+            // sensitive for custom properties; preserve original casing.
+            let v = strip_important(value).trim().to_string();
+            style.custom_props.insert(name.to_string(), v);
+            continue;
+        }
+        if value_contains_var(value) {
+            let v = strip_important(value).trim().to_string();
+            style
+                .var_decls
+                .push((name.to_ascii_lowercase(), v));
+            continue;
+        }
+        regular_buf.push_str(decl_trim);
+        regular_buf.push(';');
+    }
+    if !regular_buf.is_empty() {
+        let mut parser_input = ParserInput::new(&regular_buf);
+        let mut parser = Parser::new(&mut parser_input);
+        let parsed = parse_declarations(&mut parser);
+        merge_style(&mut style, &parsed);
+    }
+    style
+}
+
+/// Strip a trailing `!important` marker from a CSS value string. The
+/// marker is parsed-and-ignored — see the note in
+/// `StyleDeclarationParser::parse_value` about importance.
+fn strip_important(value: &str) -> &str {
+    let trimmed = value.trim_end();
+    if let Some(idx) = trimmed.rfind('!') {
+        let after = trimmed[idx + 1..].trim_start();
+        if after.eq_ignore_ascii_case("important") {
+            return trimmed[..idx].trim_end();
+        }
+    }
+    trimmed
+}
+
+/// Does `value` contain a `var(...)` token at the top level (not inside a
+/// string literal)? Case-insensitive.
+fn value_contains_var(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'"' || b == b'\'' {
+            let quote = b;
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if i + 4 <= bytes.len()
+            && (bytes[i] == b'v' || bytes[i] == b'V')
+            && (bytes[i + 1] == b'a' || bytes[i + 1] == b'A')
+            && (bytes[i + 2] == b'r' || bytes[i + 2] == b'R')
+            && bytes[i + 3] == b'('
+            && (i == 0 || !is_ident_continuation(bytes[i - 1]))
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_ident_continuation(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// Find the first top-level `var(...)` invocation in `value`. Returns
+/// `(start, end, name, fallback)` where `start..end` is the byte range of
+/// the whole invocation (including `var(` and the closing `)`), `name` is
+/// the custom-property name (e.g. `--fg`), and `fallback` is the text
+/// after the first top-level comma inside the parens (if any).
+fn find_var_invocation(value: &str) -> Option<(usize, usize, String, Option<String>)> {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'"' || b == b'\'' {
+            let quote = b;
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if i + 4 <= bytes.len()
+            && (bytes[i] == b'v' || bytes[i] == b'V')
+            && (bytes[i + 1] == b'a' || bytes[i + 1] == b'A')
+            && (bytes[i + 2] == b'r' || bytes[i + 2] == b'R')
+            && bytes[i + 3] == b'('
+            && (i == 0 || !is_ident_continuation(bytes[i - 1]))
+        {
+            let start = i;
+            let content_start = i + 4;
+            let mut j = content_start;
+            let mut depth: i32 = 1;
+            while j < bytes.len() && depth > 0 {
+                let c = bytes[j];
+                match c {
+                    b'(' => {
+                        depth += 1;
+                        j += 1;
+                    }
+                    b')' => {
+                        depth -= 1;
+                        j += 1;
+                    }
+                    b'"' | b'\'' => {
+                        let q = c;
+                        j += 1;
+                        while j < bytes.len() {
+                            let cc = bytes[j];
+                            if cc == b'\\' && j + 1 < bytes.len() {
+                                j += 2;
+                                continue;
+                            }
+                            if cc == q {
+                                j += 1;
+                                break;
+                            }
+                            j += 1;
+                        }
+                    }
+                    _ => j += 1,
+                }
+            }
+            if depth != 0 {
+                return None;
+            }
+            let content_end = j - 1;
+            let inner = &value[content_start..content_end];
+            let (name, fallback) = split_var_args(inner);
+            return Some((start, j, name, fallback));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Split the inside of a `var(...)` invocation on the first top-level
+/// comma. Returns `(name, fallback_text_or_none)`.
+fn split_var_args(inner: &str) -> (String, Option<String>) {
+    let bytes = inner.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+            }
+            b'"' | b'\'' => {
+                let q = b;
+                i += 1;
+                while i < bytes.len() {
+                    let cc = bytes[i];
+                    if cc == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if cc == q {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b',' if depth == 0 => {
+                let name = inner[..i].trim().to_string();
+                let fallback = inner[i + 1..].trim().to_string();
+                return (name, Some(fallback));
+            }
+            _ => i += 1,
+        }
+    }
+    (inner.trim().to_string(), None)
+}
+
+/// Substitute every `var(...)` invocation in `value` with its resolved
+/// text. Iterates up to 16 rounds so nested references (e.g. a custom
+/// property whose own value contains another `var()`) resolve. Returns
+/// `None` if a `var()` has no matching custom property and no fallback.
+fn substitute_vars(value: &str, props: &BTreeMap<String, String>) -> Option<String> {
+    let mut cur = value.to_string();
+    for _ in 0..16 {
+        let next = substitute_vars_once(&cur, props)?;
+        if next == cur {
+            return Some(cur);
+        }
+        cur = next;
+    }
+    Some(cur)
+}
+
+fn substitute_vars_once(value: &str, props: &BTreeMap<String, String>) -> Option<String> {
+    let Some((start, end, name, fallback)) = find_var_invocation(value) else {
+        return Some(value.to_string());
+    };
+    let replacement = props.get(&name).cloned().or(fallback)?;
+    let mut out = String::with_capacity(value.len() + replacement.len());
+    out.push_str(&value[..start]);
+    out.push_str(&replacement);
+    out.push_str(&value[end..]);
+    Some(out)
+}
+
+impl ComputedStyle {
+    /// Resolve pending `var()` declarations against `self.custom_props`
+    /// and merge the parsed results back in. The caller is responsible
+    /// for ensuring `custom_props` already includes any inherited entries
+    /// from ancestors (`inherit_into` does this automatically).
+    pub fn resolve_vars(&mut self) {
+        if self.var_decls.is_empty() {
+            return;
+        }
+        let decls = std::mem::take(&mut self.var_decls);
+        let mut resolved = ComputedStyle::default();
+        for (name, raw) in decls {
+            let Some(substituted) = substitute_vars(&raw, &self.custom_props) else {
+                continue;
+            };
+            if value_contains_var(&substituted) {
+                // Depth limit hit or unresolvable fallback; drop per spec.
+                continue;
+            }
+            let mini = format!("{name}: {substituted};");
+            let parsed = parse_inline_style(&mini);
+            merge_style(&mut resolved, &parsed);
+        }
+        // Drop any var_decls that leaked through the re-parse (e.g. a
+        // fallback containing `var(...)` that wasn't fully resolved).
+        resolved.var_decls.clear();
+        merge_style(self, &resolved);
+    }
 }
 
 // ── Selector types ────────────────────────────────────────
@@ -2431,6 +2737,17 @@ fn parse_compound_from_text(
                     arg = Some(text[arg_start..arg_end].to_string());
                 }
 
+                // `:root` — matches the document root element. In HTML
+                // that is always `<html>`, so we desugar the pseudo into a
+                // type selector with pseudo-class specificity (0, 1, 0).
+                // This covers the typical custom-property idiom
+                // `:root { --foo: … }` without needing a full `is-root`
+                // predicate threaded through the matcher.
+                if name == "root" {
+                    parts.push(SimpleSelector::Type("html".to_string()));
+                    *class_count += 1;
+                    continue;
+                }
                 if let Some((pseudo, spec_delta)) = parse_pseudo_class(&name, arg.as_deref()) {
                     parts.push(SimpleSelector::PseudoClass(pseudo));
                     // `:not(x)` contributes the specificity of its argument,
@@ -4390,5 +4707,51 @@ mod tests {
         merge_style(&mut target, &source);
         assert_eq!(target.color, Some((1.0, 0.0, 0.0)));
         assert!(matches!(target.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
+    }
+
+    #[test]
+    fn custom_property_captured_as_raw_text() {
+        let s = parse_inline_style("--fg: #ff0000");
+        assert_eq!(s.custom_props.get("--fg").map(String::as_str), Some("#ff0000"));
+    }
+
+    #[test]
+    fn var_decl_captured_as_raw_text() {
+        let s = parse_inline_style("color: var(--fg)");
+        assert_eq!(s.var_decls.len(), 1);
+        assert_eq!(s.var_decls[0].0, "color");
+        assert!(s.var_decls[0].1.contains("var(--fg)"));
+    }
+
+    #[test]
+    fn resolve_vars_substitutes_from_same_block() {
+        let mut s = parse_inline_style("--fg: red; color: var(--fg)");
+        assert!(s.color.is_none());
+        s.resolve_vars();
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert!(s.var_decls.is_empty());
+    }
+
+    #[test]
+    fn resolve_vars_uses_fallback_when_undefined() {
+        let mut s = parse_inline_style("color: var(--missing, blue)");
+        s.resolve_vars();
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn resolve_vars_drops_decl_without_fallback() {
+        let mut s = parse_inline_style("color: var(--missing)");
+        s.resolve_vars();
+        assert!(s.color.is_none());
+        assert!(s.var_decls.is_empty());
+    }
+
+    #[test]
+    fn resolve_vars_handles_chained_references() {
+        let mut s = parse_inline_style("--a: teal; --b: var(--a); color: var(--b)");
+        s.resolve_vars();
+        // teal = rgb(0, 128, 128)
+        assert!(s.color.is_some());
     }
 }
