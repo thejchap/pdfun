@@ -702,117 +702,117 @@ impl<'a> HtmlRenderer<'a> {
                 // resolve `::before` / `::after` pseudo-element styles; those
                 // only produce a visible injection when their `content`
                 // property is a non-empty string.
-                let (merged_style, pseudo_before, pseudo_after) =
-                    if self.stylesheet.rules.is_empty() {
-                        // Fast path: no stylesheet. Still need to resolve
-                        // `var()` references against the element's own
-                        // custom_props and any inherited ancestor props.
-                        let resolved = inline_style.map(|mut s| {
-                            if !s.var_decls.is_empty() {
-                                if let Some(parent) = self.inherit_stack.last() {
-                                    for (k, v) in &parent.custom_props {
-                                        s.custom_props
-                                            .entry(k.clone())
-                                            .or_insert_with(|| v.clone());
-                                    }
+                let (merged_style, pseudo_before, pseudo_after) = if self
+                    .stylesheet
+                    .rules
+                    .is_empty()
+                {
+                    // Fast path: no stylesheet. Still need to resolve
+                    // `var()` references against the element's own
+                    // custom_props and any inherited ancestor props.
+                    let resolved = inline_style.map(|mut s| {
+                        if !s.var_decls.is_empty() {
+                            if let Some(parent) = self.inherit_stack.last() {
+                                for (k, v) in &parent.custom_props {
+                                    s.custom_props.entry(k.clone()).or_insert_with(|| v.clone());
                                 }
-                                s.resolve_vars();
                             }
-                            s
-                        });
-                        (resolved, None, None)
-                    } else {
-                        let (classes, id, attrs_owned) = extract_element_attrs(handle);
-                        let ancestors_owned = build_ancestors(handle);
-                        let ancestors: Vec<css::AncestorInfo<'_>> = ancestors_owned
-                            .iter()
-                            .map(|(t, c, i, a)| {
-                                (
-                                    t.as_str(),
-                                    c.iter().map(String::as_str).collect(),
-                                    i.as_deref(),
-                                    a.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect(),
-                                )
-                            })
-                            .collect();
-                        let preceding: Vec<SiblingRecord<'_>> = preceding_siblings
-                            .iter()
-                            .map(|s| SiblingRecord {
-                                tag: s.tag.as_str(),
-                                classes: s.classes.iter().map(String::as_str).collect(),
-                                id: s.id.as_deref(),
-                                attributes: s
-                                    .attributes
-                                    .iter()
-                                    .map(|(n, v)| (n.as_str(), v.as_str()))
-                                    .collect(),
-                                sibling_index: s.sibling_index,
-                                sibling_count: s.sibling_count,
-                            })
-                            .collect();
-                        let elem = ElementInfo {
-                            tag,
-                            classes: classes.iter().map(String::as_str).collect(),
-                            id: id.as_deref(),
-                            attributes: attrs_owned
+                            s.resolve_vars();
+                        }
+                        s
+                    });
+                    (resolved, None, None)
+                } else {
+                    let (classes, id, attrs_owned) = extract_element_attrs(handle);
+                    let ancestors_owned = build_ancestors(handle);
+                    let ancestors: Vec<css::AncestorInfo<'_>> = ancestors_owned
+                        .iter()
+                        .map(|(t, c, i, a)| {
+                            (
+                                t.as_str(),
+                                c.iter().map(String::as_str).collect(),
+                                i.as_deref(),
+                                a.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect(),
+                            )
+                        })
+                        .collect();
+                    let preceding: Vec<SiblingRecord<'_>> = preceding_siblings
+                        .iter()
+                        .map(|s| SiblingRecord {
+                            tag: s.tag.as_str(),
+                            classes: s.classes.iter().map(String::as_str).collect(),
+                            id: s.id.as_deref(),
+                            attributes: s
+                                .attributes
                                 .iter()
                                 .map(|(n, v)| (n.as_str(), v.as_str()))
                                 .collect(),
-                            ancestors,
-                            sibling_index,
-                            sibling_count,
-                            preceding_siblings: preceding,
-                        };
-                        let mut matched = css::match_rules(&elem, &self.stylesheet);
-                        if let Some(inline) = &inline_style {
-                            css::merge_style(&mut matched, inline);
-                        }
-                        // Pull ancestor custom properties into scope so
-                        // this element's `var()` references resolve
-                        // against the full inherited chain, then run
-                        // `var()` substitution.
-                        if !matched.var_decls.is_empty() {
-                            if let Some(parent) = self.inherit_stack.last() {
-                                for (k, v) in &parent.custom_props {
-                                    matched
-                                        .custom_props
-                                        .entry(k.clone())
-                                        .or_insert_with(|| v.clone());
-                                }
-                            }
-                            matched.resolve_vars();
-                        }
-                        let resolve_pseudo = |pseudo: css::PseudoElement| {
-                            let mut style =
-                                css::match_pseudo_rules(&elem, &self.stylesheet, pseudo);
-                            if !style.var_decls.is_empty() {
-                                // Pseudo-elements inherit custom props
-                                // from their originating element; use
-                                // the element's matched custom_props
-                                // (which already includes its ancestors).
-                                for (k, v) in &matched.custom_props {
-                                    style
-                                        .custom_props
-                                        .entry(k.clone())
-                                        .or_insert_with(|| v.clone());
-                                }
-                                style.resolve_vars();
-                            }
-                            style
-                                .pseudo_content
-                                .clone()
-                                .filter(|s| !s.is_empty())
-                                .map(|text| (text, style))
-                        };
-                        let before = resolve_pseudo(css::PseudoElement::Before);
-                        let after = resolve_pseudo(css::PseudoElement::After);
-                        let style_opt = if matched.has_any_property() {
-                            Some(matched)
-                        } else {
-                            inline_style
-                        };
-                        (style_opt, before, after)
+                            sibling_index: s.sibling_index,
+                            sibling_count: s.sibling_count,
+                        })
+                        .collect();
+                    let elem = ElementInfo {
+                        tag,
+                        classes: classes.iter().map(String::as_str).collect(),
+                        id: id.as_deref(),
+                        attributes: attrs_owned
+                            .iter()
+                            .map(|(n, v)| (n.as_str(), v.as_str()))
+                            .collect(),
+                        ancestors,
+                        sibling_index,
+                        sibling_count,
+                        preceding_siblings: preceding,
                     };
+                    let mut matched = css::match_rules(&elem, &self.stylesheet);
+                    if let Some(inline) = &inline_style {
+                        css::merge_style(&mut matched, inline);
+                    }
+                    // Pull ancestor custom properties into scope so
+                    // this element's `var()` references resolve
+                    // against the full inherited chain, then run
+                    // `var()` substitution.
+                    if !matched.var_decls.is_empty() {
+                        if let Some(parent) = self.inherit_stack.last() {
+                            for (k, v) in &parent.custom_props {
+                                matched
+                                    .custom_props
+                                    .entry(k.clone())
+                                    .or_insert_with(|| v.clone());
+                            }
+                        }
+                        matched.resolve_vars();
+                    }
+                    let resolve_pseudo = |pseudo: css::PseudoElement| {
+                        let mut style = css::match_pseudo_rules(&elem, &self.stylesheet, pseudo);
+                        if !style.var_decls.is_empty() {
+                            // Pseudo-elements inherit custom props
+                            // from their originating element; use
+                            // the element's matched custom_props
+                            // (which already includes its ancestors).
+                            for (k, v) in &matched.custom_props {
+                                style
+                                    .custom_props
+                                    .entry(k.clone())
+                                    .or_insert_with(|| v.clone());
+                            }
+                            style.resolve_vars();
+                        }
+                        style
+                            .pseudo_content
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .map(|text| (text, style))
+                    };
+                    let before = resolve_pseudo(css::PseudoElement::Before);
+                    let after = resolve_pseudo(css::PseudoElement::After);
+                    let style_opt = if matched.has_any_property() {
+                        Some(matched)
+                    } else {
+                        inline_style
+                    };
+                    (style_opt, before, after)
+                };
 
                 // Skip elements with display: none (and their entire subtree)
                 if let Some(ref style) = merged_style
