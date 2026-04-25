@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 119/133 behaviors implemented · 114/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 120/133 behaviors implemented · 115/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -213,7 +213,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | hsl() function | 4.2.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::hsl_red_renders` |
 | hsla() function | 4.2.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::hsla_accepts_alpha_component` |
 | opacity property | 3.2 | ✅ | ✅ | ✅ (1) `tests/visual/opacity.html` |
-| device-cmyk() / CMYK colors | — | ❌ | ❌ | — |
+| device-cmyk() / CMYK colors | — | ❌ | ✅ | ✅ (1) `tests/test_html.py::device_cmyk_pure_cyan_renders_as_rgb` |
 
 ## CSS Fonts 3 — Fonts Level 3
 

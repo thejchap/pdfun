@@ -884,7 +884,8 @@ title = "Color spaces and alpha"
   title = "device-cmyk() / CMYK colors"
   section = ""
   weasyprint = "none"
-  implemented = false
+  implemented = true
+  notes = "Parses device-cmyk() and cmyk() with numeric or percentage components and flattens to sRGB at parse time. The emitted PDF uses RGB fill/stroke ops, not native /DeviceCMYK — true CMYK output is a follow-up."
 
 # =============================================================================
 # CSS Fonts Level 3

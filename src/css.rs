@@ -427,7 +427,7 @@ pub enum ContentItem {
 /// A single `box-shadow` layer (Backgrounds & Borders 3 §7). Lengths are
 /// unresolved so `em`/`rem`/`%` can be computed against the box at paint
 /// time. `blur` is parsed and stored for parity but not rendered — PDF has
-/// no native gaussian blur and the soft-mask approximation WeasyPrint uses
+/// no native gaussian blur and the soft-mask approximation `WeasyPrint` uses
 /// is not implemented yet, so blurred shadows paint as sharp shadows of the
 /// same offset/spread.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -821,6 +821,53 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
                 Ok((r, g, b))
             })
         }
+        Token::Function(name)
+            if name.eq_ignore_ascii_case("device-cmyk") || name.eq_ignore_ascii_case("cmyk") =>
+        {
+            input.parse_nested_block(parse_cmyk_to_rgb)
+        }
+        _ => Err(location.new_custom_error(())),
+    }
+}
+
+/// Parse the four CMYK components of `device-cmyk()` / `cmyk()` per CSS
+/// Color 4 §5.1, then flatten to RGB via the straightforward
+/// `(1 - c)*(1 - k)` formula. We don't carry CMYK through the PDF pipeline
+/// yet — browsers and `WeasyPrint` also reject or drop these values, so
+/// accepting the syntax and painting the sRGB fallback is already a
+/// parity win. Components accept `<number>` in [0, 1] or `<percentage>`;
+/// commas between components are tolerated for the legacy syntax, and a
+/// trailing alpha (`/ <number>` or `, <number>`) is parsed and ignored.
+fn parse_cmyk_to_rgb<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<(f32, f32, f32), ParseError<'i, ()>> {
+    let c = parse_cmyk_component(input)?;
+    let _ = input.try_parse(cssparser::Parser::expect_comma);
+    let m = parse_cmyk_component(input)?;
+    let _ = input.try_parse(cssparser::Parser::expect_comma);
+    let y = parse_cmyk_component(input)?;
+    let _ = input.try_parse(cssparser::Parser::expect_comma);
+    let k = parse_cmyk_component(input)?;
+    let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
+        let comma = i.try_parse(cssparser::Parser::expect_comma).is_ok();
+        if !comma {
+            i.expect_delim('/')?;
+        }
+        let _ = i.expect_number()?;
+        Ok(())
+    });
+    let r = (1.0 - c) * (1.0 - k);
+    let g = (1.0 - m) * (1.0 - k);
+    let b = (1.0 - y) * (1.0 - k);
+    Ok((r, g, b))
+}
+
+fn parse_cmyk_component<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
+    let location = input.current_source_location();
+    let token = input.next()?.clone();
+    match &token {
+        Token::Number { value, .. } => Ok(value.clamp(0.0, 1.0)),
+        Token::Percentage { unit_value, .. } => Ok(unit_value.clamp(0.0, 1.0)),
         _ => Err(location.new_custom_error(())),
     }
 }
@@ -2061,9 +2108,7 @@ pub fn parse_inline_style(style_str: &str) -> ComputedStyle {
         }
         if value_contains_var(value) {
             let v = strip_important(value).trim().to_string();
-            style
-                .var_decls
-                .push((name.to_ascii_lowercase(), v));
+            style.var_decls.push((name.to_ascii_lowercase(), v));
             continue;
         }
         regular_buf.push_str(decl_trim);
@@ -4820,7 +4865,10 @@ mod tests {
     #[test]
     fn custom_property_captured_as_raw_text() {
         let s = parse_inline_style("--fg: #ff0000");
-        assert_eq!(s.custom_props.get("--fg").map(String::as_str), Some("#ff0000"));
+        assert_eq!(
+            s.custom_props.get("--fg").map(String::as_str),
+            Some("#ff0000")
+        );
     }
 
     #[test]
