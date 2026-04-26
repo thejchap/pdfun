@@ -901,7 +901,8 @@ title = "Fonts Level 3"
   title = "@font-face (web fonts)"
   section = "4.1"
   weasyprint = "full"
-  implemented = false
+  implemented = true
+  notes = "data: URIs and relative-path url() supported (TTF/OTF). local(), http(s), woff, woff2 are recognised but skipped with a warning."
 
   [[section.behavior]]
   id = "fonts3-variable"

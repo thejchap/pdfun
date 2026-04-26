@@ -6,7 +6,20 @@ use pyo3::prelude::*;
 use crate::box_tree::{AnonymousBox, BlockBox, Node};
 use crate::css;
 use crate::font_metrics;
-use crate::{BUILTIN_FONTS, PageContent, PdfDocument, PdfOp};
+use crate::{BUILTIN_FONTS, PageContent, PdfDocument, PdfOp, RegisteredFont};
+
+/// Emit the right "show text" operator for a font: built-in fonts use
+/// `Tj` with a `(WinAnsi)` literal string, but `@font-face` faces are
+/// embedded as Type0 / `CIDFontType2` / Identity-H — for those we have
+/// to emit a `Vec<char>` that the page writer remaps into 16-bit glyph
+/// IDs.
+fn show_text_for(font_name: &str, text: String) -> PdfOp {
+    if font_name.starts_with("Custom-") {
+        PdfOp::ShowGlyphs(text.chars().collect())
+    } else {
+        PdfOp::ShowText(text)
+    }
+}
 
 /// Word-wrap text into lines that fit within `max_width` points.
 pub fn wrap_text_impl(
@@ -1085,6 +1098,11 @@ pub struct LayoutInner {
     /// Collected `position: fixed` blocks. Stamped onto every page in
     /// `finish()` so the box appears across the full document.
     fixed_blocks: Vec<FixedBlock>,
+    /// Embedded `@font-face` payloads collected during render. Drained
+    /// into `PdfDocument.registered_fonts` at `finish()` time so the
+    /// PDF emission pipeline subsets and embeds them like any other
+    /// `register_font()`-registered font.
+    pub font_face_registered: Vec<RegisteredFont>,
 }
 
 impl LayoutInner {
@@ -1111,6 +1129,7 @@ impl LayoutInner {
             images: Vec::new(),
             margin_boxes: css::MarginBoxes::default(),
             fixed_blocks: Vec::new(),
+            font_face_registered: Vec::new(),
         }
     }
 
@@ -1160,6 +1179,9 @@ impl LayoutInner {
     }
 
     pub fn finish(&mut self, doc: &mut PdfDocument) -> Result<(), String> {
+        if !self.font_face_registered.is_empty() {
+            doc.registered_fonts.append(&mut self.font_face_registered);
+        }
         let content_width = self.page_width - self.margin_left - self.margin_right;
         let content_top = self.page_height - self.margin_top;
         let blocks = std::mem::take(&mut self.blocks);
@@ -1991,7 +2013,8 @@ impl LayoutInner {
                     x: marker_x,
                     y: baseline_y,
                 });
-                page.operations.push(PdfOp::ShowText(marker.text.clone()));
+                page.operations
+                    .push(show_text_for(&marker.font_name, marker.text.clone()));
                 page.operations.push(PdfOp::EndText);
             }
 
@@ -2107,7 +2130,8 @@ impl LayoutInner {
                     x: atom_x + text_offset_x,
                     y: seg_y,
                 });
-                page.operations.push(PdfOp::ShowText(segment.text.clone()));
+                page.operations
+                    .push(show_text_for(&segment.font_name, segment.text.clone()));
                 page.operations.push(PdfOp::EndText);
 
                 if let Some(url) = &segment.link_url {
@@ -2361,11 +2385,11 @@ impl LayoutInner {
         });
         page.operations.push(PdfOp::BeginText);
         page.operations.push(PdfOp::SetFont {
-            name: font_name,
+            name: font_name.clone(),
             size: font_size,
         });
         page.operations.push(PdfOp::SetTextPosition { x, y });
-        page.operations.push(PdfOp::ShowText(text));
+        page.operations.push(show_text_for(&font_name, text));
         page.operations.push(PdfOp::EndText);
         // Restore default fill color to black so later ops (if any) see
         // a predictable state. Since margin boxes are stamped last, this
@@ -2683,7 +2707,8 @@ impl LayoutInner {
                         });
                         page.operations
                             .push(PdfOp::SetTextPosition { x, y: baseline_y });
-                        page.operations.push(PdfOp::ShowText(segment.text.clone()));
+                        page.operations
+                            .push(show_text_for(&segment.font_name, segment.text.clone()));
                         page.operations.push(PdfOp::EndText);
                         x += segment.width;
                     }

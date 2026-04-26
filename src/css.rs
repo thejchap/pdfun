@@ -142,7 +142,7 @@ impl CssLength {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FontWeight {
     Normal,
     Bold,
@@ -159,10 +159,56 @@ impl FontWeight {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FontStyle {
     Normal,
     Italic,
+}
+
+/// Format hint inside a `@font-face` `src: url(...) format("...")` clause.
+/// We only act on the well-known TTF/OTF tokens; everything else is
+/// captured as `Other` so the resolver can skip it without losing the
+/// original spelling for warnings.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SrcFormat {
+    Truetype,
+    Opentype,
+    Woff,
+    Woff2,
+    Other(String),
+}
+
+/// One source inside `@font-face { src: ... }`. `DataUri` carries the
+/// base64-decoded payload directly; `Url` is a (possibly relative)
+/// reference resolved at load time; `Local(...)` names a system font.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SrcKind {
+    DataUri(Vec<u8>),
+    Url(String),
+    Local(String),
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontFaceSrc {
+    pub kind: SrcKind,
+    pub format: Option<SrcFormat>,
+}
+
+/// A parsed `@font-face` rule. `family` is the declared `font-family`
+/// (case preserved as written; comparison is case-insensitive). `weight`
+/// and `style` default to `None`, meaning the face matches the entire
+/// weight/style range — the cascade resolver decides how to score
+/// against an inline `font-weight` / `font-style`.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontFaceRule {
+    pub family: String,
+    pub src: Vec<FontFaceSrc>,
+    pub weight: Option<FontWeight>,
+    pub style: Option<FontStyle>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2579,6 +2625,8 @@ pub struct CssRule {
 pub struct Stylesheet {
     pub rules: Vec<CssRule>,
     pub page_style: PageStyle,
+    #[allow(dead_code)]
+    pub font_faces: Vec<FontFaceRule>,
 }
 
 // ── Selector parsing ──────────────────────────────────────
@@ -3151,8 +3199,13 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut page_style = PageStyle::default();
-    parse_stylesheet_manual(css, &mut rules, &mut page_style);
-    Stylesheet { rules, page_style }
+    let mut font_faces = Vec::new();
+    parse_stylesheet_manual(css, &mut rules, &mut page_style, &mut font_faces);
+    Stylesheet {
+        rules,
+        page_style,
+        font_faces,
+    }
 }
 
 /// Find the byte index of the `}` that matches the `{` at position
@@ -3265,7 +3318,12 @@ fn skip_leading_at_statements(mut remaining: &str) -> &str {
 }
 
 /// Parse stylesheet by manually scanning for `{ }` blocks.
-fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut PageStyle) {
+fn parse_stylesheet_manual(
+    css: &str,
+    rules: &mut Vec<CssRule>,
+    page_style: &mut PageStyle,
+    font_faces: &mut Vec<FontFaceRule>,
+) {
     let mut remaining = css;
 
     while !remaining.trim().is_empty() {
@@ -3306,7 +3364,24 @@ fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut
             let body = &after_open[..brace_close];
             remaining = &after_open[brace_close + 1..];
             if media_query_applies_to_print(prelude) {
-                parse_stylesheet_manual(body, rules, page_style);
+                parse_stylesheet_manual(body, rules, page_style, font_faces);
+            }
+            continue;
+        }
+
+        // Handle `@font-face { ... }`. The body is a flat list of
+        // descriptors (font-family, src, font-weight, font-style); we
+        // hand it to `parse_font_face_body`. Malformed rules (missing
+        // required descriptor) are silently dropped, matching the spec
+        // and browser behavior.
+        if selector_text.eq_ignore_ascii_case("@font-face") {
+            let Some(brace_close) = find_matching_close(after_open) else {
+                break;
+            };
+            let body = &after_open[..brace_close];
+            remaining = &after_open[brace_close + 1..];
+            if let Some(rule) = parse_font_face_body(body) {
+                font_faces.push(rule);
             }
             continue;
         }
@@ -3340,6 +3415,271 @@ fn parse_stylesheet_manual(css: &str, rules: &mut Vec<CssRule>, page_style: &mut
         let style = parse_inline_style(declarations_text);
         rules.push(CssRule { selectors, style });
     }
+}
+
+// ── @font-face rule parsing ──────────────────────────────────
+
+/// Split `input` on top-level occurrences of `delim` (single byte),
+/// honoring `()` nesting and `"…"`/`'…'` string boundaries. Returns
+/// untrimmed substrings; callers usually `.trim()` each piece.
+fn split_top_level_delim(input: &str, delim: u8) -> Vec<&str> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth: usize = 0;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' | b'\'' => {
+                let q = b;
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if c == q {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            _ => {
+                if depth == 0 && b == delim {
+                    out.push(&input[start..i]);
+                    i += 1;
+                    start = i;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    out.push(&input[start..]);
+    out
+}
+
+/// Given input that points just past an opening `(`, return
+/// `(content_inside, rest_after_close_paren)` if a matching `)` is
+/// found. Honors nested parens and string literals.
+fn scan_paren_body(after_open: &str) -> Option<(&str, &str)> {
+    let bytes = after_open.as_bytes();
+    let mut depth: usize = 0;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' | b'\'' => {
+                let q = b;
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if c == q {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                if depth == 0 {
+                    return Some((&after_open[..i], &after_open[i + 1..]));
+                }
+                depth -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Strip a single layer of matched `"…"` or `'…'` quotes from `s`.
+/// Whitespace outside the quotes is trimmed; whitespace inside is kept.
+fn unquote_css_value(s: &str) -> String {
+    let trimmed = s.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
+    {
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+    trimmed.to_string()
+}
+
+/// Decode a `data:` URI value into raw bytes when possible, otherwise
+/// return it as a regular `Url(...)`. Recognizes `data:<mediatype>;base64,<payload>`
+/// (we route `<payload>` through our base64 decoder) and the
+/// percent-decoded text form `data:<mediatype>,<payload>` (treated as
+/// raw bytes — fine for our purposes since fonts are never plain-text).
+fn classify_url_value(value: &str) -> SrcKind {
+    if let Some(after_scheme) = value.strip_prefix("data:")
+        && let Some(comma_idx) = after_scheme.find(',')
+    {
+        let metadata = &after_scheme[..comma_idx];
+        let payload = &after_scheme[comma_idx + 1..];
+        if metadata
+            .split(';')
+            .any(|p| p.trim().eq_ignore_ascii_case("base64"))
+        {
+            if let Ok(bytes) = crate::base64::decode(payload) {
+                return SrcKind::DataUri(bytes);
+            }
+        } else {
+            return SrcKind::DataUri(payload.as_bytes().to_vec());
+        }
+    }
+    SrcKind::Url(value.to_string())
+}
+
+/// Map a `format("...")` token to a `SrcFormat` variant. Recognized
+/// well-known names map to dedicated variants; everything else is
+/// preserved verbatim in `SrcFormat::Other` so the resolver's warning
+/// message can echo what the author wrote.
+fn classify_src_format(value: &str) -> SrcFormat {
+    match value.to_ascii_lowercase().as_str() {
+        "truetype" => SrcFormat::Truetype,
+        "opentype" => SrcFormat::Opentype,
+        "woff" => SrcFormat::Woff,
+        "woff2" => SrcFormat::Woff2,
+        _ => SrcFormat::Other(value.to_string()),
+    }
+}
+
+/// Parse one comma-separated `src` source: either `url(...)` or
+/// `local(...)`, optionally followed by `format(...)` and `tech(...)`
+/// modifiers. Returns `None` for unrecognized prefixes (caller skips it
+/// rather than aborting the whole rule).
+fn parse_one_font_face_src(part: &str) -> Option<FontFaceSrc> {
+    let part = part.trim();
+    let lower_prefix: String = part.chars().take(6).flat_map(char::to_lowercase).collect();
+
+    let (kind, mut tail) =
+        if let Some(after) = lower_prefix.strip_prefix("url(").map(|_| &part[4..]) {
+            let (inner, rest) = scan_paren_body(after)?;
+            let value = unquote_css_value(inner);
+            (classify_url_value(&value), rest)
+        } else if let Some(after) = lower_prefix.strip_prefix("local(").map(|_| &part[6..]) {
+            let (inner, rest) = scan_paren_body(after)?;
+            let value = unquote_css_value(inner);
+            (SrcKind::Local(value), rest)
+        } else {
+            return None;
+        };
+
+    let mut format: Option<SrcFormat> = None;
+    loop {
+        tail = tail.trim_start();
+        if tail.is_empty() {
+            break;
+        }
+        let lower_tail: String = tail.chars().take(7).flat_map(char::to_lowercase).collect();
+        if lower_tail.starts_with("format(") {
+            let after = &tail[7..];
+            let (inner, rest) = scan_paren_body(after)?;
+            let value = unquote_css_value(inner);
+            format = Some(classify_src_format(&value));
+            tail = rest;
+        } else if lower_tail.starts_with("tech(") {
+            let after = &tail[5..];
+            let (_, rest) = scan_paren_body(after)?;
+            tail = rest;
+        } else {
+            break;
+        }
+    }
+
+    Some(FontFaceSrc { kind, format })
+}
+
+/// Parse the descriptor list inside `@font-face { … }`. Returns `None`
+/// if the rule is missing a required descriptor (`font-family` or `src`)
+/// or if all listed sources are unparseable.
+pub fn parse_font_face_body(body: &str) -> Option<FontFaceRule> {
+    let mut family: Option<String> = None;
+    let mut srcs: Vec<FontFaceSrc> = Vec::new();
+    let mut weight: Option<FontWeight> = None;
+    let mut style: Option<FontStyle> = None;
+
+    for decl in split_top_level_delim(body, b';') {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        let Some(colon_idx) = decl.find(':') else {
+            continue;
+        };
+        let prop = decl[..colon_idx].trim().to_ascii_lowercase();
+        let value = decl[colon_idx + 1..].trim();
+        match prop.as_str() {
+            "font-family" => {
+                let v = unquote_css_value(value);
+                if !v.is_empty() {
+                    family = Some(v);
+                }
+            }
+            "src" => {
+                for part in split_top_level_delim(value, b',') {
+                    if let Some(s) = parse_one_font_face_src(part) {
+                        srcs.push(s);
+                    }
+                }
+            }
+            "font-weight" => {
+                let lower = value.to_ascii_lowercase();
+                if lower == "bold" {
+                    weight = Some(FontWeight::Bold);
+                } else if lower == "normal" {
+                    weight = Some(FontWeight::Normal);
+                } else if let Ok(n) = lower.parse::<u16>()
+                    && (100..=900).contains(&n)
+                    && n % 100 == 0
+                {
+                    weight = Some(FontWeight::Numeric(n));
+                }
+            }
+            "font-style" => {
+                let lower = value.to_ascii_lowercase();
+                if lower == "italic" || lower.starts_with("oblique") {
+                    style = Some(FontStyle::Italic);
+                } else if lower == "normal" {
+                    style = Some(FontStyle::Normal);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let family = family?;
+    if srcs.is_empty() {
+        return None;
+    }
+    Some(FontFaceRule {
+        family,
+        src: srcs,
+        weight,
+        style,
+    })
 }
 
 /// Parse the body of an `@page` rule: a mix of plain declarations and
@@ -4909,5 +5249,84 @@ mod tests {
         s.resolve_vars();
         // teal = rgb(0, 128, 128)
         assert!(s.color.is_some());
+    }
+
+    // ── @font-face parsing ──────────────────────────────
+
+    #[test]
+    fn font_face_minimal_rule() {
+        let rule =
+            parse_font_face_body(r#"font-family: "X"; src: url("a.ttf")"#).expect("rule parses");
+        assert_eq!(rule.family, "X");
+        assert_eq!(rule.src.len(), 1);
+        assert_eq!(rule.src[0].kind, SrcKind::Url("a.ttf".to_string()));
+        assert!(rule.src[0].format.is_none());
+        assert!(rule.weight.is_none());
+        assert!(rule.style.is_none());
+    }
+
+    #[test]
+    fn font_face_multiple_srcs_split_on_top_level_comma() {
+        let body = r#"font-family: X; src: url("a") format("woff2"), url("b") format("truetype")"#;
+        let rule = parse_font_face_body(body).expect("rule parses");
+        assert_eq!(rule.src.len(), 2);
+        assert_eq!(rule.src[0].kind, SrcKind::Url("a".to_string()));
+        assert_eq!(rule.src[0].format, Some(SrcFormat::Woff2));
+        assert_eq!(rule.src[1].kind, SrcKind::Url("b".to_string()));
+        assert_eq!(rule.src[1].format, Some(SrcFormat::Truetype));
+    }
+
+    #[test]
+    fn font_face_data_uri_decodes_to_bytes() {
+        // QUJD is base64 of "ABC"
+        let body = r#"font-family: X; src: url("data:font/ttf;base64,QUJD")"#;
+        let rule = parse_font_face_body(body).expect("rule parses");
+        assert_eq!(rule.src.len(), 1);
+        assert_eq!(rule.src[0].kind, SrcKind::DataUri(b"ABC".to_vec()));
+    }
+
+    #[test]
+    fn font_face_local_src_captured() {
+        let body = r#"font-family: X; src: local("Helvetica")"#;
+        let rule = parse_font_face_body(body).expect("rule parses");
+        assert_eq!(rule.src.len(), 1);
+        assert_eq!(rule.src[0].kind, SrcKind::Local("Helvetica".to_string()));
+    }
+
+    #[test]
+    fn font_face_weight_and_style() {
+        let body = r#"font-family: X; src: url("a"); font-weight: 700; font-style: italic"#;
+        let rule = parse_font_face_body(body).expect("rule parses");
+        assert_eq!(rule.weight, Some(FontWeight::Numeric(700)));
+        assert_eq!(rule.style, Some(FontStyle::Italic));
+    }
+
+    #[test]
+    fn font_face_missing_required_property_returns_none() {
+        // No font-family
+        assert!(parse_font_face_body(r#"src: url("a")"#).is_none());
+        // No src
+        assert!(parse_font_face_body("font-family: X").is_none());
+        // src lists only unparseable entries
+        assert!(parse_font_face_body("font-family: X; src: garbage").is_none());
+    }
+
+    #[test]
+    fn parse_stylesheet_collects_font_faces() {
+        let css = r#"
+            @font-face {
+                font-family: "MyFont";
+                src: url("./my.ttf");
+            }
+            p { color: red }
+        "#;
+        let sheet = parse_stylesheet(css);
+        assert_eq!(sheet.font_faces.len(), 1);
+        assert_eq!(sheet.font_faces[0].family, "MyFont");
+        assert_eq!(
+            sheet.font_faces[0].src[0].kind,
+            SrcKind::Url("./my.ttf".to_string())
+        );
+        assert_eq!(sheet.rules.len(), 1);
     }
 }

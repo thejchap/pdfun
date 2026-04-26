@@ -3,6 +3,7 @@ use markup5ever_rcdom::{Handle, NodeData};
 use crate::css::{
     self, ComputedStyle, ElementInfo, FontStyle, SiblingRecord, Stylesheet, TextTransform,
 };
+use crate::font_face::{self, FontFaceLookup};
 use crate::layout::{BlockStyle, LayoutInner, Paragraph, TextRun};
 
 // ── Constants ────────────────────────────────────────────────
@@ -598,6 +599,11 @@ struct HtmlRenderer<'a> {
     /// container (`<div id=...>`), the id carries forward to the first
     /// flushed paragraph inside it.
     pending_anchor_id: Option<String>,
+    /// `(family-lower, weight, style) → "Custom-N"` mapping built from
+    /// `@font-face` rules in the stylesheet. Cascade sites consult this
+    /// before falling through to base-14 mapping; an empty map (the
+    /// common case) makes those calls no-ops.
+    font_face_lookup: FontFaceLookup,
 }
 
 impl<'a> HtmlRenderer<'a> {
@@ -637,7 +643,41 @@ impl<'a> HtmlRenderer<'a> {
             container_stack: Vec::new(),
             pending_anchor_id: None,
             bg_image_cache: std::collections::BTreeMap::new(),
+            font_face_lookup: FontFaceLookup::new(),
         }
+    }
+
+    /// Probe the `@font-face` lookup for the first family in a CSS
+    /// `font-family` value that has a matching face for the given
+    /// weight/style. Returns `Some("Custom-N")` if a face matches; the
+    /// caller falls through to base-14 mapping otherwise.
+    fn resolve_font_face_family(
+        &self,
+        family_value: &str,
+        weight: css::FontWeight,
+        style: FontStyle,
+    ) -> Option<String> {
+        if self.font_face_lookup.is_empty() {
+            return None;
+        }
+        for raw in family_value.split(',') {
+            let lower = raw
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .to_ascii_lowercase();
+            if lower.is_empty() {
+                continue;
+            }
+            if let Some(name) = font_face::resolve_font_face_for_cascade(
+                &lower,
+                weight,
+                style,
+                &self.font_face_lookup,
+            ) {
+                return Some(name);
+            }
+        }
+        None
     }
 
     /// Get the effective inline style by checking the `inline_styles` stack,
@@ -1146,6 +1186,27 @@ impl<'a> HtmlRenderer<'a> {
         } else {
             None
         };
+        // @font-face has the highest priority on font-family resolution —
+        // a matching face wins outright over the base-14 family mapping.
+        let face_weight = css_weight.unwrap_or(if bold {
+            css::FontWeight::Bold
+        } else {
+            css::FontWeight::Normal
+        });
+        let face_style = css_style.unwrap_or(if italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        });
+        let custom_font = effective
+            .and_then(|s| s.font_family.as_deref())
+            .and_then(|f| self.resolve_font_face_family(f, face_weight, face_style))
+            .or_else(|| {
+                inherited
+                    .and_then(|s| s.font_family.as_deref())
+                    .and_then(|f| self.resolve_font_face_family(f, face_weight, face_style))
+            });
+
         let base_font = effective
             .and_then(|s| s.font_family.as_deref())
             .and_then(map_css_font_family)
@@ -1157,7 +1218,10 @@ impl<'a> HtmlRenderer<'a> {
             })
             .unwrap_or(ua_font);
 
-        let resolved_font = resolve_font(base_font, bold, italic);
+        let resolved_font: String = match custom_font {
+            Some(name) => name,
+            None => resolve_font(base_font, bold, italic).to_string(),
+        };
 
         // Resolve text color: CSS → inherited
         let color = effective
@@ -1197,7 +1261,7 @@ impl<'a> HtmlRenderer<'a> {
 
         self.runs.push(TextRun {
             text,
-            font_name: resolved_font.to_string(),
+            font_name: resolved_font,
             font_size,
             color,
             text_decoration,
@@ -1410,6 +1474,26 @@ impl<'a> HtmlRenderer<'a> {
         let css_italic = style.font_style.or(inherited.font_style);
         let bold = css_weight.is_some_and(super::css::FontWeight::is_bold);
         let italic = matches!(css_italic, Some(FontStyle::Italic));
+        let face_weight = css_weight.unwrap_or(if bold {
+            css::FontWeight::Bold
+        } else {
+            css::FontWeight::Normal
+        });
+        let face_style = css_italic.unwrap_or(if italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        });
+        let custom_font = style
+            .font_family
+            .as_deref()
+            .and_then(|f| self.resolve_font_face_family(f, face_weight, face_style))
+            .or_else(|| {
+                inherited
+                    .font_family
+                    .as_deref()
+                    .and_then(|f| self.resolve_font_face_family(f, face_weight, face_style))
+            });
         let base_font = style
             .font_family
             .as_deref()
@@ -1421,13 +1505,16 @@ impl<'a> HtmlRenderer<'a> {
                     .and_then(map_css_font_family)
             })
             .unwrap_or(ua.font);
-        let resolved_font = resolve_font(base_font, bold, italic);
+        let resolved_font: String = match custom_font {
+            Some(name) => name,
+            None => resolve_font(base_font, bold, italic).to_string(),
+        };
 
         let color = style.color.or(inherited.color);
 
         // Collect text content from the subtree.
         let mut child_runs: Vec<TextRun> = Vec::new();
-        collect_cell_text(handle, &mut child_runs, resolved_font, font_size, color);
+        collect_cell_text(handle, &mut child_runs, &resolved_font, font_size, color);
         let text: String = child_runs.iter().map(|r| r.text.as_str()).collect();
         let text = text.trim().to_string();
 
@@ -1439,7 +1526,7 @@ impl<'a> HtmlRenderer<'a> {
 
         // Measure the text to get a natural width; use declared width if any.
         let natural_text_w =
-            crate::font_metrics::measure_str(&text, resolved_font, font_size).unwrap_or(0.0);
+            crate::font_metrics::measure_str(&text, &resolved_font, font_size).unwrap_or(0.0);
         let width = if let Some(w) = style.width {
             w.resolve_ctx(&ctx)
         } else {
@@ -1459,7 +1546,7 @@ impl<'a> HtmlRenderer<'a> {
 
         self.runs.push(TextRun {
             text,
-            font_name: resolved_font.to_string(),
+            font_name: resolved_font,
             font_size,
             color,
             inline_block_width: Some(width),
@@ -2091,13 +2178,44 @@ pub fn render_dom_to_layout(
     let css_text = extract_style_blocks(document);
     let stylesheet = css::parse_stylesheet(&css_text);
     let page_style = stylesheet.page_style.clone();
+
+    // Build the @font-face runtime: parse each declared face, attempt
+    // its src list, extract measurement metrics, and stash the lookup on
+    // the renderer plus the bytes on `LayoutInner` so the embed pipeline
+    // picks them up at PDF write time.
+    let (registered, lookup, mut face_warnings) =
+        font_face::build_font_face_registry(&stylesheet.font_faces, base_dir);
+    let mut metrics_map: std::collections::BTreeMap<
+        String,
+        crate::font_metrics::CustomFontMetrics,
+    > = std::collections::BTreeMap::new();
+    let mut surviving: Vec<crate::RegisteredFont> = Vec::with_capacity(registered.len());
+    let mut surviving_lookup = lookup;
+    for rf in registered {
+        if let Ok(m) = crate::font_metrics::extract_custom_font_metrics(&rf.data) {
+            metrics_map.insert(rf.name.clone(), m);
+            surviving.push(rf);
+        } else {
+            face_warnings.push(format!(
+                "@font-face for {:?}: TTF/OTF parse failed, skipping",
+                rf.family
+            ));
+            surviving_lookup.retain(|_, name| name != &rf.name);
+        }
+    }
+    crate::font_metrics::set_font_face_metrics(metrics_map);
+    layout.font_face_registered = surviving;
+
     let mut renderer = HtmlRenderer::new(layout, stylesheet);
     renderer.base_dir = base_dir.map(std::path::Path::to_path_buf);
+    renderer.font_face_lookup = surviving_lookup;
     renderer.walk_node(document, 0, 0, 1, &[]);
     renderer.flush();
+    let mut warnings = face_warnings;
+    warnings.append(&mut renderer.warnings);
     RenderOutcome {
         page_style,
-        warnings: renderer.warnings,
+        warnings,
     }
 }
 

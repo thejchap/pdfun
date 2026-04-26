@@ -40,7 +40,6 @@ These are **not** implemented — attempts to use them won't crash, but the resu
 
 - `flexbox`, `grid`
 - `position: absolute`, `position: fixed`
-- `@font-face` (only built-in PDF fonts work: Helvetica, Times, Courier, Symbol, ZapfDingbats)
 - SVG (`<svg>` elements are ignored)
 - Transforms, transitions, animations
 - `filter`, `backdrop-filter`, `clip-path`
@@ -58,7 +57,7 @@ See the full [parity matrix](PARITY.md) for the exhaustive list.
 
 **`@page` margins vs `body { margin }`.** `@page margin` is the printable area; `body { margin }` is additional space inside that. If your content looks "double-indented," you've probably set both.
 
-**Built-in fonts only.** `font-family: Arial` silently falls back to Helvetica; `font-family: 'My Custom Font'` falls back too. There is no `@font-face` yet — register only the 14 PDF base fonts.
+**Custom fonts via `@font-face`.** Declare a face with a `data:` URI or a `url("./relative.ttf")` (relative to the `base_url` argument). TTF and OTF are accepted; `local(...)`, `http(s)://`, WOFF, and WOFF2 sources are recognised but skipped with a warning so the family falls through to the cascade tail. `font-family: Arial` (or any other unmatched family) still falls back to Helvetica.
 
 **Relative images.** `<img src="logo.png">` resolves against `base_url=` (kwarg to `HtmlDocument`), not against the CSS file's location. If your CSS imports have relative `url(...)` paths, they use `base_url` too.
 

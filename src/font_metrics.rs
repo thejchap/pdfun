@@ -271,13 +271,123 @@ pub fn resolve_builtin_variant(base_font: &str, bold: bool, italic: bool) -> Opt
 }
 
 /// measure a string's width in points using a built-in font's metrics.
+///
+/// Synthetic `@font-face` names (`Custom-N`) are dispatched to a
+/// thread-local metrics map populated by `set_font_face_metrics` at the
+/// top of an HTML→PDF render. When the thread-local is empty (e.g. a
+/// Python caller invoking `text_width` directly with a custom name) the
+/// lookup returns `None` like an unknown built-in.
 pub fn measure_str(text: &str, font_name: &str, font_size: f32) -> Option<f32> {
+    if font_name.starts_with("Custom-") {
+        return FONT_FACE_METRICS.with(|cell| {
+            cell.borrow()
+                .get(font_name)
+                .map(|m| measure_str_custom(text, m, font_size))
+        });
+    }
     let metrics = get_builtin_metrics(font_name)?;
     let width: u32 = text
         .bytes()
         .map(|b| u32::from(metrics.widths[b as usize]))
         .sum();
     Some(width as f32 * font_size / 1000.0)
+}
+
+thread_local! {
+    /// Per-thread `@font-face` metrics consulted by `measure_str` for
+    /// `Custom-N` font names. Populated at the start of `html_to_pdf` and
+    /// cleared via the `FontFaceMetricsGuard` RAII helper at the end.
+    static FONT_FACE_METRICS: std::cell::RefCell<
+        std::collections::BTreeMap<String, CustomFontMetrics>,
+    > = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Install per-thread `@font-face` measurement metrics. Replaces any
+/// previously-installed map; pair with `clear_font_face_metrics` (or the
+/// `FontFaceMetricsGuard` RAII helper) so a panic during render still
+/// drops the map.
+pub fn set_font_face_metrics(map: std::collections::BTreeMap<String, CustomFontMetrics>) {
+    FONT_FACE_METRICS.with(|cell| *cell.borrow_mut() = map);
+}
+
+/// Drop the per-thread `@font-face` metrics. Always paired with a prior
+/// `set_font_face_metrics` call, typically via a Drop guard on the
+/// caller side.
+pub fn clear_font_face_metrics() {
+    FONT_FACE_METRICS.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Metrics extracted from a TTF/OTF face for measurement during HTML
+/// layout. Layout uses these to size text typed in custom (`@font-face`)
+/// fonts before the embedding pipeline subsets and serializes the actual
+/// glyph data. Advances are stored in font units; callers scale by
+/// `font_size / units_per_em` to get points.
+#[derive(Clone, Debug)]
+pub struct CustomFontMetrics {
+    pub units_per_em: f32,
+    pub char_to_advance: std::collections::BTreeMap<char, u16>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CustomFontMetricsError {
+    Parse,
+}
+
+/// Parse a TTF/OTF byte buffer and pull out the per-character advance
+/// table plus the head-table `units_per_em` / hhea ascent / descent. We
+/// only walk the cmap once and snapshot every char→advance mapping the
+/// font exposes; the advance lookup is then a `BTreeMap` hit at
+/// measurement time.
+pub fn extract_custom_font_metrics(
+    data: &[u8],
+) -> Result<CustomFontMetrics, CustomFontMetricsError> {
+    let face = ttf_parser::Face::parse(data, 0).map_err(|_| CustomFontMetricsError::Parse)?;
+
+    let units_per_em = f32::from(face.units_per_em());
+
+    let mut char_to_advance = std::collections::BTreeMap::new();
+    if let Some(cmap) = face.tables().cmap {
+        for subtable in cmap.subtables {
+            if !subtable.is_unicode() {
+                continue;
+            }
+            subtable.codepoints(|cp| {
+                if let Some(ch) = char::from_u32(cp)
+                    && let Some(gid) = subtable.glyph_index(cp)
+                    && let Some(advance) = face.glyph_hor_advance(gid)
+                {
+                    char_to_advance.entry(ch).or_insert(advance);
+                }
+            });
+        }
+    }
+
+    Ok(CustomFontMetrics {
+        units_per_em,
+        char_to_advance,
+    })
+}
+
+/// Measure a string's width in points using metrics extracted from a
+/// custom (`@font-face`) TTF/OTF face. Code points missing from the cmap
+/// contribute zero — they will be replaced upstream with `.notdef` or a
+/// fallback face, but at measurement time we just skip them so layout
+/// flows the rest of the line.
+pub fn measure_str_custom(text: &str, metrics: &CustomFontMetrics, font_size: f32) -> f32 {
+    if text.is_empty() || metrics.units_per_em == 0.0 {
+        return 0.0;
+    }
+    let total_units: u32 = text
+        .chars()
+        .map(|c| {
+            metrics
+                .char_to_advance
+                .get(&c)
+                .copied()
+                .map_or(0, u32::from)
+        })
+        .sum();
+    total_units as f32 * font_size / metrics.units_per_em
 }
 
 /// look up metrics for a built-in PDF font.
@@ -411,5 +521,75 @@ mod tests {
     #[test]
     fn resolve_unknown_font_returns_none() {
         assert_eq!(resolve_builtin_variant("FakeFont", false, false), None);
+    }
+
+    const FIXTURE_TTF: &[u8] = include_bytes!("../tests/fixtures/font.ttf");
+
+    #[test]
+    fn extract_returns_units_per_em_for_fixture() {
+        let metrics = extract_custom_font_metrics(FIXTURE_TTF).expect("fixture parses");
+        assert!(metrics.units_per_em > 0.0);
+    }
+
+    #[test]
+    fn extract_populates_advance_for_ascii_a() {
+        let metrics = extract_custom_font_metrics(FIXTURE_TTF).expect("fixture parses");
+        let advance = metrics
+            .char_to_advance
+            .get(&'A')
+            .copied()
+            .expect("'A' is in the cmap");
+        assert!(advance > 0);
+    }
+
+    #[test]
+    fn extract_rejects_non_ttf_bytes() {
+        assert!(matches!(
+            extract_custom_font_metrics(b"not a font"),
+            Err(CustomFontMetricsError::Parse)
+        ));
+    }
+
+    #[test]
+    fn measure_empty_string_is_zero() {
+        let metrics = extract_custom_font_metrics(FIXTURE_TTF).expect("fixture parses");
+        let measured = measure_str_custom("", &metrics, 12.0);
+        assert!(measured.abs() < 1e-6);
+    }
+
+    #[test]
+    fn measure_known_glyph_matches_expected_width() {
+        let metrics = extract_custom_font_metrics(FIXTURE_TTF).expect("fixture parses");
+        let advance = f32::from(*metrics.char_to_advance.get(&'A').expect("'A' in cmap"));
+        let font_size = 12.0_f32;
+        let expected = advance * font_size / metrics.units_per_em;
+        let measured = measure_str_custom("A", &metrics, font_size);
+        assert!((measured - expected).abs() < 1e-5);
+    }
+
+    #[test]
+    fn measure_str_dispatches_to_thread_local_for_custom_name() {
+        let metrics = extract_custom_font_metrics(FIXTURE_TTF).expect("fixture parses");
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("Custom-7".to_string(), metrics.clone());
+        set_font_face_metrics(map);
+        let direct = measure_str_custom("A", &metrics, 12.0);
+        let dispatched = measure_str("A", "Custom-7", 12.0).expect("hits thread-local");
+        clear_font_face_metrics();
+        assert!((direct - dispatched).abs() < 1e-5);
+        // After clear, the lookup misses and we get None.
+        assert!(measure_str("A", "Custom-7", 12.0).is_none());
+    }
+
+    #[test]
+    fn measure_unmapped_char_contributes_zero() {
+        let metrics = extract_custom_font_metrics(FIXTURE_TTF).expect("fixture parses");
+        // U+1F600 GRINNING FACE — definitely not in our ASCII subset.
+        let unmapped = '\u{1F600}';
+        assert!(!metrics.char_to_advance.contains_key(&unmapped));
+        let font_size = 12.0_f32;
+        let just_a = measure_str_custom("A", &metrics, font_size);
+        let with_unmapped = measure_str_custom(&format!("A{unmapped}"), &metrics, font_size);
+        assert!((with_unmapped - just_a).abs() < 1e-5);
     }
 }
