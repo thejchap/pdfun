@@ -5534,3 +5534,60 @@ with describe("@font-face"):
         assert any("scheme" in w.lower() or "http" in w.lower() for w in warnings), (
             warnings
         )
+
+
+with describe("<button>"):
+    # spec: HTML; behaviors: html-form-button
+
+    @test
+    def button_renders_inner_text_with_default_box():
+        """`<button>Send</button>` renders the inner text inside a styled
+        box: the UA stylesheet supplies a 1pt border, light-grey fill,
+        and horizontal padding so the button looks like a button even
+        without author CSS."""
+        doc = HtmlDocument(string="<p><button>Send</button></p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Inner text shows up in the content stream.
+        expect(content).to_contain(b"(Send) Tj")
+        # Default light-grey background fill (#efefef ≈ 0.937).
+        expect(content).to_contain(b"0.937 0.937 0.937 rg")
+        # Default dark-grey border stroke (#767676 ≈ 0.463).
+        expect(content).to_contain(b"0.463 0.463 0.463 RG")
+
+    @test
+    def button_flows_inline_with_surrounding_text():
+        """A button inside a paragraph keeps the text flow on the same
+        line — it's an inline-block atom, never a block-level break."""
+        doc = HtmlDocument(string="<p>before <button>X</button> after</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Both "before" and "after" appear in the same paragraph; the
+        # button text "X" sits between them, so all three are present.
+        expect(content).to_contain(b"(before)")
+        expect(content).to_contain(b"(X)")
+        expect(content).to_contain(b"after")
+
+    @test
+    def button_user_css_overrides_ua_background():
+        """Author CSS on the button beats the UA default — `background:
+        red` shows red fill, not the default light grey."""
+        html = "<button style='background-color: red; border-color: black'>X</button>"
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        # UA default light-grey fill must NOT appear since it was
+        # overridden.
+        assert b"0.937 0.937 0.937 rg" not in content
+
+    @test
+    def empty_button_does_not_crash():
+        """A button with no inner content still renders a (zero-text)
+        styled box and the surrounding paragraph completes."""
+        doc = HtmlDocument(string="<p>x<button></button>y</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Both "x" and "y" still appear; renderer didn't choke on the
+        # empty button.
+        expect(content).to_contain(b"(x)")
+        expect(content).to_contain(b"y")

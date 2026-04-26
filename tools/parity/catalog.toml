@@ -228,7 +228,8 @@ title = "Forms"
   id = "html-form-button"
   title = "button elements"
   weasyprint = "partial"
-  implemented = false
+  implemented = true
+  notes = "Visual rendering only: UA-styled bordered/padded inline-block carrying the inner content. No AcroForm interactivity (matches WeasyPrint's static PDF behavior)."
 
 # =============================================================================
 # CSS 2.1 §5 — Selectors
