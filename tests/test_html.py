@@ -5695,3 +5695,107 @@ with describe("<select>"):
         html = "<select style='background-color: red'><option>X</option></select>"
         content = content_stream(HtmlDocument(string=html).to_bytes())
         expect(content).to_contain(b"1 0 0 rg")
+
+
+with describe("<input>"):
+    # spec: HTML; behaviors: html-form-input
+
+    @test
+    def text_input_renders_value_in_bordered_box():
+        """`<input type="text" value="hello">` renders the value inside
+        a styled bordered inline-block (white fill, grey border)."""
+        html = '<input type="text" value="hello">'
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"(hello) Tj")
+        expect(content).to_contain(b"1 1 1 rg")
+        expect(content).to_contain(b"0.463 0.463 0.463 RG")
+
+    @test
+    def text_input_default_type_is_text():
+        """An `<input>` with no `type` attribute defaults to text-input
+        rendering — a bordered fixed-width box."""
+        html = '<input value="x">'
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"(x) Tj")
+        expect(content).to_contain(b"1 1 1 rg")
+
+    @test
+    def submit_input_uses_button_style_with_default_text():
+        """`<input type="submit">` (no value) renders a button-style box
+        with default text "Submit"."""
+        html = '<input type="submit">'
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"(Submit) Tj")
+        # Button-style light grey background.
+        expect(content).to_contain(b"0.937 0.937 0.937 rg")
+
+    @test
+    def submit_input_value_overrides_default_text():
+        """`<input type="submit" value="Send">` shows "Send", not the
+        default."""
+        html = '<input type="submit" value="Send">'
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"(Send) Tj")
+        # Default text is not rendered.
+        assert b"Submit" not in content
+
+    @test
+    def reset_and_button_inputs_have_their_own_default_labels():
+        """`<input type="reset">` and `<input type="button">` each get a
+        sensible default label so the box isn't blank."""
+        c1 = content_stream(HtmlDocument(string='<input type="reset">').to_bytes())
+        expect(c1).to_contain(b"(Reset) Tj")
+        c2 = content_stream(HtmlDocument(string='<input type="button">').to_bytes())
+        expect(c2).to_contain(b"(Button) Tj")
+
+    @test
+    def checkbox_renders_small_box_blank_when_unchecked():
+        """An unchecked checkbox renders an empty bordered square; no
+        check mark."""
+        html = '<input type="checkbox">'
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        # No check-mark text in the content stream.
+        assert b"(X) Tj" not in content
+        # White background fill.
+        expect(content).to_contain(b"1 1 1 rg")
+        expect(content).to_contain(b"0.463 0.463 0.463 RG")
+
+    @test
+    def checkbox_checked_includes_x_glyph():
+        """A checkbox with the [checked] attribute renders an "X" inside
+        the styled box."""
+        html = '<input type="checkbox" checked>'
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"(X) Tj")
+
+    @test
+    def radio_checked_includes_dot_glyph():
+        """A checked radio renders an ASCII glyph inside the styled
+        box. (The list-bullet renderer uses the same `*` substitute for
+        the same reason: WinAnsi is unreliable for the prettier dot
+        characters with base-14 fonts.)"""
+        html = '<input type="radio" checked>'
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"(*) Tj")
+
+    @test
+    def hidden_input_renders_nothing():
+        """`<input type="hidden">` is invisible — neither its value nor
+        any styled box appears in the content stream. Surrounding text
+        flow continues unchanged."""
+        html = '<p>before<input type="hidden" value="x">after</p>'
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        # The literal "x" must not appear (it'd be the value if rendered).
+        # Since the hidden input emits no atom, "before" and "after"
+        # collapse into a single contiguous text fragment.
+        expect(content).to_contain(b"(beforeafter) Tj")
+
+    @test
+    def text_input_user_css_overrides_ua_width():
+        """Author CSS `width` beats the 150pt default — pdfun honors it."""
+        html = '<input type="text" value="x" style="width: 60pt">'
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        # The fill rectangle width matches the author's 60pt request,
+        # not the 150pt UA default.
+        assert b" 60 " in content, content[:400]

@@ -264,6 +264,97 @@ fn apply_form_ua_style(tag: &str, user: Option<ComputedStyle>) -> Option<Compute
     Some(ua)
 }
 
+/// User-agent default style for text-like `<input>` elements
+/// (`type=text`, `email`, `password`, ...): a 150pt-wide bordered
+/// inline-block with white background and a little horizontal padding.
+fn text_input_ua_computed_style() -> ComputedStyle {
+    ComputedStyle {
+        display: Some(css::DisplayValue::InlineBlock),
+        border_width: Some(css::CssLength::Pt(1.0)),
+        border_color: Some((0.463, 0.463, 0.463)),
+        border_style: Some(css::BorderStyle::Solid),
+        background_color: Some((1.0, 1.0, 1.0)),
+        padding_left: Some(css::CssLength::Pt(2.0)),
+        padding_right: Some(css::CssLength::Pt(2.0)),
+        padding_top: Some(css::CssLength::Pt(1.0)),
+        padding_bottom: Some(css::CssLength::Pt(1.0)),
+        width: Some(css::CssLength::Pt(150.0)),
+        ..ComputedStyle::default()
+    }
+}
+
+/// User-agent default style for `<input type="checkbox">` /
+/// `<input type="radio">`: a small fixed-size bordered inline-block.
+/// Browsers historically distinguish radio with a circle, but a square
+/// is what we can render without arbitrary path support; matches the
+/// "partial" parity bar.
+fn checkbox_ua_computed_style() -> ComputedStyle {
+    ComputedStyle {
+        display: Some(css::DisplayValue::InlineBlock),
+        border_width: Some(css::CssLength::Pt(1.0)),
+        border_color: Some((0.463, 0.463, 0.463)),
+        border_style: Some(css::BorderStyle::Solid),
+        background_color: Some((1.0, 1.0, 1.0)),
+        width: Some(css::CssLength::Pt(10.0)),
+        font_size: Some(css::CssLength::Pt(8.0)),
+        ..ComputedStyle::default()
+    }
+}
+
+/// Build the `(style, text)` pair for an `<input>` element by looking
+/// at its `type` attribute. Returns `None` for `type="hidden"` (which
+/// should render nothing). Defaults to text-input rendering for any
+/// unknown type, matching how browsers handle unrecognised types.
+fn build_input_atom(handle: &Handle) -> Option<(ComputedStyle, String)> {
+    let NodeData::Element { attrs, .. } = &handle.data else {
+        return None;
+    };
+    let attrs = attrs.borrow();
+    let mut input_type = "text".to_string();
+    let mut value: Option<String> = None;
+    let mut checked = false;
+    for a in attrs.iter() {
+        match a.name.local.as_ref() {
+            "type" => input_type = a.value.to_ascii_lowercase(),
+            "value" => value = Some(a.value.to_string()),
+            "checked" => checked = true,
+            _ => {}
+        }
+    }
+    match input_type.as_str() {
+        "hidden" => None,
+        "checkbox" => Some((
+            checkbox_ua_computed_style(),
+            if checked {
+                "X".to_string()
+            } else {
+                String::new()
+            },
+        )),
+        "radio" => Some((
+            checkbox_ua_computed_style(),
+            if checked {
+                "*".to_string()
+            } else {
+                String::new()
+            },
+        )),
+        "submit" => Some((
+            button_ua_computed_style(),
+            value.unwrap_or_else(|| "Submit".to_string()),
+        )),
+        "reset" => Some((
+            button_ua_computed_style(),
+            value.unwrap_or_else(|| "Reset".to_string()),
+        )),
+        "button" => Some((
+            button_ua_computed_style(),
+            value.unwrap_or_else(|| "Button".to_string()),
+        )),
+        _ => Some((text_input_ua_computed_style(), value.unwrap_or_default())),
+    }
+}
+
 /// Walk the children of a `<select>` element and pick the text content
 /// to render inside the styled atom. Picks the first `<option>` that
 /// carries a `selected` attribute; falls back to the first `<option>`
@@ -997,6 +1088,22 @@ impl<'a> HtmlRenderer<'a> {
                     let inherited = parent.inherit_into(merged_style.as_ref());
                     let option_text = extract_select_option_text(handle);
                     self.push_inline_block(handle, &inherited, style, Some(option_text));
+                    return;
+                }
+
+                // <input> is a void element whose visual rendering
+                // depends on its `type` attribute. Build the right
+                // styled atom for it and let the inline-block emitter
+                // place it.
+                if tag == "input" {
+                    if let Some((mut style, text)) = build_input_atom(handle) {
+                        if let Some(user) = merged_style.as_ref() {
+                            css::merge_style(&mut style, user);
+                        }
+                        let parent = self.inherit_stack.last().cloned().unwrap_or_default();
+                        let inherited = parent.inherit_into(Some(&style));
+                        self.push_inline_block(handle, &inherited, &style, Some(text));
+                    }
                     return;
                 }
 

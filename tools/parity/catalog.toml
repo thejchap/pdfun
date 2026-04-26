@@ -210,7 +210,8 @@ title = "Forms"
   id = "html-form-input"
   title = "input elements"
   weasyprint = "partial"
-  implemented = false
+  implemented = true
+  notes = "Visual rendering only, dispatching on the type attribute: text-like → 150pt bordered fixed-width box with `value` text; checkbox/radio → small bordered square (X / * inside when [checked]); submit/button/reset → button-styled box with the value or default label; hidden → nothing. No AcroForm interactivity."
 
   [[section.behavior]]
   id = "html-form-select"
