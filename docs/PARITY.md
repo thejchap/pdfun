@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 121/133 behaviors implemented · 116/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 122/133 behaviors implemented · 117/133 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -71,7 +71,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | input elements | — | 🟡 | ❌ | — |
 | select elements | — | 🟡 | ❌ | — |
 | textarea elements | — | 🟡 | ❌ | — |
-| button elements | — | 🟡 | ❌ | — |
+| button elements | — | 🟡 | ✅ | ✅ (1) `tests/test_html.py::button_renders_inner_text_with_default_box` |
 
 ## CSS 2.1 §5 — Selectors
 

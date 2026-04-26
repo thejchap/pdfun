@@ -41,3 +41,6 @@ target
 
 # Zensical docs build output
 /site/
+
+# Claude Code harness state
+.claude/scheduled_tasks.lock

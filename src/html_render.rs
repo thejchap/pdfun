@@ -188,6 +188,40 @@ fn ua_style(tag: &str) -> UaStyle {
     }
 }
 
+/// User-agent default style for the `<button>` element: a small
+/// bordered, light-grey, padded inline-block. Matches the visual
+/// rendering `WeasyPrint` produces for buttons in static PDFs (no
+/// `AcroForm` interactivity — purely a styled placeholder).
+fn button_ua_computed_style() -> ComputedStyle {
+    ComputedStyle {
+        display: Some(css::DisplayValue::InlineBlock),
+        border_width: Some(css::CssLength::Pt(1.0)),
+        border_color: Some((0.463, 0.463, 0.463)),
+        border_style: Some(css::BorderStyle::Solid),
+        background_color: Some((0.937, 0.937, 0.937)),
+        padding_left: Some(css::CssLength::Pt(6.0)),
+        padding_right: Some(css::CssLength::Pt(6.0)),
+        padding_top: Some(css::CssLength::Pt(2.0)),
+        padding_bottom: Some(css::CssLength::Pt(2.0)),
+        ..ComputedStyle::default()
+    }
+}
+
+/// Apply the user-agent style for form elements that have a non-trivial
+/// visual default (`<button>`). Returns the user's `merged_style` if
+/// the tag has no UA defaults; otherwise returns a `ComputedStyle` with
+/// UA defaults overlaid by any user-supplied properties.
+fn apply_form_ua_style(tag: &str, user: Option<ComputedStyle>) -> Option<ComputedStyle> {
+    let mut ua = match tag {
+        "button" => button_ua_computed_style(),
+        _ => return user,
+    };
+    if let Some(s) = user {
+        css::merge_style(&mut ua, &s);
+    }
+    Some(ua)
+}
+
 // ── Font variant resolution ──────────────────────────────────
 
 fn resolve_font(base_font: &'static str, bold: bool, italic: bool) -> &'static str {
@@ -853,6 +887,11 @@ impl<'a> HtmlRenderer<'a> {
                     };
                     (style_opt, before, after)
                 };
+
+                // Form elements get a user-agent style: `<button>` looks
+                // like a bordered grey box with padding (display:
+                // inline-block). User CSS still wins where set.
+                let merged_style = apply_form_ua_style(tag, merged_style);
 
                 // Skip elements with display: none (and their entire subtree)
                 if let Some(ref style) = merged_style
