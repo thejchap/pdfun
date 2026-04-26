@@ -222,7 +222,8 @@ title = "Forms"
   id = "html-form-textarea"
   title = "textarea elements"
   weasyprint = "partial"
-  implemented = false
+  implemented = true
+  notes = "Visual rendering only: bordered/padded block with monospace font and white-space: pre, carrying the inner content verbatim. No AcroForm interactivity (matches WeasyPrint's static PDF behavior)."
 
   [[section.behavior]]
   id = "html-form-button"
