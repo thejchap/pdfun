@@ -208,6 +208,24 @@ fn button_ua_computed_style() -> ComputedStyle {
     }
 }
 
+/// User-agent default style for the `<select>` element: an inline-
+/// block bordered box with a white background and a little horizontal
+/// padding so the chosen option's text doesn't crowd the border.
+fn select_ua_computed_style() -> ComputedStyle {
+    ComputedStyle {
+        display: Some(css::DisplayValue::InlineBlock),
+        border_width: Some(css::CssLength::Pt(1.0)),
+        border_color: Some((0.463, 0.463, 0.463)),
+        border_style: Some(css::BorderStyle::Solid),
+        background_color: Some((1.0, 1.0, 1.0)),
+        padding_left: Some(css::CssLength::Pt(4.0)),
+        padding_right: Some(css::CssLength::Pt(4.0)),
+        padding_top: Some(css::CssLength::Pt(1.0)),
+        padding_bottom: Some(css::CssLength::Pt(1.0)),
+        ..ComputedStyle::default()
+    }
+}
+
 /// User-agent default style for the `<textarea>` element: a bordered,
 /// padded block with a white background, monospace font, and
 /// whitespace preserved (matching the historical browser default of
@@ -229,20 +247,66 @@ fn textarea_ua_computed_style() -> ComputedStyle {
 }
 
 /// Apply the user-agent style for form elements that have a non-trivial
-/// visual default (`<button>`, `<textarea>`). Returns the user's
-/// `merged_style` if the tag has no UA defaults; otherwise returns a
-/// `ComputedStyle` with UA defaults overlaid by any user-supplied
-/// properties (so author CSS still wins where set).
+/// visual default (`<button>`, `<textarea>`, `<select>`). Returns the
+/// user's `merged_style` if the tag has no UA defaults; otherwise
+/// returns a `ComputedStyle` with UA defaults overlaid by any user-
+/// supplied properties (so author CSS still wins where set).
 fn apply_form_ua_style(tag: &str, user: Option<ComputedStyle>) -> Option<ComputedStyle> {
     let mut ua = match tag {
         "button" => button_ua_computed_style(),
         "textarea" => textarea_ua_computed_style(),
+        "select" => select_ua_computed_style(),
         _ => return user,
     };
     if let Some(s) = user {
         css::merge_style(&mut ua, &s);
     }
     Some(ua)
+}
+
+/// Walk the children of a `<select>` element and pick the text content
+/// to render inside the styled atom. Picks the first `<option>` that
+/// carries a `selected` attribute; falls back to the first `<option>`
+/// otherwise. Empty string when the select has no options.
+fn extract_select_option_text(handle: &Handle) -> String {
+    let mut first_text: Option<String> = None;
+    let mut selected_text: Option<String> = None;
+    if let NodeData::Element { .. } = &handle.data {
+        for child in handle.children.borrow().iter() {
+            if let NodeData::Element { name, attrs, .. } = &child.data
+                && name.local.as_ref() == "option"
+            {
+                let mut buf = String::new();
+                collect_text_only(child, &mut buf);
+                let text = buf.trim().to_string();
+                if first_text.is_none() {
+                    first_text = Some(text.clone());
+                }
+                let attrs = attrs.borrow();
+                let is_selected = attrs.iter().any(|a| a.name.local.as_ref() == "selected");
+                if is_selected && selected_text.is_none() {
+                    selected_text = Some(text);
+                }
+            }
+        }
+    }
+    selected_text.or(first_text).unwrap_or_default()
+}
+
+/// Recursively concatenate the text content of `handle` and all
+/// descendants, ignoring element styling. Used by the `<select>`
+/// option-text extractor — `collect_cell_text` would build full
+/// `TextRun`s, which is overkill when we just need the raw string.
+fn collect_text_only(handle: &Handle, out: &mut String) {
+    match &handle.data {
+        NodeData::Text { contents } => out.push_str(&contents.borrow()),
+        NodeData::Element { .. } | NodeData::Document => {
+            for child in handle.children.borrow().iter() {
+                collect_text_only(child, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 // ── Font variant resolution ──────────────────────────────────
@@ -923,6 +987,19 @@ impl<'a> HtmlRenderer<'a> {
                     return;
                 }
 
+                // <select> renders only its first/selected <option>'s
+                // text. Catch it BEFORE the generic inline-block path
+                // (which would concatenate every option).
+                if tag == "select"
+                    && let Some(ref style) = merged_style
+                {
+                    let parent = self.inherit_stack.last().cloned().unwrap_or_default();
+                    let inherited = parent.inherit_into(merged_style.as_ref());
+                    let option_text = extract_select_option_text(handle);
+                    self.push_inline_block(handle, &inherited, style, Some(option_text));
+                    return;
+                }
+
                 // display: inline-block — collect the subtree's text as a
                 // single unbreakable atom with a fixed width and optional
                 // background/border. This is the minimal-but-real form:
@@ -933,7 +1010,7 @@ impl<'a> HtmlRenderer<'a> {
                 {
                     let parent = self.inherit_stack.last().cloned().unwrap_or_default();
                     let inherited = parent.inherit_into(merged_style.as_ref());
-                    self.push_inline_block(handle, &inherited, style);
+                    self.push_inline_block(handle, &inherited, style, None);
                     return;
                 }
 
@@ -1519,11 +1596,16 @@ impl<'a> HtmlRenderer<'a> {
     /// from the text plus horizontal padding), its own background color,
     /// and its own border. It flows inline like a single glyph — never
     /// splits, never merges with adjacent text.
+    ///
+    /// `text_override` lets callers supply the rendered text directly
+    /// (e.g. `<select>` chooses one `<option>` rather than concatenating
+    /// the whole subtree). When `None`, the subtree is flattened.
     fn push_inline_block(
         &mut self,
         handle: &Handle,
         inherited: &ComputedStyle,
         style: &ComputedStyle,
+        text_override: Option<String>,
     ) {
         // Font resolution — same logic as flush_run but tailored to an
         // atom we synthesise outside the normal flow.
@@ -1574,11 +1656,16 @@ impl<'a> HtmlRenderer<'a> {
 
         let color = style.color.or(inherited.color);
 
-        // Collect text content from the subtree.
-        let mut child_runs: Vec<TextRun> = Vec::new();
-        collect_cell_text(handle, &mut child_runs, &resolved_font, font_size, color);
-        let text: String = child_runs.iter().map(|r| r.text.as_str()).collect();
-        let text = text.trim().to_string();
+        // Text source: caller's override (e.g. `<select>` first option),
+        // otherwise flatten the subtree as the inline-block contents.
+        let text = if let Some(t) = text_override {
+            t
+        } else {
+            let mut child_runs: Vec<TextRun> = Vec::new();
+            collect_cell_text(handle, &mut child_runs, &resolved_font, font_size, color);
+            let joined: String = child_runs.iter().map(|r| r.text.as_str()).collect();
+            joined.trim().to_string()
+        };
 
         // Horizontal padding (already flows into the atom box interior).
         let ctx = self.length_context();
