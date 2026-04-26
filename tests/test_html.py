@@ -5640,3 +5640,58 @@ with describe("<textarea>"):
         content = content_stream(data)
         expect(content).to_contain(b"(before)")
         expect(content).to_contain(b"after")
+
+
+with describe("<select>"):
+    # spec: HTML; behaviors: html-form-select
+
+    @test
+    def select_renders_first_option_in_bordered_box():
+        """`<select>` with no [selected] attribute renders the first
+        option's text inside a styled bordered inline-block."""
+        html = "<select><option>Apple</option><option>Banana</option></select>"
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        # First option text shows up.
+        expect(content).to_contain(b"(Apple) Tj")
+        # Other options must NOT appear in the rendered content.
+        assert b"Banana" not in content
+        # White background fill from the UA style.
+        expect(content).to_contain(b"1 1 1 rg")
+        # Default dark-grey border stroke.
+        expect(content).to_contain(b"0.463 0.463 0.463 RG")
+
+    @test
+    def select_selected_option_wins_over_first():
+        """When an option carries the `selected` attribute, it's the one
+        rendered — not the first option in document order."""
+        html = (
+            "<select>"
+            "<option>Apple</option>"
+            "<option selected>Banana</option>"
+            "<option>Cherry</option>"
+            "</select>"
+        )
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"(Banana) Tj")
+        # Sibling options should not be rendered.
+        assert b"Apple" not in content
+        assert b"Cherry" not in content
+
+    @test
+    def empty_select_does_not_crash():
+        """A select with no options renders an empty styled box; the
+        surrounding flow continues."""
+        html = "<p>before</p><select></select><p>after</p>"
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"(before)")
+        expect(content).to_contain(b"after")
+
+    @test
+    def select_user_css_overrides_ua_background():
+        """Author CSS on the select beats the UA defaults — `background:
+        red` shows red fill, not the default white."""
+        html = "<select style='background-color: red'><option>X</option></select>"
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        expect(content).to_contain(b"1 0 0 rg")

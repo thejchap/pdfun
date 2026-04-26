@@ -216,7 +216,8 @@ title = "Forms"
   id = "html-form-select"
   title = "select elements"
   weasyprint = "partial"
-  implemented = false
+  implemented = true
+  notes = "Visual rendering only: bordered/padded inline-block carrying the [selected] (or first) <option>'s text. Other options are not rendered. No AcroForm interactivity."
 
   [[section.behavior]]
   id = "html-form-textarea"
