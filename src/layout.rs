@@ -1135,7 +1135,10 @@ impl LayoutInner {
 
     pub fn push_paragraph(&mut self, para: Paragraph) {
         if !para.white_space.preserves_whitespace() {
-            let has_content = para.runs.iter().any(|r| !r.text.trim().is_empty());
+            let has_content = para
+                .runs
+                .iter()
+                .any(|r| !r.text.trim().is_empty() || r.inline_block_width.is_some());
             if !has_content {
                 return;
             }
