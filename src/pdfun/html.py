@@ -44,3 +44,13 @@ class HtmlDocument:
         """Return the rendered PDF as bytes."""
         doc = html_to_pdf(self._html, base_url=self._base_url)
         return doc.to_bytes()
+
+    def warnings(self) -> list[str]:
+        """Non-fatal diagnostics from rendering.
+
+        Image load failures, ``@font-face`` sources we can't load, etc. Each
+        call re-renders, so it's safe alongside ``to_bytes`` but inefficient
+        for large documents — cache the document if you need both.
+        """
+        doc = html_to_pdf(self._html, base_url=self._base_url)
+        return list(doc.warnings)

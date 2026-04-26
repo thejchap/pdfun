@@ -22,9 +22,11 @@ use pdf_writer::{Content, Filter, Name, Pdf, Rect, Ref, Str};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+mod base64;
 mod box_tree;
 mod css;
 mod dom;
+mod font_face;
 mod font_metrics;
 mod html_render;
 mod image;
@@ -207,10 +209,10 @@ fn pdf_escape(s: &str) -> Vec<u8> {
 
 // ── Registered (embedded) fonts ────────────────────────────────
 
-struct RegisteredFont {
-    data: Vec<u8>,
-    family: String,
-    name: String, // e.g. "Custom-0"
+pub(crate) struct RegisteredFont {
+    pub(crate) data: Vec<u8>,
+    pub(crate) family: String,
+    pub(crate) name: String, // e.g. "Custom-0"
 }
 
 // ── Indirect-ref allocator ─────────────────────────────────────
@@ -1431,6 +1433,18 @@ impl FontDatabase {
     }
 }
 
+/// RAII guard that clears the per-thread `@font-face` measurement
+/// metrics installed by `html_render::render_dom_to_layout`. Ensures a
+/// panic during render still wipes the thread-local so a follow-on
+/// caller on the same thread doesn't see stale state.
+struct FontFaceMetricsGuard;
+
+impl Drop for FontFaceMetricsGuard {
+    fn drop(&mut self) {
+        font_metrics::clear_font_face_metrics();
+    }
+}
+
 /// Render HTML to a PDF document (called from Python `HtmlDocument`).
 #[pyfunction]
 #[pyo3(signature = (html, margin_top=72.0, margin_right=72.0, margin_bottom=72.0, margin_left=72.0, page_width=612.0, page_height=792.0, base_url=None))]
@@ -1445,6 +1459,7 @@ fn html_to_pdf(
     page_height: f64,
     base_url: Option<&str>,
 ) -> PyResult<PdfDocument> {
+    let _font_face_guard = FontFaceMetricsGuard;
     let parsed = dom::parse_html(html);
     let title = html_render::extract_title(&parsed.document);
     let mut doc = PdfDocument {

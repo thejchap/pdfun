@@ -1,3 +1,4 @@
+import base64
 import struct
 import tempfile
 import zlib
@@ -7,6 +8,13 @@ from tryke import describe, expect, test
 
 from pdfun import HtmlDocument
 from tests._pdf_helpers import content_stream
+
+_FIXTURE_TTF_PATH = Path(__file__).parent / "fixtures" / "font.ttf"
+
+
+def _font_data_uri(b: bytes | None = None) -> str:
+    raw = b if b is not None else _FIXTURE_TTF_PATH.read_bytes()
+    return "data:font/ttf;base64," + base64.b64encode(raw).decode()
 
 
 def _make_png(width: int, height: int, rgb_bytes: bytes) -> bytes:
@@ -5408,4 +5416,121 @@ with describe("custom properties (var())"):
         html_literal = "<style>p { color: blue; }</style><div><p>x</p></div>"
         expect(content_stream(HtmlDocument(string=html_shadow).to_bytes())).to_equal(
             content_stream(HtmlDocument(string=html_literal).to_bytes())
+        )
+
+
+with describe("@font-face"):
+    # spec: CSS Fonts 3 §4.1; behaviors: fonts3-face
+
+    @test
+    def data_uri_loads_and_renders_text():
+        """A `data:` URI src embeds the TTF and renders the paragraph as
+        Identity-H glyph IDs (Type0 font), not WinAnsi byte strings."""
+        css = f'@font-face {{ font-family: MyFont; src: url("{_font_data_uri()}"); }}'
+        html = f"<style>{css}</style><p style='font-family: MyFont'>Hi</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(doc.warnings()).to_equal([])
+        # The PDF declares a Type0 font and an Identity-H ToUnicode CMap —
+        # both unique to embedded subsetted fonts.
+        assert b"/Subtype /Type0" in data
+        assert b"/Encoding /Identity-H" in data
+        # The text 'Hi' (2 chars) is shown as 4 bytes (2x 16-bit CIDs)
+        # rather than 2 bytes of WinAnsi.
+        content = content_stream(data)
+        assert b"(Hi)" not in content
+
+    @test
+    def relative_path_resolves_against_base_url():
+        """`url("./font.ttf")` joins against the `base_url` argument."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            font_path = Path(tmpdir) / "myfont.ttf"
+            font_path.write_bytes(_FIXTURE_TTF_PATH.read_bytes())
+            css = '@font-face { font-family: MyFont; src: url("myfont.ttf"); }'
+            html = f"<style>{css}</style><p style='font-family: MyFont'>x</p>"
+            doc = HtmlDocument(string=html, base_url=tmpdir)
+            data = doc.to_bytes()
+            expect(doc.warnings()).to_equal([])
+            assert b"/Subtype /Type0" in data
+
+    @test
+    def unknown_format_falls_through_to_next_src():
+        """A `format(woff2)` source we can't load is skipped; the next
+        comma-separated entry (a `data:` URI we can load) wins."""
+        css = (
+            "@font-face { font-family: MyFont; "
+            'src: url("ignored.woff2") format("woff2"), '
+            f'url("{_font_data_uri()}"); }}'
+        )
+        html = f"<style>{css}</style><p style='font-family: MyFont'>x</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(doc.warnings()).to_equal([])
+        assert b"/Subtype /Type0" in data
+
+    @test
+    def failed_load_falls_back_to_next_family():
+        """A broken `data:` payload emits a warning, the rule is dropped,
+        and the family fallback (sans-serif → Helvetica) renders the text."""
+        # base64 of 3 bytes is too short for a TTF — parse will fail.
+        css = (
+            "@font-face { font-family: BadFont; "
+            'src: url("data:font/ttf;base64,QUJD"); }'
+        )
+        html = f"<style>{css}</style><p style='font-family: BadFont, sans-serif'>x</p>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        warnings = doc.warnings()
+        assert any("BadFont" in w for w in warnings), warnings
+        # No Type0 font registered — the paragraph rendered with a
+        # built-in face instead.
+        assert b"/Subtype /Type0" not in data
+
+    @test
+    def weight_routing_picks_bold_face():
+        """Two `@font-face` rules with the same family at weights 400/700:
+        a `<strong>` child should pick the 700 face, not the 400 one."""
+        uri = _font_data_uri()
+        css = (
+            "@font-face { font-family: MyFont; font-weight: 400; "
+            f'src: url("{uri}"); }}'
+            "@font-face { font-family: MyFont; font-weight: 700; "
+            f'src: url("{uri}"); }}'
+        )
+        html = (
+            f"<style>{css}</style>"
+            "<p style='font-family: MyFont'>"
+            "regular <strong>bold</strong>"
+            "</p>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        expect(doc.warnings()).to_equal([])
+        # Both faces register, both Type0 fonts appear in the file.
+        assert data.count(b"/Subtype /Type0") == 2
+
+    @test
+    def emits_warning_on_local_src():
+        """`local("Foo")` is recognised but unsupported — a warning is
+        emitted and the family falls through to the cascade tail."""
+        css = '@font-face { font-family: MyFont; src: local("Helvetica"); }'
+        html = f"<style>{css}</style><p style='font-family: MyFont, sans-serif'>x</p>"
+        doc = HtmlDocument(string=html)
+        # to_bytes also re-renders, but warnings() does its own render.
+        warnings = doc.warnings()
+        assert any("local" in w.lower() for w in warnings), warnings
+
+    @test
+    def emits_warning_on_http_url():
+        """An `http(s)://` src is rejected outright — we have no network
+        client. A warning is emitted and the family falls through."""
+        css = (
+            "@font-face { font-family: MyFont; "
+            'src: url("https://example.com/font.ttf"); }'
+        )
+        html = f"<style>{css}</style><p style='font-family: MyFont, sans-serif'>x</p>"
+        doc = HtmlDocument(string=html)
+        warnings = doc.warnings()
+        assert any("scheme" in w.lower() or "http" in w.lower() for w in warnings), (
+            warnings
         )
