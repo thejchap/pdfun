@@ -33,6 +33,7 @@ const BLOCK_ELEMENTS: &[&str] = &[
     "figcaption",
     "details",
     "summary",
+    "textarea",
 ];
 /// Block elements that act as pure containers (they wrap other blocks
 /// rather than being "paragraph-like" themselves). For these, `html_render`
@@ -207,13 +208,35 @@ fn button_ua_computed_style() -> ComputedStyle {
     }
 }
 
+/// User-agent default style for the `<textarea>` element: a bordered,
+/// padded block with a white background, monospace font, and
+/// whitespace preserved (matching the historical browser default of
+/// rendering its raw text contents verbatim).
+fn textarea_ua_computed_style() -> ComputedStyle {
+    ComputedStyle {
+        border_width: Some(css::CssLength::Pt(1.0)),
+        border_color: Some((0.463, 0.463, 0.463)),
+        border_style: Some(css::BorderStyle::Solid),
+        background_color: Some((1.0, 1.0, 1.0)),
+        padding_left: Some(css::CssLength::Pt(4.0)),
+        padding_right: Some(css::CssLength::Pt(4.0)),
+        padding_top: Some(css::CssLength::Pt(4.0)),
+        padding_bottom: Some(css::CssLength::Pt(4.0)),
+        font_family: Some("monospace".to_string()),
+        white_space: Some(css::WhiteSpace::Pre),
+        ..ComputedStyle::default()
+    }
+}
+
 /// Apply the user-agent style for form elements that have a non-trivial
-/// visual default (`<button>`). Returns the user's `merged_style` if
-/// the tag has no UA defaults; otherwise returns a `ComputedStyle` with
-/// UA defaults overlaid by any user-supplied properties.
+/// visual default (`<button>`, `<textarea>`). Returns the user's
+/// `merged_style` if the tag has no UA defaults; otherwise returns a
+/// `ComputedStyle` with UA defaults overlaid by any user-supplied
+/// properties (so author CSS still wins where set).
 fn apply_form_ua_style(tag: &str, user: Option<ComputedStyle>) -> Option<ComputedStyle> {
     let mut ua = match tag {
         "button" => button_ua_computed_style(),
+        "textarea" => textarea_ua_computed_style(),
         _ => return user,
     };
     if let Some(s) = user {

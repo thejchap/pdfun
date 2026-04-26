@@ -5591,3 +5591,52 @@ with describe("<button>"):
         # empty button.
         expect(content).to_contain(b"(x)")
         expect(content).to_contain(b"y")
+
+
+with describe("<textarea>"):
+    # spec: HTML; behaviors: html-form-textarea
+
+    @test
+    def textarea_renders_inner_text_in_bordered_box():
+        """`<textarea>...</textarea>` renders the inner text inside a
+        white box with a 1pt grey border. Default font is monospace."""
+        doc = HtmlDocument(string="<textarea>hello</textarea>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Inner text shows up.
+        expect(content).to_contain(b"(hello) Tj")
+        # White background fill.
+        expect(content).to_contain(b"1 1 1 rg")
+        # Default dark-grey border stroke.
+        expect(content).to_contain(b"0.463 0.463 0.463 RG")
+        # Font dict declares Courier (the monospace mapping).
+        assert b"/BaseFont /Courier" in data
+
+    @test
+    def textarea_preserves_internal_newlines():
+        """Whitespace inside `<textarea>` is preserved like `<pre>` —
+        each newline becomes a separate rendered line."""
+        doc = HtmlDocument(string="<textarea>line one\nline two</textarea>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"(line one) Tj")
+        expect(content).to_contain(b"(line two) Tj")
+
+    @test
+    def textarea_user_css_overrides_ua_background():
+        """Author CSS on the textarea beats the UA defaults — `background:
+        red` shows red fill, not the default white."""
+        html = "<textarea style='background-color: red'>x</textarea>"
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+
+    @test
+    def empty_textarea_does_not_crash():
+        """A textarea with no inner text still renders the styled box
+        and the surrounding flow continues."""
+        doc = HtmlDocument(string="<p>before</p><textarea></textarea><p>after</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"(before)")
+        expect(content).to_contain(b"after")
