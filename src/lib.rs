@@ -66,7 +66,10 @@ pub(crate) enum PdfOp {
         x: f32,
         y: f32,
     },
-    ShowText(String),
+    /// Pre-transcoded PDF-WinAnsi byte string for the built-in font path.
+    /// Built by `show_text_for` via `winansi::transcode_to_pdf_winansi`;
+    /// emitted into the content stream wrapped in a PDF literal string.
+    ShowText(Vec<u8>),
     /// glyph ids are resolved lazily in `to_bytes()`; stores (char,) pairs
     ShowGlyphs(Vec<char>),
     // Graphics primitives
@@ -193,11 +196,32 @@ impl PageContent {
     }
 }
 
-/// Escape a string for PDF literal string encoding.
-/// Parentheses and backslashes must be escaped.
-fn pdf_escape(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len());
-    for &b in s.as_bytes() {
+/// Transcode `text` into PDF `WinAnsiEncoding` bytes, substituting `?`
+/// per-char for codepoints outside the WinAnsi repertoire. WS-1A treats
+/// non-mappable codepoints as unrenderable on built-in fonts; WS-1B
+/// will replace this fallback with a split-and-promote onto a Unicode
+/// face. The substitution is per-char so a single rogue codepoint in
+/// the middle of an otherwise-Latin string only loses that one glyph.
+pub(crate) fn transcode_with_fallback(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        match winansi::transcode_to_pdf_winansi(s) {
+            Ok(mut bytes) => out.append(&mut bytes),
+            Err(_) => out.push(b'?'),
+        }
+    }
+    out
+}
+
+/// Escape a byte buffer for PDF literal string encoding (`(...)`).
+/// Parentheses and backslashes must be escaped per ISO 32000-1 §7.3.4.2.
+/// Accepts arbitrary bytes — used after WinAnsi transcoding so the input
+/// is already in the encoding the built-in font expects.
+fn pdf_escape(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for &b in bytes {
         match b {
             b'(' => out.extend_from_slice(b"\\("),
             b')' => out.extend_from_slice(b"\\)"),
@@ -472,8 +496,8 @@ fn write_page_content_stream(
             PdfOp::SetTextPosition { x, y } => {
                 content.next_line(*x, *y);
             }
-            PdfOp::ShowText(text) => {
-                let escaped = pdf_escape(text);
+            PdfOp::ShowText(bytes) => {
+                let escaped = pdf_escape(bytes);
                 content.show(Str(&escaped));
             }
             PdfOp::ShowGlyphs(chars) => {
@@ -1184,7 +1208,13 @@ impl Page {
             page.operations
                 .push(PdfOp::ShowGlyphs(text.chars().collect()));
         } else {
-            page.operations.push(PdfOp::ShowText(text.to_string()));
+            // Built-in PDF fonts speak WinAnsi: transcode the text now
+            // so the content-stream literal carries the bytes the
+            // viewer expects. Non-mappable codepoints fall back to '?'
+            // per char (the same defect today, but bounded — WS-1B
+            // will promote those runs to a Unicode-capable face).
+            let bytes = transcode_with_fallback(text);
+            page.operations.push(PdfOp::ShowText(bytes));
         }
         page.operations.push(PdfOp::EndText);
         Ok(())

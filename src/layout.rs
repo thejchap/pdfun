@@ -13,11 +13,17 @@ use crate::{BUILTIN_FONTS, PageContent, PdfDocument, PdfOp, RegisteredFont};
 /// embedded as Type0 / `CIDFontType2` / Identity-H — for those we have
 /// to emit a `Vec<char>` that the page writer remaps into 16-bit glyph
 /// IDs.
+///
+/// For the built-in path, transcode the input UTF-8 text into PDF's
+/// `WinAnsiEncoding` byte string here so the content stream carries
+/// the bytes the viewer expects (`Caf\xe9`, not the raw UTF-8 `Caf\xc3\xa9`).
+/// Non-mappable codepoints fall back to `?` per char — WS-1B will
+/// replace that fallback with a split-and-promote onto a Unicode face.
 fn show_text_for(font_name: &str, text: String) -> PdfOp {
     if font_name.starts_with("Custom-") {
         PdfOp::ShowGlyphs(text.chars().collect())
     } else {
-        PdfOp::ShowText(text)
+        PdfOp::ShowText(crate::transcode_with_fallback(&text))
     }
 }
 
