@@ -31,6 +31,7 @@ mod font_metrics;
 mod html_render;
 mod image;
 mod layout;
+mod winansi;
 
 // ── Built-in PDF fonts ─────────────────────────────────────────
 
