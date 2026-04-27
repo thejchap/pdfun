@@ -443,6 +443,21 @@ pub struct Table {
     pub default_line_height: Option<f32>,
     pub caption: Option<Box<Paragraph>>,
     pub border_collapse: css::BorderCollapseValue,
+    /// Per-column style records built from `<colgroup>` / `<col>` (CSS
+    /// 2.1 §17.3). `None` when no `<colgroup>` was declared, in which
+    /// case the layout falls through to its intrinsic algorithm.
+    /// `Some(empty)` means the table had a colgroup but no columns
+    /// (treated the same as `None`).
+    pub col_styles: Option<Vec<css::ColStyle>>,
+    /// CSS `table-layout` (CSS 2.1 §17.5.2). `Auto` (default) treats
+    /// `<col width>` as a preferred-width hint bounded below by the
+    /// content's min-width; `Fixed` pins column widths to their hints.
+    // The `clippy::struct_field_names` lint flags this because the field
+    // name `table_layout` starts with the struct name `Table`. Renaming
+    // away from `table_layout` would diverge from the CSS property
+    // spelling — keep it.
+    #[allow(clippy::struct_field_names)]
+    pub table_layout: css::TableLayoutValue,
 }
 
 pub struct ImageBlock {
@@ -909,6 +924,128 @@ fn measure_cell_intrinsic(cell: &TableCell) -> Result<(f32, f32), String> {
         }
     }
     Ok((min_width, max_width))
+}
+
+/// Resolve a `<col>` width hint to a point value in the context of the
+/// table's containing area. Percent hints resolve against `container`.
+/// Other length units use a fallback `LengthContext` (rem/vw/vh inside
+/// table column hints aren't yet contextual — see TODO).
+fn resolve_col_hint(hint: Option<css::CssLength>, container: f32) -> Option<f32> {
+    let len = hint?;
+    let ctx = css::LengthContext {
+        em: 12.0,
+        rem: 12.0,
+        vw: css::LengthContext::DEFAULT_VW,
+        vh: css::LengthContext::DEFAULT_VH,
+        container,
+    };
+    Some(len.resolve_ctx(&ctx))
+}
+
+/// Resolve `<col>` width hints to per-column point values (or `None`
+/// where no hint was given). Percent hints use `container_width` as the
+/// reference.
+pub(crate) fn resolve_col_hints(
+    col_styles: &[css::ColStyle],
+    container_width: f32,
+) -> Vec<Option<f32>> {
+    col_styles
+        .iter()
+        .map(|cs| resolve_col_hint(cs.width, container_width))
+        .collect()
+}
+
+/// CSS 2.1 §17.5.2 column-width resolution.
+///
+/// Two modes:
+///
+/// - **`auto`** (default): explicit column hints raise the column's
+///   *preferred* width, but `col_min` is **left at the content
+///   minimum**. This way a long unbreakable word (a URL, a hash) in a
+///   column hinted to `width: 10%` still claims its real intrinsic
+///   minimum and never clips. Per CSS 2.1 §17.5.2.2, also preserves the
+///   invariant `col_max[i] >= col_preferred[i]`.
+/// - **`fixed`**: column widths are pinned to their hints. Cells cannot
+///   widen the column (overflow or wrap). Hint-less columns split the
+///   leftover space evenly. CSS 2.1 §17.5.2.1.
+///
+/// Percent hints exceeding 100% in `auto` mode are scaled proportionally
+/// down to fit so a malformed `[60%, 60%]` still uses the table's full
+/// area instead of overflowing — matches Blink and `WeasyPrint`.
+pub(crate) fn apply_col_hints_auto(
+    col_min: &[f32],
+    col_max: &mut [f32],
+    col_preferred: &mut [f32],
+    hints: &[Option<f32>],
+) {
+    debug_assert_eq!(col_min.len(), col_max.len());
+    debug_assert_eq!(col_min.len(), col_preferred.len());
+    debug_assert_eq!(col_min.len(), hints.len());
+    for (i, hint) in hints.iter().enumerate() {
+        // `col_preferred[i]` starts at the intrinsic max-content; an
+        // explicit hint overrides only if it's *larger* than the
+        // content's min-width — content-min is the floor either way.
+        if let Some(h) = *hint {
+            let pref = h.max(col_min[i]);
+            col_preferred[i] = pref;
+            if col_max[i] < pref {
+                col_max[i] = pref;
+            }
+        }
+    }
+}
+
+/// `table-layout: fixed` — pin column widths to hints, even-split
+/// leftover area among hint-less columns. Returns the resolved widths.
+pub(crate) fn apply_col_hints_fixed(
+    column_count: usize,
+    hints: &[Option<f32>],
+    container_width: f32,
+) -> Vec<f32> {
+    let mut widths = vec![0.0_f32; column_count];
+    let mut hinted_total = 0.0_f32;
+    let mut unhinted = 0_usize;
+    for (i, w) in widths.iter_mut().enumerate() {
+        match hints.get(i).copied().flatten() {
+            Some(h) => {
+                *w = h;
+                hinted_total += h;
+            }
+            None => unhinted += 1,
+        }
+    }
+    if unhinted > 0 {
+        let leftover = (container_width - hinted_total).max(0.0);
+        let share = leftover / unhinted as f32;
+        for (i, w) in widths.iter_mut().enumerate() {
+            if hints.get(i).copied().flatten().is_none() {
+                *w = share;
+            }
+        }
+    } else if hinted_total > container_width && hinted_total > 0.0 {
+        // Total hints overflow the container — scale proportionally
+        // so the table still fits. (CSS 2.1 §17.5.2.1 doesn't prescribe
+        // this but every UA does it.)
+        let scale = container_width / hinted_total;
+        for w in &mut widths {
+            *w *= scale;
+        }
+    }
+    widths
+}
+
+/// Pre-process auto-mode percent hints so their sum doesn't exceed
+/// `container_width`. Per Blink / `WeasyPrint`, `[60%, 60%]` resolves to
+/// `[300pt, 300pt]` of a 600pt area, not `[360, 360]` overflowing.
+/// Acts in-place on the resolved hint values.
+pub(crate) fn scale_overlong_percent_hints(hints: &mut [Option<f32>], container_width: f32) {
+    let total: f32 = hints.iter().filter_map(|h| *h).sum();
+    if total > container_width && total > 0.0 {
+        let scale = container_width / total;
+        for v in hints.iter_mut().flatten() {
+            *v *= scale;
+        }
+    }
 }
 
 fn rgb_to_f32(c: (f64, f64, f64)) -> (f32, f32, f32) {
@@ -2642,47 +2779,78 @@ impl LayoutInner {
         // Total available width for the table within the current column
         let table_area_width = col_width_v - table.style.margin_left - table.style.margin_right;
 
-        // Measure intrinsic min and max widths per column
-        let mut col_min = vec![0.0_f32; column_count];
-        let mut col_max = vec![0.0_f32; column_count];
-        for row in &table.rows {
-            for (idx, cell) in row.cells.iter().enumerate() {
-                if idx >= column_count {
-                    break;
-                }
-                let (cmin, cmax) = measure_cell_intrinsic(cell)?;
-                let h_pad = cell.style.padding_left + cell.style.padding_right;
-                if cmin + h_pad > col_min[idx] {
-                    col_min[idx] = cmin + h_pad;
-                }
-                if cmax + h_pad > col_max[idx] {
-                    col_max[idx] = cmax + h_pad;
-                }
+        // Resolve <col> width hints (percent → pt, length → pt). The
+        // hint vector is sized to `column_count` even if the colgroup
+        // declared fewer / more <col>s — extra entries are dropped, and
+        // missing entries are filled with `None`.
+        let mut col_hints: Vec<Option<f32>> = vec![None; column_count];
+        if let Some(col_styles) = &table.col_styles {
+            for (h, cs) in col_hints.iter_mut().zip(col_styles.iter()) {
+                *h = resolve_col_hint(cs.width, table_area_width);
             }
+            scale_overlong_percent_hints(&mut col_hints, table_area_width);
         }
 
-        // Distribute widths: use max if they fit; else scale proportionally down to min
-        let sum_max: f32 = col_max.iter().sum();
-        let sum_min: f32 = col_min.iter().sum();
-        let col_widths: Vec<f32> = if sum_max <= table_area_width {
-            // Space to spare: distribute the extra proportionally from max
-            let extra = table_area_width - sum_max;
-            if sum_max > 0.0 {
-                col_max.iter().map(|&w| w + extra * (w / sum_max)).collect()
-            } else {
-                vec![table_area_width / column_count as f32; column_count]
-            }
-        } else if sum_min >= table_area_width {
-            col_min.clone()
+        let col_widths: Vec<f32> = if matches!(table.table_layout, css::TableLayoutValue::Fixed) {
+            // CSS 2.1 §17.5.2.1 — column widths come from the hints
+            // (or an even share for hint-less columns); cell content
+            // does not widen them.
+            apply_col_hints_fixed(column_count, &col_hints, table_area_width)
         } else {
-            // Interpolate between min and max
-            let slack = table_area_width - sum_min;
-            let range = sum_max - sum_min;
-            col_min
-                .iter()
-                .zip(col_max.iter())
-                .map(|(&lo, &hi)| lo + slack * ((hi - lo) / range))
-                .collect()
+            // Auto layout — measure intrinsic widths from cell content,
+            // then let `<col>` hints raise the *preferred* width but
+            // never push col_min above the content's intrinsic minimum
+            // (CSS 2.1 §17.5.2.2; see `apply_col_hints_auto` for the
+            // long-URL bug-prevention rationale).
+            let mut col_min = vec![0.0_f32; column_count];
+            let mut col_max = vec![0.0_f32; column_count];
+            for row in &table.rows {
+                for (idx, cell) in row.cells.iter().enumerate() {
+                    if idx >= column_count {
+                        break;
+                    }
+                    let (cmin, cmax) = measure_cell_intrinsic(cell)?;
+                    let h_pad = cell.style.padding_left + cell.style.padding_right;
+                    if cmin + h_pad > col_min[idx] {
+                        col_min[idx] = cmin + h_pad;
+                    }
+                    if cmax + h_pad > col_max[idx] {
+                        col_max[idx] = cmax + h_pad;
+                    }
+                }
+            }
+
+            let mut col_preferred = col_max.clone();
+            apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &col_hints);
+
+            // Distribute widths between content min and (now-hinted)
+            // preferred max. The existing intrinsic-distribution rules
+            // apply with `col_max` widened by the hint pass.
+            let sum_max: f32 = col_preferred.iter().sum();
+            let sum_min: f32 = col_min.iter().sum();
+            if sum_max <= table_area_width {
+                // Space to spare: distribute the extra proportionally
+                let extra = table_area_width - sum_max;
+                if sum_max > 0.0 {
+                    col_preferred
+                        .iter()
+                        .map(|&w| w + extra * (w / sum_max))
+                        .collect()
+                } else {
+                    vec![table_area_width / column_count as f32; column_count]
+                }
+            } else if sum_min >= table_area_width {
+                col_min.clone()
+            } else {
+                // Interpolate between min and preferred-max
+                let slack = table_area_width - sum_min;
+                let range = sum_max - sum_min;
+                col_min
+                    .iter()
+                    .zip(col_preferred.iter())
+                    .map(|(&lo, &hi)| lo + slack * ((hi - lo) / range))
+                    .collect()
+            }
         };
 
         let table_actual_width: f32 = col_widths.iter().sum();
@@ -2836,6 +3004,31 @@ impl LayoutInner {
                             page.fonts_used.push(seg.font_name.clone());
                         }
                     }
+                }
+            }
+
+            // Paint <col> backgrounds before cell backgrounds. Per CSS
+            // 2.1 §17.5.1, the painter's order is table → col-group →
+            // col → row-group → row → cell, so column backgrounds sit
+            // beneath the row/cell backgrounds. Drawn per-row to keep
+            // the geometry simple — the column rectangle is just the
+            // cells' rectangle.
+            if let Some(col_styles) = &table.col_styles {
+                let mut x_running = cell_x;
+                for (idx, &cwidth) in col_widths.iter().enumerate() {
+                    if let Some(cs) = col_styles.get(idx)
+                        && let Some((r, g, b)) = cs.background_color
+                    {
+                        page.operations.push(PdfOp::SetFillColor { r, g, b });
+                        page.operations.push(PdfOp::Rectangle {
+                            x: x_running,
+                            y: row_bottom,
+                            width: cwidth,
+                            height: row_height,
+                        });
+                        page.operations.push(PdfOp::Fill);
+                    }
+                    x_running += cwidth;
                 }
             }
 
@@ -3346,6 +3539,132 @@ mod tests {
     fn wrap_text_rejects_unknown_font() {
         let err = wrap_text_impl("hello", 100.0, "NotAFont", 12.0).unwrap_err();
         assert!(err.contains("unknown font"));
+    }
+
+    // ── <col> width hint resolution (CSS 2.1 §17.5.2) ────────
+
+    #[test]
+    fn auto_layout_explicit_widths_set_preferred_not_min() {
+        // Container = 600pt, hints = 30%/10%/60%, intrinsic mins = 10pt.
+        // Auto layout must:
+        //   * raise col_preferred to the resolved hint when the hint is
+        //     larger than the content min-width
+        //   * leave col_min UNCHANGED (this is the bug-prevention assert
+        //     — the naive `col_min = col_max = hint` plan would clip a
+        //     long unbreakable word in a hinted-narrow column).
+        //   * keep col_max >= col_preferred.
+        let col_min = vec![10.0_f32; 3];
+        let mut col_max = vec![20.0_f32, 20.0, 20.0];
+        let mut col_preferred = col_max.clone();
+        let hints = vec![Some(180.0), Some(60.0), Some(360.0)]; // 30/10/60% of 600
+        let col_min_before = col_min.clone();
+        apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &hints);
+        assert_eq!(col_preferred, vec![180.0, 60.0, 360.0]);
+        // col_min was not touched — even after applying hints. This is
+        // what the long-URL test below relies on.
+        assert_eq!(col_min, col_min_before);
+        for i in 0..3 {
+            assert!(
+                col_max[i] >= col_preferred[i],
+                "col_max[{i}]={} should be >= col_preferred[{i}]={}",
+                col_max[i],
+                col_preferred[i]
+            );
+        }
+
+        // Bug-prevention assert: a long word with min-width 80 in
+        // column 1 (hinted to 60) must not be clipped to 60.
+        // col_min is the floor for col_preferred, so the column gets
+        // its real intrinsic minimum (80) regardless of the smaller hint.
+        let col_min2 = vec![10.0_f32, 80.0, 10.0];
+        let mut col_max2 = vec![20.0_f32, 80.0, 20.0];
+        let mut col_preferred2 = col_max2.clone();
+        let hints2 = vec![Some(180.0), Some(60.0), Some(360.0)];
+        apply_col_hints_auto(&col_min2, &mut col_max2, &mut col_preferred2, &hints2);
+        assert!(
+            col_preferred2[1] >= 80.0,
+            "long word in column 1 (min 80, hint 60) was clipped to {}",
+            col_preferred2[1]
+        );
+    }
+
+    #[test]
+    fn percents_summing_over_100_scale_down() {
+        // [60%, 60%] of a 600pt table area would naively resolve to
+        // [360, 360] = 720pt — overflowing the table. Per Blink and
+        // WeasyPrint, percents over 100% scale proportionally so the
+        // table still fits its container.
+        let cs = vec![
+            css::ColStyle {
+                width: Some(css::CssLength::Pct(60.0)),
+                ..Default::default()
+            },
+            css::ColStyle {
+                width: Some(css::CssLength::Pct(60.0)),
+                ..Default::default()
+            },
+        ];
+        let mut hints = resolve_col_hints(&cs, 600.0);
+        assert!((hints[0].unwrap() - 360.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 360.0).abs() < 1e-3);
+        scale_overlong_percent_hints(&mut hints, 600.0);
+        assert!((hints[0].unwrap() - 300.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 300.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn explicit_length_widths_are_honored() {
+        // `<col style="width: 100pt">` resolves to 100pt regardless of
+        // the table's container width — only `%` is container-relative.
+        let cs = vec![
+            css::ColStyle {
+                width: Some(css::CssLength::Pt(100.0)),
+                ..Default::default()
+            },
+            css::ColStyle {
+                width: Some(css::CssLength::Px(100.0)), // 100 CSS px = 75 PDF pt
+                ..Default::default()
+            },
+            css::ColStyle::default(),
+        ];
+        let hints = resolve_col_hints(&cs, 600.0);
+        assert!((hints[0].unwrap() - 100.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 75.0).abs() < 1e-3);
+        assert!(hints[2].is_none());
+    }
+
+    #[test]
+    fn unspecified_columns_share_remainder() {
+        // Auto layout, hints = [Some(50%=300pt), None, None] in a 600pt
+        // table. Column 0 takes 300pt; the remaining 300pt is shared
+        // between col 1 and col 2 according to their intrinsic widths.
+        // The math is delegated to the existing intrinsic-width pass —
+        // here we just verify col_preferred[0] is pinned to the hint
+        // floor and col_preferred[1..] are untouched (so the existing
+        // distribution logic owns those two).
+        let col_min = vec![10.0_f32, 10.0, 10.0];
+        let mut col_max = vec![100.0_f32, 100.0, 100.0];
+        let mut col_preferred = col_max.clone();
+        let hints = vec![Some(300.0), None, None];
+        apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &hints);
+        assert!((col_preferred[0] - 300.0).abs() < 1e-3);
+        assert!((col_preferred[1] - 100.0).abs() < 1e-3);
+        assert!((col_preferred[2] - 100.0).abs() < 1e-3);
+
+        // In fixed mode, hint-less columns split the leftover equally:
+        // [Some(300), None, None] of a 600pt area -> [300, 150, 150].
+        let widths = apply_col_hints_fixed(3, &hints, 600.0);
+        assert_eq!(widths, vec![300.0, 150.0, 150.0]);
+    }
+
+    #[test]
+    fn fixed_layout_pins_column_widths() {
+        // CSS 2.1 §17.5.2.1 — `table-layout: fixed` pins the column
+        // widths to the hints. Cell content does not widen the column,
+        // even if the intrinsic max-content is much larger than the hint.
+        let hints = vec![Some(180.0), Some(60.0), Some(360.0)];
+        let widths = apply_col_hints_fixed(3, &hints, 600.0);
+        assert_eq!(widths, vec![180.0, 60.0, 360.0]);
     }
 
     // ── margin collapse (Stage B1) ──────────────────────────
