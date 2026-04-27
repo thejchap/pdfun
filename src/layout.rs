@@ -3445,6 +3445,30 @@ mod tests {
     }
 
     #[test]
+    fn unspecified_columns_share_remainder() {
+        // Auto layout, hints = [Some(50%=300pt), None, None] in a 600pt
+        // table. Column 0 takes 300pt; the remaining 300pt is shared
+        // between col 1 and col 2 according to their intrinsic widths.
+        // The math is delegated to the existing intrinsic-width pass —
+        // here we just verify col_preferred[0] is pinned to the hint
+        // floor and col_preferred[1..] are untouched (so the existing
+        // distribution logic owns those two).
+        let col_min = vec![10.0_f32, 10.0, 10.0];
+        let mut col_max = vec![100.0_f32, 100.0, 100.0];
+        let mut col_preferred = col_max.clone();
+        let hints = vec![Some(300.0), None, None];
+        apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &hints);
+        assert!((col_preferred[0] - 300.0).abs() < 1e-3);
+        assert!((col_preferred[1] - 100.0).abs() < 1e-3);
+        assert!((col_preferred[2] - 100.0).abs() < 1e-3);
+
+        // In fixed mode, hint-less columns split the leftover equally:
+        // [Some(300), None, None] of a 600pt area -> [300, 150, 150].
+        let widths = apply_col_hints_fixed(3, &hints, 600.0);
+        assert_eq!(widths, vec![300.0, 150.0, 150.0]);
+    }
+
+    #[test]
     fn fixed_layout_pins_column_widths() {
         // CSS 2.1 §17.5.2.1 — `table-layout: fixed` pins the column
         // widths to the hints. Cell content does not widen the column,
