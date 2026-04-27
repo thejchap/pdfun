@@ -444,6 +444,70 @@ pub enum BorderCollapseValue {
     Collapse,
 }
 
+/// CSS `table-layout` (CSS 2.1 §17.5.2).
+///
+/// `Auto` (default) treats explicit column hints as *preferred* widths
+/// bounded below by the content's min-width. `Fixed` pins column widths
+/// to their hints — cells cannot widen the column (overflow or wrap).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TableLayoutValue {
+    /// Column widths are determined by content; explicit hints set
+    /// preferred widths but the content min-width still wins to prevent
+    /// long words from clipping. CSS 2.1 §17.5.2.2.
+    #[default]
+    Auto,
+    /// Column widths are fixed to their hints (or an even share when no
+    /// hint is given). Cell content does not widen columns. CSS 2.1
+    /// §17.5.2.1.
+    Fixed,
+}
+
+/// CSS `visibility` (CSS 2.1 §11.2). Stored on `<col>` so future passes
+/// can implement `collapse` without re-threading the table column type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Visibility {
+    /// Element is rendered normally.
+    #[default]
+    Visible,
+    /// Element is invisible (still occupies space).
+    Hidden,
+    /// On `<col>` / `<colgroup>` only: column is removed from layout.
+    /// v1 cut: parsed and stored but not yet honored at layout time.
+    // TODO(WS-5 follow-up): apply `collapse` to column layout.
+    Collapse,
+}
+
+/// Per-column style record built from `<colgroup>` / `<col>` elements
+/// (CSS 2.1 §17.3). One entry per column in the table; `<col span="N">`
+/// replicates the same record N times. Carries every property a `<col>`
+/// is allowed to set so future passes (visibility-collapse, col borders
+/// in collapse mode) don't have to re-thread the layout pipeline.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColStyle {
+    /// Explicit width hint from `<col style="width: ...">` or the legacy
+    /// `width` attribute. `None` = no hint, fall through to content
+    /// intrinsic width.
+    pub width: Option<CssLength>,
+    /// `background-color` painted behind the column area, beneath the
+    /// row / cell backgrounds (CSS 2.1 §17.5.1 painter's order).
+    pub background_color: Option<(f32, f32, f32)>,
+    /// `visibility` per CSS 2.1 §11.2. `Collapse` is parsed but a v1 cut.
+    pub visibility: Visibility,
+    /// `border-*` shorthand resolved into a single record. Honored only
+    /// in `border-collapse: collapse` mode (CSS 2.1 §17.6.2 only allows
+    /// col borders in collapse mode); ignored in `separate`.
+    pub border: Option<ColBorder>,
+}
+
+/// Border declared on a `<col>` / `<colgroup>`. Width / color / style are
+/// resolved at parse time from the longhand cascade.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColBorder {
+    pub width: f32,
+    pub color: (f32, f32, f32),
+    pub style: BorderStyle,
+}
+
 // ── PageStyle (@page rule) ──────────────────────────────────
 
 #[derive(Clone, Debug, Default)]

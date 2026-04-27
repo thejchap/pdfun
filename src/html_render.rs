@@ -2190,6 +2190,150 @@ impl<'a> HtmlRenderer<'a> {
     }
 }
 
+/// Walk a `<table>`'s direct `<colgroup>` / `<col>` descendants in
+/// document order and produce one `ColStyle` per column.
+///
+/// Per CSS 2.1 §17.3 the column track is built from:
+///
+///  - bare `<col>` children of the `<table>`, and
+///  - `<col>` children inside `<colgroup>` (an empty `<colgroup>` with a
+///    `span` attribute contributes that many default-styled columns).
+///
+/// `<col span="N">` replicates the same `ColStyle` N times so the layout
+/// pass sees one entry per logical column. Column index is consumed by
+/// `layout_table` to look up width hints / backgrounds / borders.
+///
+/// `<col>` inherits properties from its enclosing `<colgroup>` per the
+/// usual CSS inheritance rules — we apply the colgroup's parsed
+/// properties first, then let the `<col>`'s inline style override.
+pub(crate) fn extract_col_styles(table_handle: &Handle) -> Vec<css::ColStyle> {
+    let mut out: Vec<css::ColStyle> = Vec::new();
+    let NodeData::Element { name, .. } = &table_handle.data else {
+        return out;
+    };
+    if name.local.as_ref() != "table" {
+        return out;
+    }
+
+    fn col_element_span(handle: &Handle) -> u32 {
+        let NodeData::Element { attrs, .. } = &handle.data else {
+            return 1;
+        };
+        let attrs = attrs.borrow();
+        for attr in attrs.iter() {
+            if attr.name.local.as_ref() == "span"
+                && let Ok(n) = attr.value.trim().parse::<u32>()
+                && n >= 1
+            {
+                return n;
+            }
+        }
+        1
+    }
+
+    fn col_style_for(handle: &Handle, parent: Option<&css::ColStyle>) -> css::ColStyle {
+        let mut style = parent.cloned().unwrap_or_default();
+        // Legacy HTML `width` attribute on <col> / <colgroup>. Recognised
+        // only when there is no inline `style` width — inline style wins
+        // per HTML5 §15.3.6.
+        if let NodeData::Element { attrs, .. } = &handle.data {
+            let attrs = attrs.borrow();
+            for attr in attrs.iter() {
+                if attr.name.local.as_ref() == "width"
+                    && let Some(len) = parse_legacy_width_attr(&attr.value)
+                {
+                    style.width = Some(len);
+                }
+            }
+        }
+        if let Some(inline) = extract_style_attr(handle) {
+            if let Some(w) = inline.width {
+                style.width = Some(w);
+            }
+            if let Some(bg) = inline.background_color {
+                style.background_color = Some(bg);
+            }
+            // border-* longhands are folded into a single ColBorder if any
+            // of width/color/style are non-default.
+            let bw = inline.border_width.map(|len| len.resolve(0.0));
+            if bw.is_some() || inline.border_color.is_some() || inline.border_style.is_some() {
+                let prev = style.border;
+                style.border = Some(css::ColBorder {
+                    width: bw.unwrap_or(prev.map(|b| b.width).unwrap_or(1.0)),
+                    color: inline
+                        .border_color
+                        .or(prev.map(|b| b.color))
+                        .unwrap_or((0.0, 0.0, 0.0)),
+                    style: inline
+                        .border_style
+                        .or(prev.map(|b| b.style))
+                        .unwrap_or(css::BorderStyle::Solid),
+                });
+            }
+        }
+        style
+    }
+
+    for child in table_handle.children.borrow().iter() {
+        let NodeData::Element { name: cname, .. } = &child.data else {
+            continue;
+        };
+        let tag = cname.local.as_ref();
+        if tag == "colgroup" {
+            let group_style = col_style_for(child, None);
+            let cg_children = child.children.borrow();
+            let mut had_cols = false;
+            for col in cg_children.iter() {
+                if let NodeData::Element { name: gn, .. } = &col.data
+                    && gn.local.as_ref() == "col"
+                {
+                    had_cols = true;
+                    let cs = col_style_for(col, Some(&group_style));
+                    let span = col_element_span(col);
+                    for _ in 0..span {
+                        out.push(cs.clone());
+                    }
+                }
+            }
+            // An empty <colgroup> with a `span` produces that many
+            // default-styled columns inheriting only the group's style.
+            if !had_cols {
+                let span = col_element_span(child);
+                for _ in 0..span {
+                    out.push(group_style.clone());
+                }
+            }
+        } else if tag == "col" {
+            // Bare <col> child of <table> (HTML5 allows this — the table
+            // builds an anonymous colgroup around the run).
+            let cs = col_style_for(child, None);
+            let span = col_element_span(child);
+            for _ in 0..span {
+                out.push(cs.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Parse the legacy HTML `width` attribute (e.g. `width="30%"` or
+/// `width="100"`). Bare numbers default to CSS pixels per HTML5 §15.3.5.
+fn parse_legacy_width_attr(value: &str) -> Option<css::CssLength> {
+    let v = value.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if let Some(num) = v.strip_suffix('%')
+        && let Ok(n) = num.trim().parse::<f32>()
+    {
+        return Some(css::CssLength::Pct(n));
+    }
+    if let Ok(n) = v.parse::<f32>() {
+        return Some(css::CssLength::Px(n));
+    }
+    None
+}
+
 /// Recursively walk a `<table>` subtree and collect `TableRow`s from any
 /// `<tr>` descendants. Does not interpret `<thead>`/`<tbody>`/`<tfoot>`
 /// specially — their `<tr>` children are collected in document order.
@@ -2524,4 +2668,55 @@ pub fn extract_title(handle: &Handle) -> Option<String> {
         _ => {}
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use markup5ever_rcdom::RcDom;
+
+    /// Walk an `RcDom` and return the first `<table>` found, depth-first.
+    fn first_table(handle: &Handle) -> Option<Handle> {
+        if let NodeData::Element { name, .. } = &handle.data
+            && name.local.as_ref() == "table"
+        {
+            return Some(handle.clone());
+        }
+        for child in handle.children.borrow().iter() {
+            if let Some(t) = first_table(child) {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    /// Parse `html` into an `RcDom` and run `f` against the first `<table>`
+    /// handle. Keeps the `RcDom` alive across the closure since
+    /// `markup5ever_rcdom`'s `Drop` impl clears children to break `Rc`
+    /// cycles — returning the bare `Handle` after `parse_html` would
+    /// hand back a node whose children were torn down.
+    fn with_first_table<F: FnOnce(&Handle)>(html: &str, f: F) {
+        let dom: RcDom = crate::dom::parse_html(html);
+        let table = first_table(&dom.document).expect("expected a <table> element");
+        f(&table);
+        drop(dom);
+    }
+
+    #[test]
+    fn extracts_col_styles_from_colgroup() {
+        let html = "<table><colgroup>\
+            <col style=\"width:30%\">\
+            <col style=\"width:70%\">\
+            </colgroup><tr><td>a</td><td>b</td></tr></table>";
+        with_first_table(html, |table| {
+            let cols = extract_col_styles(table);
+            assert_eq!(cols.len(), 2);
+            assert!(
+                matches!(cols[0].width, Some(css::CssLength::Pct(v)) if (v - 30.0).abs() < 1e-3)
+            );
+            assert!(
+                matches!(cols[1].width, Some(css::CssLength::Pct(v)) if (v - 70.0).abs() < 1e-3)
+            );
+        });
+    }
 }
