@@ -3751,6 +3751,40 @@ with describe("tables"):
         expect(content).to_contain(b"Left")
         expect(content).to_contain(b"Right")
 
+    # spec: CSS 2.1 §17.5.1 painter's order, §17.3 col properties (WS-5)
+    @test
+    def col_background_paints_behind_cells():
+        """A `<col style="background-color: yellow">` paints a yellow
+        rectangle behind that column's cells. Per CSS 2.1 §17.5.1 the
+        column rectangle is drawn before the cell rectangles, so the
+        yellow `1 1 0 rg` fill must appear in the content stream before
+        the cell text fills.
+        """
+        html = (
+            "<table>"
+            "<colgroup>"
+            '<col style="background-color: yellow">'
+            "<col>"
+            "</colgroup>"
+            "<tr><td>L</td><td>R</td></tr>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Yellow column fill — `1 1 0 rg` is the f32-formatted RGB.
+        expect(content).to_contain(b"1 1 0 rg")
+        # Painter's order: column-background `1 1 0 rg` then `f` Fill
+        # before the per-cell text `(L) Tj`.
+        yellow_idx = content.find(b"1 1 0 rg")
+        l_idx = content.find(b"(L) Tj")
+        assert yellow_idx >= 0, "expected yellow rg in content stream"
+        assert l_idx >= 0, "expected (L) Tj in content stream"
+        assert yellow_idx < l_idx, (
+            f"col background (1 1 0 rg @ {yellow_idx}) must paint before cell text "
+            f"((L) Tj @ {l_idx}) per CSS 2.1 §17.5.1"
+        )
+
 
 with describe("images"):
     # spec: HTML; behaviors: html-img-png

@@ -2695,47 +2695,83 @@ impl LayoutInner {
         // Total available width for the table within the current column
         let table_area_width = col_width_v - table.style.margin_left - table.style.margin_right;
 
-        // Measure intrinsic min and max widths per column
-        let mut col_min = vec![0.0_f32; column_count];
-        let mut col_max = vec![0.0_f32; column_count];
-        for row in &table.rows {
-            for (idx, cell) in row.cells.iter().enumerate() {
-                if idx >= column_count {
-                    break;
-                }
-                let (cmin, cmax) = measure_cell_intrinsic(cell)?;
-                let h_pad = cell.style.padding_left + cell.style.padding_right;
-                if cmin + h_pad > col_min[idx] {
-                    col_min[idx] = cmin + h_pad;
-                }
-                if cmax + h_pad > col_max[idx] {
-                    col_max[idx] = cmax + h_pad;
-                }
+        // Resolve <col> width hints (percent → pt, length → pt). The
+        // hint vector is sized to `column_count` even if the colgroup
+        // declared fewer / more <col>s — extra entries are dropped, and
+        // missing entries are filled with `None`.
+        let mut col_hints: Vec<Option<f32>> = Vec::with_capacity(column_count);
+        if let Some(col_styles) = &table.col_styles {
+            for i in 0..column_count {
+                let h = col_styles
+                    .get(i)
+                    .and_then(|cs| resolve_col_hint(cs.width, table_area_width));
+                col_hints.push(h);
             }
+            scale_overlong_percent_hints(&mut col_hints, table_area_width);
+        } else {
+            col_hints.resize(column_count, None);
         }
 
-        // Distribute widths: use max if they fit; else scale proportionally down to min
-        let sum_max: f32 = col_max.iter().sum();
-        let sum_min: f32 = col_min.iter().sum();
-        let col_widths: Vec<f32> = if sum_max <= table_area_width {
-            // Space to spare: distribute the extra proportionally from max
-            let extra = table_area_width - sum_max;
-            if sum_max > 0.0 {
-                col_max.iter().map(|&w| w + extra * (w / sum_max)).collect()
-            } else {
-                vec![table_area_width / column_count as f32; column_count]
-            }
-        } else if sum_min >= table_area_width {
-            col_min.clone()
+        let col_widths: Vec<f32> = if matches!(table.table_layout, css::TableLayoutValue::Fixed) {
+            // CSS 2.1 §17.5.2.1 — column widths come from the hints
+            // (or an even share for hint-less columns); cell content
+            // does not widen them.
+            apply_col_hints_fixed(column_count, &col_hints, table_area_width)
         } else {
-            // Interpolate between min and max
-            let slack = table_area_width - sum_min;
-            let range = sum_max - sum_min;
-            col_min
-                .iter()
-                .zip(col_max.iter())
-                .map(|(&lo, &hi)| lo + slack * ((hi - lo) / range))
-                .collect()
+            // Auto layout — measure intrinsic widths from cell content,
+            // then let `<col>` hints raise the *preferred* width but
+            // never push col_min above the content's intrinsic minimum
+            // (CSS 2.1 §17.5.2.2; see `apply_col_hints_auto` for the
+            // long-URL bug-prevention rationale).
+            let mut col_min = vec![0.0_f32; column_count];
+            let mut col_max = vec![0.0_f32; column_count];
+            for row in &table.rows {
+                for (idx, cell) in row.cells.iter().enumerate() {
+                    if idx >= column_count {
+                        break;
+                    }
+                    let (cmin, cmax) = measure_cell_intrinsic(cell)?;
+                    let h_pad = cell.style.padding_left + cell.style.padding_right;
+                    if cmin + h_pad > col_min[idx] {
+                        col_min[idx] = cmin + h_pad;
+                    }
+                    if cmax + h_pad > col_max[idx] {
+                        col_max[idx] = cmax + h_pad;
+                    }
+                }
+            }
+
+            let mut col_preferred = col_max.clone();
+            apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &col_hints);
+
+            // Distribute widths between content min and (now-hinted)
+            // preferred max. The existing intrinsic-distribution rules
+            // apply with `col_max` widened by the hint pass.
+            let sum_max: f32 = col_preferred.iter().sum();
+            let sum_min: f32 = col_min.iter().sum();
+            if sum_max <= table_area_width {
+                // Space to spare: distribute the extra proportionally
+                let extra = table_area_width - sum_max;
+                if sum_max > 0.0 {
+                    col_preferred
+                        .iter()
+                        .map(|&w| w + extra * (w / sum_max))
+                        .collect()
+                } else {
+                    vec![table_area_width / column_count as f32; column_count]
+                }
+            } else if sum_min >= table_area_width {
+                col_min.clone()
+            } else {
+                // Interpolate between min and preferred-max
+                let slack = table_area_width - sum_min;
+                let range = sum_max - sum_min;
+                col_min
+                    .iter()
+                    .zip(col_preferred.iter())
+                    .map(|(&lo, &hi)| lo + slack * ((hi - lo) / range))
+                    .collect()
+            }
         };
 
         let table_actual_width: f32 = col_widths.iter().sum();
@@ -2889,6 +2925,32 @@ impl LayoutInner {
                             page.fonts_used.push(seg.font_name.clone());
                         }
                     }
+                }
+            }
+
+            // Paint <col> backgrounds before cell backgrounds. Per CSS
+            // 2.1 §17.5.1, the painter's order is table → col-group →
+            // col → row-group → row → cell, so column backgrounds sit
+            // beneath the row/cell backgrounds. Drawn per-row to keep
+            // the geometry simple — the column rectangle is just the
+            // cells' rectangle.
+            if let Some(col_styles) = &table.col_styles {
+                let mut x_running = cell_x;
+                for idx in 0..column_count {
+                    let cwidth = col_widths[idx];
+                    if let Some(cs) = col_styles.get(idx)
+                        && let Some((r, g, b)) = cs.background_color
+                    {
+                        page.operations.push(PdfOp::SetFillColor { r, g, b });
+                        page.operations.push(PdfOp::Rectangle {
+                            x: x_running,
+                            y: row_bottom,
+                            width: cwidth,
+                            height: row_height,
+                        });
+                        page.operations.push(PdfOp::Fill);
+                    }
+                    x_running += cwidth;
                 }
             }
 
