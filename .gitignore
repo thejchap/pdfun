@@ -44,3 +44,6 @@ target
 
 # Claude Code harness state
 .claude/scheduled_tasks.lock
+
+# Claude Code worktree isolation (background agents)
+.claude/
