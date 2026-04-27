@@ -237,7 +237,138 @@ fn pdf_escape(bytes: &[u8]) -> Vec<u8> {
 pub(crate) struct RegisteredFont {
     pub(crate) data: Vec<u8>,
     pub(crate) family: String,
-    pub(crate) name: String, // e.g. "Custom-0"
+    pub(crate) name: String, // e.g. "Custom-0" or "__pdfun_fallback"
+}
+
+/// Internal name reserved for the bundled DejaVu Sans fallback face. A
+/// run hits this face only when WS-1A's WinAnsi transcoder rejects a
+/// codepoint and WS-1B promotes that codepoint onto a Unicode-capable
+/// font. Treated like `Custom-N` everywhere — same Type0/CIDFont2
+/// Identity-H plumbing, same `ToUnicode` CMap pipeline.
+pub(crate) const FALLBACK_FONT_NAME: &str = "__pdfun_fallback";
+
+/// Family name advertised on the `@font-face` registry for the bundled
+/// fallback. Lower-cased internally to match cascade lookup behaviour.
+pub(crate) const FALLBACK_FONT_FAMILY: &str = "__pdfun_fallback";
+
+/// Bundled DejaVu Sans font bytes. Kept inside a Cargo feature gate so
+/// users who ship their own `@font-face` can drop the ~750 KB.
+#[cfg(feature = "bundled-fallback-font")]
+pub(crate) const FALLBACK_FONT_BYTES: &[u8] =
+    include_bytes!("../assets/fonts/DejaVuSans.ttf");
+
+/// True if `name` refers to an embedded (subset+embed) face — either a
+/// user-registered `Custom-N` or the bundled `__pdfun_fallback`. All
+/// embedded faces flow through the same Type0/CIDFont2/Identity-H path
+/// at PDF write time.
+pub(crate) fn is_embedded_font(name: &str) -> bool {
+    name.starts_with("Custom-") || name == FALLBACK_FONT_NAME
+}
+
+/// Eagerly validate the bundled font bytes once; cache the validated
+/// view so subsequent calls are zero-cost. Returns `Err` only if the
+/// embedded TTF fails `ttf_parser::Face::parse` — which would indicate
+/// the asset committed alongside this source is corrupt.
+#[cfg(feature = "bundled-fallback-font")]
+fn fallback_font_bytes() -> Result<&'static [u8], String> {
+    use std::sync::OnceLock;
+    static VALIDATED: OnceLock<Result<(), String>> = OnceLock::new();
+    let parsed = VALIDATED.get_or_init(|| {
+        ttf_parser::Face::parse(FALLBACK_FONT_BYTES, 0)
+            .map(|_| ())
+            .map_err(|e| format!("bundled fallback font failed to parse: {e}"))
+    });
+    match parsed {
+        Ok(()) => Ok(FALLBACK_FONT_BYTES),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+/// Append a `RegisteredFont` for the bundled fallback face if the given
+/// vector does not already carry one. Returns the registered name on
+/// success, `Err(msg)` if the embedded bytes failed eager validation,
+/// and `Ok(None)` when the `bundled-fallback-font` feature is off (the
+/// caller is expected to fall back to '?' substitution).
+///
+/// Idempotent: calling it twice on the same vector yields the existing
+/// entry the second time. The first call is the only one that pays the
+/// `ttf_parser` parse cost.
+#[allow(dead_code)]
+pub(crate) fn register_fallback_if_needed(
+    registered: &mut Vec<RegisteredFont>,
+) -> Result<Option<String>, String> {
+    if registered.iter().any(|rf| rf.name == FALLBACK_FONT_NAME) {
+        return Ok(Some(FALLBACK_FONT_NAME.to_string()));
+    }
+
+    #[cfg(feature = "bundled-fallback-font")]
+    {
+        let bytes = fallback_font_bytes()?;
+        registered.push(RegisteredFont {
+            data: bytes.to_vec(),
+            family: FALLBACK_FONT_FAMILY.to_string(),
+            name: FALLBACK_FONT_NAME.to_string(),
+        });
+        Ok(Some(FALLBACK_FONT_NAME.to_string()))
+    }
+
+    #[cfg(not(feature = "bundled-fallback-font"))]
+    {
+        let _ = registered; // suppress unused-mut warning when feature is off
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_font_registers_lazily() {
+        // Empty registry: nothing has been registered yet.
+        let mut registered: Vec<RegisteredFont> = Vec::new();
+        assert!(registered.iter().all(|rf| rf.name != FALLBACK_FONT_NAME));
+
+        // First call: registers exactly one entry named __pdfun_fallback
+        // (under the default-on `bundled-fallback-font` feature). With
+        // the feature off this returns Ok(None) and registers nothing.
+        let first = register_fallback_if_needed(&mut registered).expect("ok");
+        if cfg!(feature = "bundled-fallback-font") {
+            assert_eq!(first, Some(FALLBACK_FONT_NAME.to_string()));
+            assert_eq!(registered.len(), 1);
+            assert_eq!(registered[0].name, FALLBACK_FONT_NAME);
+            assert_eq!(registered[0].family, FALLBACK_FONT_FAMILY);
+            assert!(!registered[0].data.is_empty());
+        } else {
+            assert_eq!(first, None);
+            assert!(registered.is_empty());
+            return;
+        }
+
+        // Second call: idempotent — no new entry, returns the same name.
+        let second = register_fallback_if_needed(&mut registered).expect("ok");
+        assert_eq!(second, Some(FALLBACK_FONT_NAME.to_string()));
+        assert_eq!(registered.len(), 1);
+    }
+
+    #[cfg(feature = "bundled-fallback-font")]
+    #[test]
+    fn fallback_font_bytes_parse_via_ttf_parser() {
+        // Eager validation: the embedded asset must round-trip through
+        // ttf_parser::Face::parse without error so we never produce a
+        // corrupt PDF embed.
+        let bytes = fallback_font_bytes().expect("bundled font parses");
+        ttf_parser::Face::parse(bytes, 0).expect("ttf_parser accepts bytes");
+    }
+
+    #[test]
+    fn embedded_font_classifier_accepts_fallback() {
+        assert!(is_embedded_font(FALLBACK_FONT_NAME));
+        assert!(is_embedded_font("Custom-0"));
+        assert!(is_embedded_font("Custom-42"));
+        assert!(!is_embedded_font("Helvetica"));
+        assert!(!is_embedded_font("Times-Roman"));
+    }
 }
 
 // ── Indirect-ref allocator ─────────────────────────────────────
