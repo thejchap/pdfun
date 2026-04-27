@@ -37,11 +37,28 @@ pub struct ImageData {
 }
 
 /// Load an image from a local file. Selects the decoder based on the
-/// magic bytes of the file contents, not the extension.
+/// magic bytes of the file contents, not the extension. Retained for
+/// callers that have a `Path` already; new code should prefer
+/// `load_from_source` so it goes through the URL fetcher.
+#[allow(dead_code)]
 pub fn load_from_path(path: &Path) -> Result<ImageData, String> {
     let bytes =
         std::fs::read(path).map_err(|e| format!("failed to read image {}: {e}", path.display()))?;
     decode_bytes(&bytes)
+}
+
+/// Load an image from any source the renderer might encounter — a bare
+/// path, a `file://` URL, or (with the `http-fetch` feature) an HTTP/S
+/// URL. Routes through the supplied `UrlFetcher` so server-side callers
+/// can plug in their own connection pool / auth / cache.
+#[allow(dead_code)] // Wired into html_render call sites by a later rung.
+pub fn load_from_source(
+    src: &str,
+    base_dir: Option<&std::path::Path>,
+    fetcher: &dyn crate::url_fetcher::UrlFetcher,
+) -> Result<ImageData, String> {
+    let resource = fetcher.fetch(src, base_dir)?;
+    decode_bytes(&resource.bytes)
 }
 
 /// Decode an image from its raw bytes based on magic-byte sniffing.
@@ -270,6 +287,54 @@ mod tests {
         assert_eq!(img.filter, ImageFilter::Flate);
         assert!(img.alpha_mask.is_none());
         assert!(!img.data.is_empty());
+    }
+
+    #[test]
+    fn load_from_source_routes_through_fetcher() {
+        // Write a tiny PNG to a temp file, then ask `load_from_source`
+        // to read it through the DefaultFetcher (file:// path). Same
+        // bytes back as `load_from_path`.
+        let bytes = tiny_rgb_png();
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        path.push(format!(
+            "pdfun-img-src-{}-{}.png",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let img = load_from_source(
+            path.to_str().unwrap(),
+            None,
+            &crate::url_fetcher::DefaultFetcher,
+        )
+        .expect("loads via fetcher");
+        assert_eq!(img.width, 2);
+        assert_eq!(img.height, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[cfg(not(feature = "http-fetch"))]
+    fn load_from_source_errors_on_http_without_feature() {
+        // Without the feature: the DefaultFetcher returns the canonical
+        // "feature not enabled" error and `load_from_source` propagates
+        // it unchanged.
+        let res = load_from_source(
+            "http://example.invalid/x.png",
+            None,
+            &crate::url_fetcher::DefaultFetcher,
+        );
+        let Err(err) = res else {
+            panic!("expected an error, got Ok");
+        };
+        assert!(
+            err.contains("http-fetch feature not enabled"),
+            "got {err:?}"
+        );
     }
 
     #[test]

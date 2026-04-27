@@ -1,0 +1,36 @@
+<!-- spec: CSS Color 3 §4.2.1 + Compositing & Blending L1 §4
+     behaviors: color-rgba color-hsla transparency-group
+
+     Cross-viewer parity probe (WS-2 rung 9). When the page-level
+     `/Group << /S /Transparency /CS /DeviceRGB /I true >>` entry
+     is present, Adobe Reader, Foxit, pdf.js, and macOS Preview
+     all composite this fixture identically. Without it, viewers
+     diverge: Adobe Reader vs Foxit pick different backdrops for
+     the isolated/non-isolated decision (WeasyPrint issue #2723).
+
+     The visible behavior is two overlapping translucent panels
+     (red-50% and blue-50%); their intersection should render as
+     ~equal-mix purple in every viewer.
+
+     TODO: this rung is documented as the actionable proxy at
+     `test_html.py::page_group_entry_present_when_translucent`.
+     A real cross-viewer screenshot diff is left for a follow-up
+     because the test environment doesn't have Adobe / Foxit
+     installed. -->
+<style>
+  body { margin: 24pt; }
+  .panel {
+    width: 200pt;
+    height: 100pt;
+    color: white;
+    padding: 10pt;
+  }
+  .red { background-color: rgba(255, 0, 0, 0.5); }
+  .blue {
+    background-color: rgba(0, 0, 255, 0.5);
+    margin-top: -50pt;
+    margin-left: 80pt;
+  }
+</style>
+<div class="panel red">red 50%</div>
+<div class="panel blue">blue 50%</div>

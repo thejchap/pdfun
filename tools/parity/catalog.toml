@@ -1121,6 +1121,37 @@ title = "PDF output features"
   implemented = true
 
   [[section.behavior]]
+  id = "text-encoding-winansi"
+  title = "PDF WinAnsiEncoding text emission for built-in fonts"
+  section = "ISO 32000-1 Annex D.2"
+  weasyprint = "full"
+  implemented = true
+  notes = "UTF-8 input transcoded to PDF's WinAnsiEncoding bytes before emission (Latin-1, Œ/œ, smart quotes, em-dash, bullet)."
+
+  [[section.behavior]]
+  id = "text-encoding-fallback-font"
+  title = "Auto-promote non-WinAnsi runs onto a Type0/CID fallback face"
+  section = "ISO 32000-1 §9.7"
+  weasyprint = "full"
+  implemented = true
+  notes = "Bundled DejaVu Sans (default-on `bundled-fallback-font` feature) carries codepoints outside WinAnsi (e.g. ☑ U+2611). Falls back to '?' substitution when the feature is disabled."
+
+  [[section.behavior]]
+  id = "pdf-transparency-group"
+  title = "Page-level Transparency Group + Form XObject groups for opacity<1 with descendants"
+  section = "ISO 32000-1 §11.6.5"
+  weasyprint = "full"
+  implemented = true
+  notes = "Page object carries /Group /S /Transparency /CS /DeviceRGB /I true whenever any ca/CA != 1 is on the page. opacity<1 with descendants wraps the subtree in a Form XObject group rather than multiplying alpha through to leaves."
+
+  [[section.behavior]]
+  id = "pdf-url-fetcher"
+  title = "Pluggable URL fetcher trait for <img>/background-image/@font-face url()"
+  weasyprint = "full"
+  implemented = true
+  notes = "DefaultFetcher handles file:// + relative paths. Optional HttpFetcher (behind `http-fetch` feature) walks redirects manually with per-hop scheme + post-DNS private-IP allow-lists, body cap, and timeouts."
+
+  [[section.behavior]]
   id = "pdf-compression"
   title = "Stream compression"
   weasyprint = "full"
