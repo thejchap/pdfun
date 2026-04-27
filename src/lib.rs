@@ -149,6 +149,16 @@ pub(crate) enum PdfOp {
         dx: f32,
         dy: f32,
     },
+    /// Invoke a captured Form XObject (Transparency Group) for an
+    /// `opacity < 1` container with drawn descendants. `index` indexes
+    /// into `PageContent::form_xobjects`. Emits the PDF `Do` operator
+    /// referencing `/Fm<index>` — the surrounding stream is expected
+    /// to have already applied a `gs` op for the parent's α (the
+    /// constant alpha lives on the outer stream so the group composites
+    /// at the correct opacity per CSS Compositing & Blending L1 §4).
+    DrawFormXObject {
+        index: usize,
+    },
 }
 
 pub(crate) struct LinkAnnotation {
@@ -170,6 +180,28 @@ pub(crate) struct HeadingEntry {
     pub(crate) y: f32,
 }
 
+/// A captured Form XObject built from a translucent block subtree
+/// (CSS Compositing & Blending L1 §4: an `opacity < 1` block with
+/// drawn descendants must render through a Transparency Group XObject
+/// per ISO 32000-1 §11.6.5). The captured ops were temporarily diverted
+/// from a `PageContent` while the subtree rendered; they're emitted as
+/// a `/Subtype /Form` indirect object with a `/Group << /S /Transparency
+/// /CS /DeviceRGB /I true /K false >>` dictionary, and the surrounding
+/// page stream emits a `gs + Do` pair to apply the parent's alpha.
+pub(crate) struct FormXObjectData {
+    pub(crate) bbox: [f32; 4],
+    pub(crate) operations: Vec<PdfOp>,
+    pub(crate) fonts_used: Vec<String>,
+    pub(crate) images_used: Vec<usize>,
+    /// Indices into the same `PageContent::form_xobjects` for nested
+    /// transparency groups (an `opacity:0.5` block inside another).
+    pub(crate) nested_xobjects: Vec<usize>,
+    /// Alphas referenced by `SetAlpha` ops inside this Form XObject's
+    /// content stream — collected so the XObject's own `/Resources`
+    /// dict can re-bind the matching `/Gs<N>` ExtGStates.
+    pub(crate) alphas: Vec<f32>,
+}
+
 pub(crate) struct PageContent {
     pub(crate) width: f64,
     pub(crate) height: f64,
@@ -180,6 +212,12 @@ pub(crate) struct PageContent {
     pub(crate) links: Vec<LinkAnnotation>,
     /// Indices into `PdfDocument::images` of images used on this page.
     pub(crate) images_used: Vec<usize>,
+    /// Captured Form XObjects (Transparency Groups) for `opacity < 1`
+    /// containers with drawn descendants. Each entry is rendered as an
+    /// indirect Form XObject and referenced from this page's `/Resources
+    /// /XObject` dict via `/Fm<idx>`. The page's `operations` Vec
+    /// references them through `PdfOp::DrawFormXObject { index }`.
+    pub(crate) form_xobjects: Vec<FormXObjectData>,
 }
 
 impl PageContent {
@@ -193,6 +231,7 @@ impl PageContent {
             current_font_size: None,
             links: Vec::new(),
             images_used: Vec::new(),
+            form_xobjects: Vec::new(),
         }
     }
 }
@@ -638,12 +677,14 @@ fn build_custom_font_data(
     Ok(out)
 }
 
-/// Collect the unique opacities referenced by `SetAlpha` ops on this page,
-/// returning them in first-seen order. The index in the returned `Vec` plus 1
-/// becomes the suffix of the `/GsN` `ExtGState` resource name.
-fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
+/// Collect the unique opacities referenced by `SetAlpha` ops in `ops`,
+/// returning them in first-seen order. The index in the returned `Vec`
+/// plus 1 becomes the suffix of the `/GsN` `ExtGState` resource name.
+/// Used both for top-level page content and for captured Form XObject
+/// content streams (each XObject carries its own resource dict).
+fn collect_alphas_in_ops(ops: &[PdfOp]) -> Vec<f32> {
     let mut out: Vec<f32> = Vec::new();
-    for op in &page.operations {
+    for op in ops {
         if let PdfOp::SetAlpha { alpha } = op
             && !out.iter().any(|a| (a - alpha).abs() < 1e-6)
         {
@@ -651,6 +692,10 @@ fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
         }
     }
     out
+}
+
+fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
+    collect_alphas_in_ops(&page.operations)
 }
 
 /// Format a rounded-rectangle path into `content`. `radii` is
@@ -735,10 +780,19 @@ fn write_page_content_stream(
     custom_data: &BTreeMap<String, CustomFontData>,
     page_alphas: &[f32],
 ) -> Vec<u8> {
+    write_ops(&page.operations, font_refs, custom_data, page_alphas)
+}
+
+fn write_ops(
+    ops: &[PdfOp],
+    font_refs: &[FontRefs],
+    custom_data: &BTreeMap<String, CustomFontData>,
+    page_alphas: &[f32],
+) -> Vec<u8> {
     let mut content = Content::new();
     let mut current_font_name: Option<String> = None;
 
-    for op in &page.operations {
+    for op in ops {
         match op {
             PdfOp::BeginText => {
                 content.begin_text();
@@ -861,6 +915,15 @@ fn write_page_content_stream(
             }
             PdfOp::Translate { dx, dy } => {
                 content.transform([1.0, 0.0, 0.0, 1.0, *dx, *dy]);
+            }
+            PdfOp::DrawFormXObject { index } => {
+                // `/Fm<idx> Do` invokes the captured Transparency Group.
+                // Caller is expected to have applied a `gs` op for the
+                // parent's α before this point so the group composites
+                // at the correct opacity (CSS Compositing & Blending
+                // L1 §4 + ISO 32000-1 §11.6.5).
+                let resource_name = format!("Fm{index}");
+                content.x_object(Name(resource_name.as_bytes()));
             }
         }
     }
@@ -1292,9 +1355,25 @@ impl PdfDocument {
             // Allocate a Ref per unique alpha on this page.
             let alpha_refs: Vec<Ref> = page_alphas.iter().map(|_| allocator.alloc()).collect();
 
+            // Allocate a Ref per Form XObject (Transparency Group)
+            // captured on this page. The XObjects are emitted below;
+            // the page's /Resources /XObject dict references each as
+            // `/Fm<idx>`.
+            let form_xobject_refs: Vec<Ref> =
+                page.form_xobjects.iter().map(|_| allocator.alloc()).collect();
+
             let content_bytes =
                 write_page_content_stream(&page, &font_refs, &custom_data, &page_alphas);
             let annot_refs: Vec<Ref> = page.links.iter().map(|_| allocator.alloc()).collect();
+
+            // Page-level Transparency Group (ISO 32000-1 §11.6.6 +
+            // WeasyPrint issue #2723): whenever a page contains any
+            // `ca`/`CA != 1` we MUST set `/Group << /S /Transparency
+            // /CS /DeviceRGB /I true >>` on the page object. Without
+            // it, isolated/non-isolated semantics fall back to the
+            // page backdrop and viewers (Adobe vs Foxit vs Preview)
+            // diverge.
+            let needs_page_group = !page_alphas.is_empty();
 
             {
                 let mut page_writer = pdf.page(page_id);
@@ -1302,6 +1381,12 @@ impl PdfDocument {
                     .parent(page_tree_id)
                     .media_box(Rect::new(0.0, 0.0, page.width as f32, page.height as f32))
                     .contents(content_id);
+
+                if needs_page_group {
+                    let mut group = page_writer.group();
+                    group.transparency().isolated(true);
+                    group.color_space().device_rgb();
+                }
 
                 if !annot_refs.is_empty() {
                     page_writer.annotations(annot_refs.iter().copied());
@@ -1315,11 +1400,15 @@ impl PdfDocument {
                         fonts_dict.pair(Name(resource_name.as_bytes()), fr.type0_ref);
                     }
                 }
-                if !page.images_used.is_empty() {
+                if !page.images_used.is_empty() || !form_xobject_refs.is_empty() {
                     let mut xobjects = resources.x_objects();
                     for &img_idx in &page.images_used {
                         let resource_name = format!("Im{img_idx}");
                         xobjects.pair(Name(resource_name.as_bytes()), image_refs[img_idx].0);
+                    }
+                    for (fm_idx, fm_ref) in form_xobject_refs.iter().enumerate() {
+                        let resource_name = format!("Fm{fm_idx}");
+                        xobjects.pair(Name(resource_name.as_bytes()), *fm_ref);
                     }
                 }
                 if !alpha_refs.is_empty() {
@@ -1336,6 +1425,76 @@ impl PdfDocument {
                 pdf.ext_graphics(*alpha_ref)
                     .non_stroking_alpha(*alpha)
                     .stroking_alpha(*alpha);
+            }
+
+            // Emit the captured Form XObjects (Transparency Groups).
+            // Each carries its own resources (fonts/ExtGStates/images),
+            // /BBox to clip the group, and /Group dict to declare the
+            // transparency model. PDF 1.4+. ISO 32000-1 §11.6.5.
+            for (fm_data, fm_ref) in page.form_xobjects.iter().zip(form_xobject_refs.iter()) {
+                let fm_alphas = collect_alphas_in_ops(&fm_data.operations);
+                let fm_alpha_refs: Vec<Ref> =
+                    fm_alphas.iter().map(|_| allocator.alloc()).collect();
+                let fm_content =
+                    write_ops(&fm_data.operations, &font_refs, &custom_data, &fm_alphas);
+                let compressed_fm = image::compress(&fm_content);
+                {
+                    let mut form = pdf.form_xobject(*fm_ref, &compressed_fm);
+                    form.bbox(Rect::new(
+                        fm_data.bbox[0],
+                        fm_data.bbox[1],
+                        fm_data.bbox[2],
+                        fm_data.bbox[3],
+                    ));
+                    form.filter(Filter::FlateDecode);
+                    {
+                        let mut group = form.group();
+                        group.transparency().isolated(true).knockout(false);
+                        group.color_space().device_rgb();
+                    }
+                    {
+                        let mut resources = form.resources();
+                        {
+                            let mut fonts_dict = resources.fonts();
+                            for (idx, fr) in font_refs.iter().enumerate() {
+                                let resource_name = format!("F{}", idx + 1);
+                                fonts_dict.pair(Name(resource_name.as_bytes()), fr.type0_ref);
+                            }
+                        }
+                        if !fm_data.images_used.is_empty() || !fm_data.nested_xobjects.is_empty() {
+                            let mut xobjects = resources.x_objects();
+                            for &img_idx in &fm_data.images_used {
+                                let resource_name = format!("Im{img_idx}");
+                                xobjects.pair(
+                                    Name(resource_name.as_bytes()),
+                                    image_refs[img_idx].0,
+                                );
+                            }
+                            for &nested_idx in &fm_data.nested_xobjects {
+                                let resource_name = format!("Fm{nested_idx}");
+                                xobjects.pair(
+                                    Name(resource_name.as_bytes()),
+                                    form_xobject_refs[nested_idx],
+                                );
+                            }
+                        }
+                        if !fm_alpha_refs.is_empty() {
+                            let mut ext_g_states = resources.ext_g_states();
+                            for (idx, r) in fm_alpha_refs.iter().enumerate() {
+                                let resource_name = format!("Gs{}", idx + 1);
+                                ext_g_states.pair(Name(resource_name.as_bytes()), *r);
+                            }
+                        }
+                    }
+                }
+                // Per-XObject ExtGState dicts mirror the per-page
+                // emission — same `ca` + `CA` pair, just rebound to a
+                // local resource ref so the XObject is self-contained.
+                for (alpha, alpha_ref) in fm_alphas.iter().zip(fm_alpha_refs.iter()) {
+                    pdf.ext_graphics(*alpha_ref)
+                        .non_stroking_alpha(*alpha)
+                        .stroking_alpha(*alpha);
+                }
             }
 
             for (annot_ref, link) in annot_refs.iter().zip(page.links.iter()) {

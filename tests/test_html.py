@@ -5031,6 +5031,31 @@ with describe("rgba/hsla alpha plumbing (WS-2)"):
         # No translucent paint anywhere → no page Group entry.
         expect(b"/S /Transparency" not in data).to_equal(True)
 
+    @test
+    def opacity_with_children_uses_form_xobject():
+        """`opacity: 0.5` on a parent that paints child boxes must NOT
+        be implemented by multiplying alpha through to each leaf — that
+        would double-attenuate where children overlap. Per CSS
+        Compositing & Blending L1 §4 + ISO 32000-1 §11.6.5, the subtree
+        renders into a Form XObject with `/Group << /S /Transparency
+        /I true /K false /CS /DeviceRGB >>`, and the parent's `gs`
+        applies on the surrounding stream. Verify the Form XObject's
+        `/Group` dict is emitted in the document and that the page
+        references it via `/Fm<idx>`."""
+        html = (
+            "<div style='opacity: 0.5'>"
+            "<p style='background: rgb(255, 0, 0)'>red</p>"
+            "<p style='background: rgb(0, 0, 255)'>blue</p>"
+            "</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # Form XObject's /Group dict must be in the document.
+        expect(data).to_contain(b"/Subtype /Form")
+        expect(data).to_contain(b"/Group")
+        expect(data).to_contain(b"/S /Transparency")
+        # Page resource dict references the captured XObject.
+        expect(data).to_contain(b"/Fm0")
+
 
 with describe("box-shadow"):
 

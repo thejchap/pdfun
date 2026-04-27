@@ -498,6 +498,26 @@ pub enum Block {
     ContainerEnd(BlockStyle),
 }
 
+/// One entry on the transparency-group capture stack. Pushed when
+/// entering an `opacity < 1` container so subsequent child draw ops
+/// are diverted into a new `Vec<PdfOp>` instead of the page's main
+/// stream. Popped on exit, at which point the captured ops are wrapped
+/// into a Form XObject (Transparency Group) and the page emits a
+/// `gs + Do` pair to apply the parent's α and invoke the group.
+struct TransparencyCapture {
+    opacity: f32,
+    /// Saved page operations Vec from before the capture began —
+    /// restored on exit (with a `Do` op appended for the captured
+    /// XObject).
+    saved_ops: Vec<PdfOp>,
+    /// Saved `images_used` snapshot — restored on exit; the captured
+    /// XObject takes ownership of any image refs added in between.
+    saved_images_used: Vec<usize>,
+    /// y-coordinate of the page cursor when the capture began. Used
+    /// to compute the Form XObject's `/BBox`.
+    capture_start_y: f32,
+}
+
 /// Mutable state threaded through the recursive box-tree walker in
 /// `LayoutInner::finish()`. Holds the cursor position, current page, the
 /// pending collapsed margins (parent/child and sibling/sibling), and the
@@ -528,6 +548,11 @@ struct RenderState {
     /// area shifted and narrowed to avoid the float. Floats drop out of
     /// this list when the cursor advances past their bottom.
     active_floats: Vec<ActiveFloat>,
+    /// Stack of currently-open transparency-group captures. A non-empty
+    /// stack means the current page's `operations` Vec is the *innermost*
+    /// capture's ops, NOT the real page stream. Pop on container exit
+    /// to fold the captured ops into a `FormXObjectData`.
+    transparency_captures: Vec<TransparencyCapture>,
 }
 
 /// A float currently affecting the layout in a block formatting context.
@@ -1128,6 +1153,56 @@ pub(crate) fn push_alpha_if_translucent(ops: &mut Vec<PdfOp>, alpha: f32) {
     }
 }
 
+/// Collect the unique opacities referenced inside a captured Form
+/// XObject's op stream. Mirrors `collect_alphas_in_ops` in `lib.rs` —
+/// duplicated here because the `lib.rs` helper takes `&[lib::PdfOp]`
+/// (same type, but we don't expose it via re-export).
+#[inline]
+pub(crate) fn collect_alphas_in_captured_ops(ops: &[PdfOp]) -> Vec<f32> {
+    let mut out: Vec<f32> = Vec::new();
+    for op in ops {
+        if let PdfOp::SetAlpha { alpha } = op
+            && !out.iter().any(|a| (a - alpha).abs() < 1e-6)
+        {
+            out.push(*alpha);
+        }
+    }
+    out
+}
+
+/// Collect the indices of any nested `DrawFormXObject` ops referenced
+/// from inside a captured Form XObject. The XObject's `/Resources
+/// /XObject` dict needs to bind every nested `/Fm<idx>` so the inner
+/// invocation resolves.
+#[inline]
+pub(crate) fn captured_form_xobject_indices(ops: &[PdfOp]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    for op in ops {
+        if let PdfOp::DrawFormXObject { index } = op
+            && !out.contains(index)
+        {
+            out.push(*index);
+        }
+    }
+    out
+}
+
+/// Collect the font names referenced by `SetFont` ops inside a
+/// captured op stream — used to bind `/F<idx>` resources on the Form
+/// XObject so the group is a self-contained PDF object.
+#[inline]
+pub(crate) fn captured_fonts_in_ops(ops: &[PdfOp]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for op in ops {
+        if let PdfOp::SetFont { name, .. } = op
+            && !out.contains(name)
+        {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
 fn resolve_margin_box_content(
     items: &[css::ContentItem],
     page_num: usize,
@@ -1566,6 +1641,7 @@ impl LayoutInner {
             pending_bottom: 0.0,
             pending_container_top: 0.0,
             active_floats: Vec::new(),
+            transparency_captures: Vec::new(),
         };
 
         let tree = crate::box_tree::unflatten_blocks(blocks);
@@ -1848,6 +1924,28 @@ impl LayoutInner {
         }
         state.pending_container_top =
             collapse_margins(state.pending_container_top, bb.style.margin_top);
+
+        // WS-2: an `opacity < 1` container with drawn descendants
+        // renders through a Form XObject Transparency Group (CSS
+        // Compositing & Blending L1 §4 + ISO 32000-1 §11.6.5).
+        // Multiplying through to leaves makes overlapping translucent
+        // children show through each other incorrectly, so we have to
+        // capture the subtree's ops into a separate stream and replay
+        // them inside a /Group XObject.
+        if let Some(alpha) = bb.style.opacity
+            && alpha < 1.0
+        {
+            let mut page = state.current_page.lock().unwrap();
+            let saved_ops = std::mem::take(&mut page.operations);
+            let saved_images_used = std::mem::take(&mut page.images_used);
+            drop(page);
+            state.transparency_captures.push(TransparencyCapture {
+                opacity: alpha,
+                saved_ops,
+                saved_images_used,
+                capture_start_y: state.cursor_y,
+            });
+        }
     }
 
     fn exit_container_node(
@@ -1857,6 +1955,65 @@ impl LayoutInner {
         child_rendered: bool,
         state: &mut RenderState,
     ) {
+        // Pair with `enter_container_node`'s capture: fold the diverted
+        // ops into a `FormXObjectData`, restore the saved page stream,
+        // and append `gs + DrawFormXObject` so the group composites at
+        // the parent's α.
+        let has_capture = bb
+            .style
+            .opacity
+            .is_some_and(|a| a < 1.0 && !state.transparency_captures.is_empty());
+        if has_capture {
+            let capture = state
+                .transparency_captures
+                .pop()
+                .expect("transparency_captures non-empty (just checked)");
+            let mut page = state.current_page.lock().unwrap();
+            // Take the captured ops + images_used (the diverted state)
+            // and restore the saved (parent) state.
+            let captured_ops = std::mem::take(&mut page.operations);
+            let captured_images = std::mem::take(&mut page.images_used);
+            page.operations = capture.saved_ops;
+            page.images_used = capture.saved_images_used;
+            // Defensive: if the subtree drew nothing, skip allocating
+            // an empty XObject — emit nothing, the leaf path's no-op
+            // semantics already cover this case.
+            if !captured_ops.is_empty() {
+                let alphas = collect_alphas_in_captured_ops(&captured_ops);
+                let bbox = [
+                    0.0_f32,
+                    0.0_f32,
+                    page.width as f32,
+                    page.height as f32,
+                ];
+                let nested_xobjects =
+                    captured_form_xobject_indices(&captured_ops);
+                let fonts_used = captured_fonts_in_ops(&captured_ops);
+                page.form_xobjects.push(crate::FormXObjectData {
+                    bbox,
+                    operations: captured_ops,
+                    fonts_used,
+                    images_used: captured_images,
+                    nested_xobjects,
+                    alphas,
+                });
+                let xobject_index = page.form_xobjects.len() - 1;
+                // Apply the parent's α on the surrounding stream and
+                // invoke the group. ISO 32000-1 §11.3.7: both `ca` AND
+                // `CA` get set together via `SetAlpha`.
+                page.operations.push(PdfOp::SaveState);
+                push_alpha_if_translucent(&mut page.operations, capture.opacity);
+                page.operations.push(PdfOp::DrawFormXObject {
+                    index: xobject_index,
+                });
+                page.operations.push(PdfOp::RestoreState);
+            }
+            // Restore cursor invariant: the diverted ops moved
+            // `cursor_y`; we leave it as-is because the captured boxes
+            // really did consume that vertical space.
+            let _ = capture.capture_start_y;
+        }
+
         // Non-empty containers: the child/parent margin_bottom collapse is
         // already partially accounted for by pending_bottom (the child's
         // trailing margin). Empty containers self-collapse top+bottom into
