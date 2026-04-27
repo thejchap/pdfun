@@ -2262,6 +2262,56 @@ with describe("@page pseudo-classes"):
         expect(abs(x0_p1 - 72.0) < 2.0).to_equal(True)
         expect(abs(x0_p2 - 72.0) < 2.0).to_equal(True)
 
+    @test
+    def cobra_cover_page_margin_and_footer():
+        """Integration: simulate the COBRA cover-page scenario.
+
+        - `@page :first { margin: 0.25in }` shrinks page 1's margins so
+          the cover article (height: ~10.5in) fits without bleeding to
+          page 2.
+        - `@page { @bottom-right { content: "Page " counter(page)
+          " of " counter(pages) } }` paints a footer on every page.
+        - "IMPORTANT INFORMATION" lives in a body paragraph after a
+          forced page break, so it must begin on page 2.
+        - The footer should read "Page 1 of 2" on page 1 and
+          "Page 2 of 2" on page 2 — both within the resolved bottom
+          margin strip (so `:first`'s narrower margins didn't clip the
+          footer off page 1).
+        """
+        import fitz
+
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 1in;
+                @bottom-right { content: "Page " counter(page) " of " counter(pages); }
+            }
+            @page :first { margin: 0.25in; }
+            .cover {
+                page-break-after: always;
+            }
+        </style>
+        <div class="cover">
+            <h1>COBRA Coverage Notice</h1>
+            <p>This is the cover page article that needs the
+               narrower margins to fit.</p>
+        </div>
+        <h2>IMPORTANT INFORMATION</h2>
+        <p>Body content begins on page 2.</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            page1 = pdf[0].get_text()
+            page2 = pdf[1].get_text()
+            # Page 1 starts within the narrow margin strip.
+            x0_p1 = pdf[0].get_text("blocks")[0][0]
+        expect(abs(x0_p1 - 18.0) < 2.0).to_equal(True)
+        # Footer present on each page, with correct counter values.
+        expect("Page 1 of 2" in page1).to_equal(True)
+        expect("Page 2 of 2" in page2).to_equal(True)
+        # Body article begins on page 2, not page 1.
+        expect("IMPORTANT INFORMATION" in page2).to_equal(True)
+        expect("IMPORTANT INFORMATION" in page1).to_equal(False)
+
 
 with describe("multi-column layout"):
 
