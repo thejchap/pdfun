@@ -134,18 +134,274 @@ fn read_local(url: &str, base_dir: Option<&Path>) -> Result<FetchedResource, Str
         .map_err(|e| format!("failed to read {}: {e}", resolved.display()))
 }
 
-/// Placeholder `HttpFetcher` for the `http-fetch` feature. The actual
-/// implementation lands in a later rung; this stub exists so the
-/// `net::fetch` dispatch compiles when the feature is enabled and so
-/// downstream test scaffolding can reference the type.
+/// Opt-in HTTP fetcher. Compiled only with `--features http-fetch`.
+///
+/// Walks redirects manually with per-hop scheme + post-DNS IP
+/// validation, caps response body size, and applies connect + read
+/// timeouts. The default configuration rejects private + loopback IPs
+/// to block SSRF; tests can opt in via `allow_private_ips(true)`.
 #[cfg(feature = "http-fetch")]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct HttpFetcher;
+#[derive(Debug, Clone)]
+pub struct HttpFetcher {
+    max_redirects: u32,
+    max_body_bytes: u64,
+    timeout: std::time::Duration,
+    allow_private_ips: bool,
+}
+
+#[cfg(feature = "http-fetch")]
+impl Default for HttpFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "http-fetch")]
+impl HttpFetcher {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            max_redirects: 5,
+            max_body_bytes: 50 * 1024 * 1024, // 50 MiB
+            timeout: std::time::Duration::from_secs(10),
+            allow_private_ips: false,
+        }
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn with_max_redirects(mut self, n: u32) -> Self {
+        self.max_redirects = n;
+        self
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn with_max_body_bytes(mut self, n: u64) -> Self {
+        self.max_body_bytes = n;
+        self
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn with_timeout(mut self, t: std::time::Duration) -> Self {
+        self.timeout = t;
+        self
+    }
+
+    /// Permit fetches to private/loopback addresses. **Off by default**;
+    /// only set this in test harnesses talking to localhost stubs.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn allow_private_ips(mut self, yes: bool) -> Self {
+        self.allow_private_ips = yes;
+        self
+    }
+}
 
 #[cfg(feature = "http-fetch")]
 impl UrlFetcher for HttpFetcher {
-    fn fetch(&self, _url: &str, _base_dir: Option<&Path>) -> Result<FetchedResource, String> {
-        Err("HttpFetcher not yet implemented".to_string())
+    fn fetch(&self, url: &str, _base_dir: Option<&Path>) -> Result<FetchedResource, String> {
+        // file:// and data: are explicitly rejected — those go through
+        // DefaultFetcher / the resolver respectively.
+        match parse_scheme(url) {
+            Scheme::Http | Scheme::Https => {}
+            Scheme::File => return Err("HttpFetcher refuses file:// URLs".to_string()),
+            Scheme::Data => {
+                return Err("data: URIs must be handled by the resolver".to_string());
+            }
+            Scheme::Other => return Err(format!("unsupported URL scheme: {url}")),
+        }
+        self.fetch_with_redirects(url)
+    }
+}
+
+#[cfg(feature = "http-fetch")]
+impl HttpFetcher {
+    fn fetch_with_redirects(&self, initial_url: &str) -> Result<FetchedResource, String> {
+        let mut current = initial_url.to_string();
+        let mut hops = 0u32;
+        loop {
+            // Per-hop scheme allow-list — a redirect to file:// or
+            // gopher:// or whatever must not be honored. This is the
+            // CVE-2025-68616 footgun; auto-follow trusts the server.
+            match parse_scheme(&current) {
+                Scheme::Http | Scheme::Https => {}
+                _ => return Err(format!("redirect to disallowed scheme: {current}")),
+            }
+            // Per-hop post-DNS IP allow/deny check. Runs *after*
+            // resolution so `localhost.attacker.com → 127.0.0.1` is
+            // caught.
+            self.validate_host_ips(&current)?;
+
+            let agent = ureq::Agent::config_builder()
+                .max_redirects(0)
+                .timeout_global(Some(self.timeout))
+                .build()
+                .new_agent();
+            let response = agent
+                .get(&current)
+                .call()
+                .map_err(|e| format!("HTTP fetch failed for {current}: {e}"))?;
+            let status = response.status().as_u16();
+
+            if (300..400).contains(&status) && status != 304 {
+                let location = response
+                    .headers()
+                    .get("Location")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        format!("HTTP {status} redirect without Location header from {current}")
+                    })?;
+                if hops >= self.max_redirects {
+                    return Err(format!(
+                        "too many redirects (limit {}) starting from {initial_url}",
+                        self.max_redirects
+                    ));
+                }
+                hops += 1;
+                current = resolve_redirect(&current, &location);
+                continue;
+            }
+
+            if !(200..300).contains(&status) {
+                return Err(format!("HTTP {status} from {current}"));
+            }
+
+            let mime = response
+                .headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+
+            // Cap the body. Walk the reader so a malicious server
+            // sending a multi-GB body can't OOM the renderer.
+            let mut reader = response.into_body().into_reader();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 8192];
+            loop {
+                use std::io::Read;
+                let n = reader
+                    .read(&mut tmp)
+                    .map_err(|e| format!("HTTP body read failed: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                if (buf.len() as u64).saturating_add(n as u64) > self.max_body_bytes {
+                    return Err(format!(
+                        "HTTP body exceeded {} byte cap from {current}",
+                        self.max_body_bytes
+                    ));
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+
+            return Ok(FetchedResource {
+                bytes: buf,
+                mime,
+                redirected_url: if hops > 0 { Some(current) } else { None },
+            });
+        }
+    }
+
+    /// Resolve all A/AAAA records for the host in `url` and reject the
+    /// fetch if any of them are loopback / private / link-local /
+    /// unique-local (unless `allow_private_ips` is set).
+    fn validate_host_ips(&self, url: &str) -> Result<(), String> {
+        if self.allow_private_ips {
+            return Ok(());
+        }
+        let host = extract_host(url).ok_or_else(|| format!("malformed URL: {url}"))?;
+        // If the host is a literal IP, validate it directly without DNS.
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return reject_if_private(ip).map_err(|e| format!("{e} ({url})"));
+        }
+        // Otherwise resolve via the OS. ureq 3.x's default Resolver
+        // would do this for us, but to validate *before* connect we run
+        // it ourselves so a localhost.attacker.com → 127.0.0.1 redirect
+        // can't slip through.
+        let port_host = format!("{host}:0");
+        let addrs = std::net::ToSocketAddrs::to_socket_addrs(&port_host)
+            .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?;
+        for sock in addrs {
+            reject_if_private(sock.ip()).map_err(|e| format!("{e} ({url})"))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "http-fetch")]
+fn reject_if_private(ip: std::net::IpAddr) -> Result<(), String> {
+    use std::net::IpAddr;
+    let bad = match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // ULA fc00::/7 — std doesn't expose `is_unique_local` on
+                // stable, so check the prefix manually.
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Link-local fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    };
+    if bad {
+        Err(format!("refused to fetch private/loopback address {ip}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Extract the host portion of `http(s)://host[:port]/...`.
+#[cfg(feature = "http-fetch")]
+fn extract_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://")?.1;
+    let host_and_path = after_scheme.split('/').next()?;
+    // Drop optional userinfo before the '@'.
+    let host_part = host_and_path
+        .rsplit_once('@')
+        .map_or(host_and_path, |(_, h)| h);
+    if let Some(stripped) = host_part.strip_prefix('[') {
+        // IPv6 literal: [::1]:80
+        return stripped.split(']').next().map(str::to_string);
+    }
+    // Drop optional port.
+    Some(host_part.split(':').next()?.to_string())
+}
+
+/// Compute the absolute URL of a redirect target given the current URL
+/// and the `Location` header. Handles absolute, scheme-relative, and
+/// path-relative targets.
+#[cfg(feature = "http-fetch")]
+fn resolve_redirect(current: &str, location: &str) -> String {
+    if location.contains("://") {
+        return location.to_string();
+    }
+    if let Some(rest) = location.strip_prefix("//") {
+        // scheme-relative
+        let scheme = current.split(':').next().unwrap_or("https");
+        return format!("{scheme}://{rest}");
+    }
+    let Some((scheme, rest)) = current.split_once("://") else {
+        return location.to_string();
+    };
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    if location.starts_with('/') {
+        format!("{scheme}://{host}{location}")
+    } else {
+        // Strip the file portion of the current path.
+        let path = &rest[host_end..];
+        let dir_end = path.rfind('/').map_or(0, |i| i + 1);
+        format!("{scheme}://{host}{}{location}", &path[..dir_end])
     }
 }
 
@@ -164,7 +420,7 @@ pub mod net {
         {
             use super::{Scheme, parse_scheme};
             if matches!(parse_scheme(url), Scheme::Http | Scheme::Https) {
-                return super::HttpFetcher.fetch(url, base_dir);
+                return super::HttpFetcher::default().fetch(url, base_dir);
             }
         }
         DefaultFetcher.fetch(url, base_dir)
@@ -239,5 +495,211 @@ mod tests {
             .fetch("data:text/plain,hi", None)
             .expect_err("rejects");
         assert!(err.contains("data:"), "got {err:?}");
+    }
+
+    // ── HTTP-feature tests ──────────────────────────────────────
+    //
+    // These spin up an in-process HTTP server bound to 127.0.0.1 on a
+    // kernel-assigned port and exercise the real HttpFetcher path.
+    // Stays inside the test module so we don't ship a server in the
+    // production binary.
+    #[cfg(feature = "http-fetch")]
+    mod http {
+        use super::super::*;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+
+        type Handler = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
+
+        /// Spawn a one-thread HTTP server that runs `handler(path)` for
+        /// each request and writes its return value as the raw
+        /// response. Returns `(base_url, shutdown_signal)`.
+        fn spawn(handler: Handler) -> (String, Arc<std::sync::atomic::AtomicBool>) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.set_nonblocking(true).expect("nonblocking");
+            let addr = listener.local_addr().unwrap();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop_clone = stop.clone();
+            std::thread::spawn(move || {
+                while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream
+                                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                                .ok();
+                            let mut buf = [0u8; 2048];
+                            let n = stream.read(&mut buf).unwrap_or(0);
+                            let req = String::from_utf8_lossy(&buf[..n]);
+                            let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                            let response = handler(&path);
+                            let _ = stream.write_all(&response);
+                            let _ = stream.flush();
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            (format!("http://{addr}"), stop)
+        }
+
+        fn ok_response(body: &[u8], mime: &str) -> Vec<u8> {
+            let mut out = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            out.extend_from_slice(body);
+            out
+        }
+
+        fn redirect_response(location: &str) -> Vec<u8> {
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes()
+        }
+
+        #[test]
+        fn fetches_bytes_over_http() {
+            let body = b"hello, world";
+            let handler: Handler =
+                Arc::new(move |_p| ok_response(body, "application/octet-stream"));
+            let (base, stop) = spawn(handler);
+            let fetcher = HttpFetcher::new().allow_private_ips(true);
+            let res = fetcher
+                .fetch(&format!("{base}/foo"), None)
+                .expect("fetched");
+            assert_eq!(res.bytes, body);
+            assert_eq!(res.mime.as_deref(), Some("application/octet-stream"));
+            assert!(res.redirected_url.is_none());
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        #[test]
+        fn follows_a_single_redirect() {
+            let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter_clone = counter.clone();
+            let handler: Handler = Arc::new(move |path: &str| {
+                if path == "/start" {
+                    counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    redirect_response("/final")
+                } else {
+                    ok_response(b"final-body", "text/plain")
+                }
+            });
+            let (base, stop) = spawn(handler);
+            let fetcher = HttpFetcher::new().allow_private_ips(true);
+            let res = fetcher
+                .fetch(&format!("{base}/start"), None)
+                .expect("followed");
+            assert_eq!(res.bytes, b"final-body");
+            assert!(res.redirected_url.is_some());
+            assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1);
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        #[test]
+        fn caps_the_redirect_chain() {
+            // Server always redirects back to itself.
+            let handler: Handler = Arc::new(|_p| redirect_response("/loop"));
+            let (base, stop) = spawn(handler);
+            let fetcher = HttpFetcher::new()
+                .allow_private_ips(true)
+                .with_max_redirects(2);
+            let err = fetcher
+                .fetch(&format!("{base}/loop"), None)
+                .expect_err("loop must be capped");
+            assert!(err.contains("too many redirects"), "got {err:?}");
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        #[test]
+        fn refuses_redirect_to_disallowed_scheme() {
+            let handler: Handler = Arc::new(|_p| redirect_response("file:///etc/passwd"));
+            let (base, stop) = spawn(handler);
+            let fetcher = HttpFetcher::new().allow_private_ips(true);
+            let err = fetcher
+                .fetch(&format!("{base}/r"), None)
+                .expect_err("must reject");
+            assert!(err.contains("disallowed scheme"), "got {err:?}");
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        #[test]
+        fn rejects_loopback_ip_when_private_disallowed() {
+            // A direct fetch to 127.0.0.1 must be rejected by the
+            // post-DNS check, even before any HTTP traffic. We spin up
+            // a server only so the test is self-contained; the request
+            // never reaches it.
+            let handler: Handler = Arc::new(|_p| ok_response(b"x", "text/plain"));
+            let (base, stop) = spawn(handler);
+            let fetcher = HttpFetcher::new(); // private IPs disallowed by default
+            let err = fetcher
+                .fetch(&format!("{base}/x"), None)
+                .expect_err("loopback must be blocked");
+            assert!(
+                err.contains("private/loopback") || err.contains("refused"),
+                "got {err:?}"
+            );
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        #[test]
+        fn http_fetcher_refuses_file_scheme() {
+            let fetcher = HttpFetcher::new();
+            let err = fetcher
+                .fetch("file:///etc/passwd", None)
+                .expect_err("must refuse");
+            assert!(err.contains("file://"), "got {err:?}");
+        }
+
+        #[test]
+        fn body_size_cap_enforced() {
+            let body = vec![b'x'; 1024];
+            let handler: Handler = Arc::new(move |_p| ok_response(&body, "text/plain"));
+            let (base, stop) = spawn(handler);
+            let fetcher = HttpFetcher::new()
+                .allow_private_ips(true)
+                .with_max_body_bytes(100);
+            let err = fetcher
+                .fetch(&format!("{base}/big"), None)
+                .expect_err("must cap");
+            assert!(err.contains("byte cap"), "got {err:?}");
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // ── redirect URL resolution ─────────────────────────────────
+    #[cfg(feature = "http-fetch")]
+    mod redirect_resolution {
+        use super::super::*;
+
+        #[test]
+        fn absolute_url_replaces_current() {
+            let r = resolve_redirect("http://a.example/x", "https://b.example/y");
+            assert_eq!(r, "https://b.example/y");
+        }
+
+        #[test]
+        fn scheme_relative_inherits_scheme() {
+            let r = resolve_redirect("https://a.example/x", "//b.example/y");
+            assert_eq!(r, "https://b.example/y");
+        }
+
+        #[test]
+        fn root_relative_keeps_host() {
+            let r = resolve_redirect("https://a.example/x/y", "/z");
+            assert_eq!(r, "https://a.example/z");
+        }
+
+        #[test]
+        fn path_relative_replaces_last_segment() {
+            let r = resolve_redirect("https://a.example/x/y", "z");
+            assert_eq!(r, "https://a.example/x/z");
+        }
     }
 }
