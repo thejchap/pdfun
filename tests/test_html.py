@@ -987,6 +987,61 @@ with describe("HtmlDocument - WS-1B fallback font"):
         )
 
     @test
+    def unknown_family_falls_back_to_pdfun_fallback():
+        """`font-family: Roboto` with no `@font-face` for Roboto and no
+        generic fallback in the family chain must use the bundled
+        `__pdfun_fallback` face — *not* silently swap to Helvetica.
+        Pre-WS-1B that swap caused unknown-family runs to lose
+        Unicode coverage; the fallback restores it."""
+        doc = HtmlDocument(
+            string='<p style="font-family: Roboto">Café ☑</p>'
+        )
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # The whole run renders on the fallback face — no Helvetica
+        # WinAnsi prefix is emitted because Roboto resolves directly to
+        # __pdfun_fallback.
+        assert b"/F1 12 Tf" in content, (
+            f"expected an F1 Tf op for the fallback, got: {content!r}"
+        )
+        # Fallback is Identity-H Type0 — verify the descendant font
+        # entry is present in the PDF body.
+        assert b"/Subtype /CIDFontType2" in data, (
+            "fallback face missing CIDFontType2 descendant — "
+            "Roboto did not resolve to __pdfun_fallback"
+        )
+        # Both characters must round-trip through the text layer.
+        import fitz
+
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert "Café" in extracted, (
+            f"WinAnsi chars lost on fallback face: {extracted!r}"
+        )
+        assert "☑" in extracted, (
+            f"ballot box lost on fallback face: {extracted!r}"
+        )
+
+    @test
+    def known_generic_family_still_wins_over_fallback():
+        """If the CSS family list ends in a known generic
+        (`sans-serif`, `serif`, `monospace`), the generic still wins —
+        WS-1B only promotes when nothing in the list is recognised."""
+        doc = HtmlDocument(string='<p style="font-family: Roboto, sans-serif">hello</p>')
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # F1 here should be Helvetica (the generic match), not the
+        # fallback. We can't trivially distinguish F1 across documents,
+        # but we can assert the Type0/CIDFontType2 (fallback) embed is
+        # *not* present — proving the fallback wasn't promoted.
+        assert b"/Subtype /CIDFontType2" not in data, (
+            "known-generic family should not engage the fallback face"
+        )
+
+    @test
     def ballot_box_round_trips_through_text_layer():
         """Acceptance gate: a U+2611 ballot box rendered with no
         `@font-face` declared must round-trip through the PDF text
@@ -2048,13 +2103,16 @@ with describe("body CSS inheritance"):
         expect(data).to_contain(b"/Times-Roman")
 
     @test
-    def font_family_all_unknown_falls_back_to_ua_default():
-        """If no family in the chain is available, the user-agent default
-        font is used. For <p>, that's the body default (Helvetica).
+    def font_family_all_unknown_falls_back_to_pdfun_fallback():
+        """If no family in the chain matches a known generic / built-in
+        and no `@font-face` rule catches them either, WS-1B promotes
+        the run onto the bundled `__pdfun_fallback` Identity-H face so
+        the document renders with full Unicode coverage. Pre-WS-1B this
+        silently swapped to Helvetica, which loses non-WinAnsi glyphs.
         spec:fonts3-fallback"""
         html = "<style>p { font-family: 'FakeA', 'FakeB', 'FakeC' }</style><p>Text</p>"
         data = HtmlDocument(string=html).to_bytes()
-        expect(data).to_contain(b"/Helvetica")
+        expect(data).to_contain(b"/__pdfun_fallback")
 
     @test
     def font_family_fallback_honors_bold_weight():

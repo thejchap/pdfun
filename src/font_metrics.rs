@@ -278,7 +278,11 @@ pub fn resolve_builtin_variant(base_font: &str, bold: bool, italic: bool) -> Opt
 /// Python caller invoking `text_width` directly with a custom name) the
 /// lookup returns `None` like an unknown built-in.
 pub fn measure_str(text: &str, font_name: &str, font_size: f32) -> Option<f32> {
-    if font_name.starts_with("Custom-") {
+    // Embedded faces (`Custom-N` from `@font-face` and the bundled
+    // WS-1B `__pdfun_fallback`) all flow through the per-thread metrics
+    // map populated by `set_font_face_metrics`. `is_embedded_font`
+    // unifies the two prefix conventions.
+    if crate::is_embedded_font(font_name) {
         return FONT_FACE_METRICS.with(|cell| {
             cell.borrow()
                 .get(font_name)

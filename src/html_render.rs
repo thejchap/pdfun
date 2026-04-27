@@ -451,17 +451,32 @@ fn font_family_root(font: &'static str) -> &'static str {
 }
 
 fn map_css_font_family(family: &str) -> Option<&'static str> {
+    let mut saw_named = false;
     for name in family.split(',') {
         let lower = name
             .trim()
             .trim_matches(|c| c == '\'' || c == '"')
             .to_ascii_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+        saw_named = true;
         match lower.as_str() {
             "serif" | "times" | "times new roman" | "times-roman" => return Some("Times-Roman"),
             "sans-serif" | "helvetica" | "arial" => return Some("Helvetica"),
             "monospace" | "courier" | "courier new" => return Some("Courier"),
             _ => {}
         }
+    }
+    // WS-1B: if `font-family` was declared with at least one name but
+    // *no* generic / built-in matched (and no `@font-face` rule caught
+    // it upstream of this call), promote the run onto the bundled
+    // `__pdfun_fallback` face so unknown families like `Roboto` render
+    // with full Unicode coverage instead of silently swapping to
+    // Helvetica. With the `bundled-fallback-font` feature off, return
+    // None and let the cascade fall through to the UA default.
+    if saw_named && cfg!(feature = "bundled-fallback-font") {
+        return Some(crate::FALLBACK_FONT_NAME);
     }
     None
 }
@@ -2467,6 +2482,20 @@ pub fn render_dom_to_layout(
                 rf.family
             ));
             surviving_lookup.retain(|_, name| name != &rf.name);
+        }
+    }
+    // WS-1B: stash measurement metrics for the bundled fallback face
+    // under the `__pdfun_fallback` key so layout's `measure_str` can
+    // size text routed onto the fallback (either via map_css_font_family
+    // or via show_text_for's split-and-promote). Lazy: only populate
+    // when the bundled feature is on; layout falls back to zero-width
+    // for individual fallback chunks otherwise.
+    #[cfg(feature = "bundled-fallback-font")]
+    {
+        if let Ok(m) =
+            crate::font_metrics::extract_custom_font_metrics(crate::FALLBACK_FONT_BYTES)
+        {
+            metrics_map.insert(crate::FALLBACK_FONT_NAME.to_string(), m);
         }
     }
     crate::font_metrics::set_font_face_metrics(metrics_map);
