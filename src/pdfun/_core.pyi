@@ -112,6 +112,7 @@ def html_to_pdf(
     page_width: float = 612.0,
     page_height: float = 792.0,
     base_url: str | None = None,
+    url_fetcher: object | None = None,
 ) -> PdfDocument: ...
 def text_width(text: str, font: str, size: float) -> float: ...
 def wrap_text(

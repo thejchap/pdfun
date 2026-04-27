@@ -37,7 +37,10 @@ pub struct ImageData {
 }
 
 /// Load an image from a local file. Selects the decoder based on the
-/// magic bytes of the file contents, not the extension.
+/// magic bytes of the file contents, not the extension. Retained for
+/// callers that have a `Path` already; new code should prefer
+/// `load_from_source` so it goes through the URL fetcher.
+#[allow(dead_code)]
 pub fn load_from_path(path: &Path) -> Result<ImageData, String> {
     let bytes =
         std::fs::read(path).map_err(|e| format!("failed to read image {}: {e}", path.display()))?;

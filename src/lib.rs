@@ -1434,6 +1434,77 @@ impl FontDatabase {
     }
 }
 
+/// Adapter that turns a Python callable `(url: str) -> bytes | None`
+/// into a `UrlFetcher`. Returning `None` (or raising) signals a fetch
+/// failure that the renderer reports as a warning. The callable is held
+/// behind `Mutex` because `PyO3` needs the GIL for every invocation
+/// anyway, so contention is unavoidable.
+struct PythonFetcher {
+    callable: Mutex<Py<PyAny>>,
+}
+
+impl url_fetcher::UrlFetcher for PythonFetcher {
+    fn fetch(
+        &self,
+        url: &str,
+        _base_dir: Option<&std::path::Path>,
+    ) -> Result<url_fetcher::FetchedResource, String> {
+        Python::attach(|py| {
+            let callable = self
+                .callable
+                .lock()
+                .map_err(|e| format!("python fetcher poisoned: {e}"))?;
+            let result = callable
+                .bind(py)
+                .call1((url,))
+                .map_err(|e| format!("python fetcher raised: {e}"))?;
+            if result.is_none() {
+                return Err(format!("python fetcher returned None for {url}"));
+            }
+            let bytes: Vec<u8> = result
+                .extract()
+                .map_err(|e| format!("python fetcher returned non-bytes: {e}"))?;
+            Ok(url_fetcher::FetchedResource {
+                bytes,
+                mime: None,
+                redirected_url: None,
+            })
+        })
+    }
+}
+
+/// Default URL fetcher used by `html_to_pdf`. With the `http-fetch`
+/// feature enabled, HTTP(S) requests go through `HttpFetcher` (and the
+/// SSRF guards therein); otherwise this is a file-only fetcher and
+/// HTTP URLs surface the canonical "feature not enabled" warning.
+fn default_url_fetcher() -> Arc<dyn url_fetcher::UrlFetcher> {
+    #[cfg(feature = "http-fetch")]
+    {
+        // Wrap so HTTP(S) goes through HttpFetcher and everything else
+        // falls back to the file-only DefaultFetcher. Mirrors the
+        // free-function `net::fetch` dispatch.
+        struct Auto;
+        impl url_fetcher::UrlFetcher for Auto {
+            fn fetch(
+                &self,
+                url: &str,
+                base_dir: Option<&std::path::Path>,
+            ) -> Result<url_fetcher::FetchedResource, String> {
+                use url_fetcher::{Scheme, parse_scheme};
+                if matches!(parse_scheme(url), Scheme::Http | Scheme::Https) {
+                    return url_fetcher::HttpFetcher::default().fetch(url, base_dir);
+                }
+                url_fetcher::DefaultFetcher.fetch(url, base_dir)
+            }
+        }
+        Arc::new(Auto)
+    }
+    #[cfg(not(feature = "http-fetch"))]
+    {
+        Arc::new(url_fetcher::DefaultFetcher)
+    }
+}
+
 /// RAII guard that clears the per-thread `@font-face` measurement
 /// metrics installed by `html_render::render_dom_to_layout`. Ensures a
 /// panic during render still wipes the thread-local so a follow-on
@@ -1448,7 +1519,7 @@ impl Drop for FontFaceMetricsGuard {
 
 /// Render HTML to a PDF document (called from Python `HtmlDocument`).
 #[pyfunction]
-#[pyo3(signature = (html, margin_top=72.0, margin_right=72.0, margin_bottom=72.0, margin_left=72.0, page_width=612.0, page_height=792.0, base_url=None))]
+#[pyo3(signature = (html, margin_top=72.0, margin_right=72.0, margin_bottom=72.0, margin_left=72.0, page_width=612.0, page_height=792.0, base_url=None, url_fetcher=None))]
 #[allow(clippy::too_many_arguments)]
 fn html_to_pdf(
     html: &str,
@@ -1459,6 +1530,7 @@ fn html_to_pdf(
     page_width: f64,
     page_height: f64,
     base_url: Option<&str>,
+    url_fetcher: Option<Py<PyAny>>,
 ) -> PyResult<PdfDocument> {
     let _font_face_guard = FontFaceMetricsGuard;
     let parsed = dom::parse_html(html);
@@ -1485,8 +1557,19 @@ fn html_to_pdf(
         page_height as f32,
     );
     let base_path = base_url.map(std::path::PathBuf::from);
-    let outcome =
-        html_render::render_dom_to_layout(&parsed.document, &mut inner, base_path.as_deref());
+    let fetcher: Arc<dyn url_fetcher::UrlFetcher> = if let Some(callable) = url_fetcher {
+        Arc::new(PythonFetcher {
+            callable: Mutex::new(callable),
+        })
+    } else {
+        default_url_fetcher()
+    };
+    let outcome = html_render::render_dom_to_layout(
+        &parsed.document,
+        &mut inner,
+        base_path.as_deref(),
+        fetcher,
+    );
     let page_style = outcome.page_style;
     doc.warnings.extend(outcome.warnings);
 
