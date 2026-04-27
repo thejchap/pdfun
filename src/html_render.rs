@@ -197,9 +197,9 @@ fn button_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         display: Some(css::DisplayValue::InlineBlock),
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((0.937, 0.937, 0.937)),
+        background_color: Some((0.937, 0.937, 0.937, 1.0)),
         padding_left: Some(css::CssLength::Pt(6.0)),
         padding_right: Some(css::CssLength::Pt(6.0)),
         padding_top: Some(css::CssLength::Pt(2.0)),
@@ -215,9 +215,9 @@ fn select_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         display: Some(css::DisplayValue::InlineBlock),
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((1.0, 1.0, 1.0)),
+        background_color: Some((1.0, 1.0, 1.0, 1.0)),
         padding_left: Some(css::CssLength::Pt(4.0)),
         padding_right: Some(css::CssLength::Pt(4.0)),
         padding_top: Some(css::CssLength::Pt(1.0)),
@@ -233,9 +233,9 @@ fn select_ua_computed_style() -> ComputedStyle {
 fn textarea_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((1.0, 1.0, 1.0)),
+        background_color: Some((1.0, 1.0, 1.0, 1.0)),
         padding_left: Some(css::CssLength::Pt(4.0)),
         padding_right: Some(css::CssLength::Pt(4.0)),
         padding_top: Some(css::CssLength::Pt(4.0)),
@@ -271,9 +271,9 @@ fn text_input_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         display: Some(css::DisplayValue::InlineBlock),
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((1.0, 1.0, 1.0)),
+        background_color: Some((1.0, 1.0, 1.0, 1.0)),
         padding_left: Some(css::CssLength::Pt(2.0)),
         padding_right: Some(css::CssLength::Pt(2.0)),
         padding_top: Some(css::CssLength::Pt(1.0)),
@@ -292,9 +292,9 @@ fn checkbox_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         display: Some(css::DisplayValue::InlineBlock),
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((1.0, 1.0, 1.0)),
+        background_color: Some((1.0, 1.0, 1.0, 1.0)),
         width: Some(css::CssLength::Pt(10.0)),
         font_size: Some(css::CssLength::Pt(8.0)),
         ..ComputedStyle::default()
@@ -1826,7 +1826,7 @@ impl<'a> HtmlRenderer<'a> {
         let bg = style.background_color;
         let border = style.border_width.map(|bw| {
             let w = bw.resolve_ctx(&ctx);
-            let c = style.border_color.unwrap_or((0.0, 0.0, 0.0));
+            let c = style.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0));
             (w, c)
         });
 
@@ -2269,7 +2269,10 @@ pub(crate) fn extract_col_styles(table_handle: &Handle) -> Vec<css::ColStyle> {
                 style.width = Some(w);
             }
             if let Some(bg) = inline.background_color {
-                style.background_color = Some(bg);
+                // <col background-color> alpha is a v1 cut: column
+                // backgrounds paint opaque-only for now. Drop the alpha
+                // channel coming out of `parse_css_color`.
+                style.background_color = Some(css::rgb_only(bg));
             }
             // border-* longhands are folded into a single ColBorder if any
             // of width/color/style are non-default.
@@ -2280,6 +2283,7 @@ pub(crate) fn extract_col_styles(table_handle: &Handle) -> Vec<css::ColStyle> {
                     width: bw.unwrap_or_else(|| prev.map_or(1.0, |b| b.width)),
                     color: inline
                         .border_color
+                        .map(css::rgb_only)
                         .or(prev.map(|b| b.color))
                         .unwrap_or((0.0, 0.0, 0.0)),
                     style: inline
@@ -2467,7 +2471,7 @@ fn build_table_cell(
         padding_left: 6.0,
         // Default cell border so tables look like tables
         border_width: 1.0,
-        border_color: Some((0.6, 0.6, 0.6)),
+        border_color: Some((0.6, 0.6, 0.6, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
         text_align: if is_header {
             crate::layout::TextAlign::Center
@@ -2547,7 +2551,7 @@ fn collect_cell_text(
     runs: &mut Vec<TextRun>,
     font_name: &str,
     font_size: f32,
-    color: Option<(f32, f32, f32)>,
+    color: Option<(f32, f32, f32, f32)>,
 ) {
     match &handle.data {
         NodeData::Text { contents } => {

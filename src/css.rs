@@ -951,8 +951,14 @@ with_style_fields!(gen_merge);
 
 #[derive(Clone, Debug, Default)]
 pub struct ComputedStyle {
-    pub color: Option<(f32, f32, f32)>,
-    pub background_color: Option<(f32, f32, f32)>,
+    /// Foreground color (CSS Color 3 §3.1). Stored as RGBA — α < 1.0
+    /// flows through `WS-2`'s ExtGState `ca`/`CA` plumbing so translucent
+    /// `rgba()` text actually paints translucently.
+    pub color: Option<(f32, f32, f32, f32)>,
+    /// Background color (CSS Backgrounds & Borders 3 §3). RGBA so
+    /// translucent panels (e.g. `rgba(255, 255, 255, 0.85)` on top of
+    /// an image) render correctly.
+    pub background_color: Option<(f32, f32, f32, f32)>,
     pub font_size: Option<CssLength>,
     pub font_weight: Option<FontWeight>,
     pub font_style: Option<FontStyle>,
@@ -968,12 +974,12 @@ pub struct ComputedStyle {
     pub padding_bottom: Option<CssLength>,
     pub padding_left: Option<CssLength>,
     pub border_width: Option<CssLength>,
-    pub border_color: Option<(f32, f32, f32)>,
+    pub border_color: Option<(f32, f32, f32, f32)>,
     pub border_style: Option<BorderStyle>,
     pub column_count: Option<u32>,
     pub column_gap: Option<CssLength>,
     pub column_rule_width: Option<CssLength>,
-    pub column_rule_color: Option<(f32, f32, f32)>,
+    pub column_rule_color: Option<(f32, f32, f32, f32)>,
     pub display: Option<DisplayValue>,
     pub text_decoration: Option<TextDecoration>,
     pub list_style_type: Option<ListStyleType>,
@@ -1040,22 +1046,46 @@ pub struct ComputedStyle {
 
 // ── Color parsing ───────────────────────────────────────────
 
-fn u8_to_f32(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+fn u8_to_f32(r: u8, g: u8, b: u8) -> (f32, f32, f32, f32) {
     (
         f32::from(r) / 255.0,
         f32::from(g) / 255.0,
         f32::from(b) / 255.0,
+        1.0,
     )
 }
 
-fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), ParseError<'i, ()>> {
+/// Drop the alpha channel of a 4-tuple color. Used for sites that don't
+/// carry alpha through the rendering pipeline yet (e.g. `box-shadow`,
+/// `@page` margin-box `color`) — they take the opaque fallback.
+pub(crate) fn rgb_only(c: (f32, f32, f32, f32)) -> (f32, f32, f32) {
+    (c.0, c.1, c.2)
+}
+
+/// Parse a CSS `<color>` value, returning premultiplied RGBA in the
+/// (r, g, b, a) tuple where each channel is in `[0.0, 1.0]`. Named
+/// colors and `<rgb()>` / hex notation produce α = 1.0; `rgba()` and
+/// `hsla()` capture the explicit fourth component (CSS Color 3 §4.2.1
+/// / §4.2.4). `device-cmyk()` flattens to sRGB but still honors a
+/// trailing alpha (CSS Color 4 §5.1).
+fn parse_css_color<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<(f32, f32, f32, f32), ParseError<'i, ()>> {
     let location = input.current_source_location();
     let token = input.next()?.clone();
     match &token {
         Token::Hash(value) | Token::IDHash(value) => {
-            let (r, g, b, _a) =
+            // `cssparser::parse_hash_color` returns `(u8, u8, u8, f32)`
+            // — the alpha is already in `[0.0, 1.0]` and is `1.0` for the
+            // common 3- and 6-digit forms. Pass it through as-is.
+            let (r, g, b, a) =
                 parse_hash_color(value.as_bytes()).map_err(|()| location.new_custom_error(()))?;
-            Ok(u8_to_f32(r, g, b))
+            Ok((
+                f32::from(r) / 255.0,
+                f32::from(g) / 255.0,
+                f32::from(b) / 255.0,
+                a,
+            ))
         }
         Token::Ident(ident) => {
             let (r, g, b) = parse_named_color(ident).map_err(|()| location.new_custom_error(()))?;
@@ -1070,13 +1100,15 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
                 let g = input.expect_number()?.clamp(0.0, 255.0);
                 input.expect_comma()?;
                 let b = input.expect_number()?.clamp(0.0, 255.0);
-                // Optional alpha: ", <number>" — parsed and ignored.
-                let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
-                    i.expect_comma()?;
-                    let _ = i.expect_number()?;
-                    Ok(())
-                });
-                Ok((r / 255.0, g / 255.0, b / 255.0))
+                // Optional alpha: ", <number>" — clamp to [0, 1] per
+                // CSS Color 3 §4.2.1.
+                let alpha = input
+                    .try_parse(|i| -> Result<f32, ParseError<'i, ()>> {
+                        i.expect_comma()?;
+                        Ok(i.expect_number()?.clamp(0.0, 1.0))
+                    })
+                    .unwrap_or(1.0);
+                Ok((r / 255.0, g / 255.0, b / 255.0, alpha))
             })
         }
         Token::Function(name)
@@ -1088,14 +1120,16 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
                 let s = input.expect_percentage()?.clamp(0.0, 1.0);
                 input.expect_comma()?;
                 let l = input.expect_percentage()?.clamp(0.0, 1.0);
-                // Optional alpha: ", <number>" — parsed and ignored.
-                let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
-                    i.expect_comma()?;
-                    let _ = i.expect_number()?;
-                    Ok(())
-                });
+                // Optional alpha: ", <number>" — clamp to [0, 1] per
+                // CSS Color 3 §4.2.4.
+                let alpha = input
+                    .try_parse(|i| -> Result<f32, ParseError<'i, ()>> {
+                        i.expect_comma()?;
+                        Ok(i.expect_number()?.clamp(0.0, 1.0))
+                    })
+                    .unwrap_or(1.0);
                 let (r, g, b) = hsl_to_rgb(h, s, l);
-                Ok((r, g, b))
+                Ok((r, g, b, alpha))
             })
         }
         Token::Function(name)
@@ -1117,7 +1151,7 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
 /// trailing alpha (`/ <number>` or `, <number>`) is parsed and ignored.
 fn parse_cmyk_to_rgb<'i>(
     input: &mut Parser<'i, '_>,
-) -> Result<(f32, f32, f32), ParseError<'i, ()>> {
+) -> Result<(f32, f32, f32, f32), ParseError<'i, ()>> {
     let c = parse_cmyk_component(input)?;
     let _ = input.try_parse(cssparser::Parser::expect_comma);
     let m = parse_cmyk_component(input)?;
@@ -1125,18 +1159,19 @@ fn parse_cmyk_to_rgb<'i>(
     let y = parse_cmyk_component(input)?;
     let _ = input.try_parse(cssparser::Parser::expect_comma);
     let k = parse_cmyk_component(input)?;
-    let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
-        let comma = i.try_parse(cssparser::Parser::expect_comma).is_ok();
-        if !comma {
-            i.expect_delim('/')?;
-        }
-        let _ = i.expect_number()?;
-        Ok(())
-    });
+    let alpha = input
+        .try_parse(|i| -> Result<f32, ParseError<'i, ()>> {
+            let comma = i.try_parse(cssparser::Parser::expect_comma).is_ok();
+            if !comma {
+                i.expect_delim('/')?;
+            }
+            Ok(i.expect_number()?.clamp(0.0, 1.0))
+        })
+        .unwrap_or(1.0);
     let r = (1.0 - c) * (1.0 - k);
     let g = (1.0 - m) * (1.0 - k);
     let b = (1.0 - y) * (1.0 - k);
-    Ok((r, g, b))
+    Ok((r, g, b, alpha))
 }
 
 fn parse_cmyk_component<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
@@ -1665,7 +1700,9 @@ fn parse_box_shadow_one<'i>(input: &mut Parser<'i, '_>) -> Result<BoxShadow, Par
         if color.is_none()
             && let Ok(c) = input.try_parse(parse_css_color)
         {
-            color = Some(c);
+            // box-shadow alpha is a v1 cut: PDF has no native gaussian
+            // blur and shadow alpha was never plumbed; drop it now.
+            color = Some(rgb_only(c));
             continue;
         }
         break;
@@ -4189,7 +4226,9 @@ fn parse_margin_box_declarations(declarations: &str) -> MarginBox {
                 }
                 "color" => {
                     if let Ok(c) = parse_css_color(input) {
-                        mb.color = Some(c);
+                        // Margin-box `color` alpha is a v1 cut — paged
+                        // headers/footers paint opaque text only.
+                        mb.color = Some(rgb_only(c));
                     }
                 }
                 "text-align" => {
@@ -4534,52 +4573,154 @@ mod tests {
     #[test]
     fn color_named_red() {
         let s = parse_inline_style("color: red");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn color_named_blue() {
         let s = parse_inline_style("color: blue");
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
     fn color_named_black() {
         let s = parse_inline_style("color: black");
-        assert_eq!(s.color, Some((0.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn color_named_white() {
         let s = parse_inline_style("color: white");
-        assert_eq!(s.color, Some((1.0, 1.0, 1.0)));
+        assert_eq!(s.color, Some((1.0, 1.0, 1.0, 1.0)));
     }
 
     #[test]
     fn color_hex_6() {
         let s = parse_inline_style("color: #ff0000");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn color_hex_3() {
         let s = parse_inline_style("color: #00f");
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
     fn color_rgb_function() {
         let s = parse_inline_style("color: rgb(255, 128, 0)");
-        let (r, g, b) = s.color.unwrap();
+        let (r, g, b, a) = s.color.unwrap();
         assert!((r - 1.0).abs() < 0.01);
         assert!((g - 128.0 / 255.0).abs() < 0.01);
         assert!(b.abs() < 0.01);
+        assert!((a - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn background_color() {
         let s = parse_inline_style("background-color: yellow");
-        assert_eq!(s.background_color, Some((1.0, 1.0, 0.0)));
+        assert_eq!(s.background_color, Some((1.0, 1.0, 0.0, 1.0)));
+    }
+
+    // ── WS-2 Rung 1: parser alpha capture ─────────────────────
+
+    #[test]
+    fn rgba_captures_alpha() {
+        // CSS Color 3 §4.2.1: rgba()'s 4th component flows through
+        // unchanged into the parsed RGBA tuple.
+        let s = parse_inline_style("color: rgba(255, 0, 0, 0.5)");
+        let (r, g, b, a) = s.color.unwrap();
+        assert!((r - 1.0).abs() < 0.01);
+        assert!(g.abs() < 0.01);
+        assert!(b.abs() < 0.01);
+        assert!((a - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn rgb_defaults_alpha_one() {
+        // rgb() (no `a` form) defaults α=1.0.
+        let s = parse_inline_style("color: rgb(255, 0, 0)");
+        let (r, _, _, a) = s.color.unwrap();
+        assert!((r - 1.0).abs() < 0.01);
+        assert!((a - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsla_captures_alpha() {
+        // CSS Color 3 §4.2.4: hsla() carries an alpha component too.
+        // hsla(240, 100%, 50%, 0.25) is pure blue at α=0.25.
+        let s = parse_inline_style("color: hsla(240, 100%, 50%, 0.25)");
+        let (r, g, b, a) = s.color.unwrap();
+        assert!(r.abs() < 0.01);
+        assert!(g.abs() < 0.01);
+        assert!((b - 1.0).abs() < 0.01);
+        assert!((a - 0.25).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsl_defaults_alpha_one() {
+        let s = parse_inline_style("color: hsl(240, 100%, 50%)");
+        let (_, _, _, a) = s.color.unwrap();
+        assert!((a - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hex_long_with_alpha_captures_alpha() {
+        // 8-digit hex carries an explicit alpha byte.
+        let s = parse_inline_style("color: #ff000080");
+        let (r, _, _, a) = s.color.unwrap();
+        assert!((r - 1.0).abs() < 0.01);
+        // 0x80 / 255 ≈ 0.502
+        assert!((a - 128.0 / 255.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hex_short_defaults_alpha_one() {
+        let s = parse_inline_style("color: #f00");
+        let (_, _, _, a) = s.color.unwrap();
+        assert!((a - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn named_color_defaults_alpha_one() {
+        let s = parse_inline_style("color: blue");
+        let (_, _, _, a) = s.color.unwrap();
+        assert!((a - 1.0).abs() < 0.01);
+    }
+
+    // ── WS-2 Rung 2: cascade carries alpha ────────────────────
+
+    #[test]
+    fn computed_style_carries_alpha() {
+        // The cascade (parse_inline_style → ComputedStyle) must preserve
+        // the parsed alpha all the way through to the field — i.e. the
+        // tuple actually stored on `ComputedStyle.background_color`
+        // includes the 4th component, not just (r, g, b).
+        let s = parse_inline_style("background-color: rgba(0, 0, 0, 0.5)");
+        let (r, g, b, a) = s.background_color.unwrap();
+        assert!(r.abs() < 0.01);
+        assert!(g.abs() < 0.01);
+        assert!(b.abs() < 0.01);
+        assert!((a - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn computed_style_border_color_carries_alpha() {
+        let s = parse_inline_style("border-color: rgba(255, 255, 255, 0.7)");
+        let (_, _, _, a) = s.border_color.unwrap();
+        assert!((a - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn rgba_alpha_clamped_to_unit_range() {
+        // Out-of-range alpha is clamped per CSS Color 3 (we use clamp,
+        // which matches both Blink and Gecko's "be lenient" behavior).
+        let above = parse_inline_style("color: rgba(255, 0, 0, 2.0)");
+        let (_, _, _, a_high) = above.color.unwrap();
+        assert!((a_high - 1.0).abs() < 0.01);
+        let below = parse_inline_style("color: rgba(255, 0, 0, -0.5)");
+        let (_, _, _, a_low) = below.color.unwrap();
+        assert!(a_low.abs() < 0.01);
     }
 
     #[test]
@@ -4713,20 +4854,20 @@ mod tests {
     #[test]
     fn border_color() {
         let s = parse_inline_style("border-color: red");
-        assert_eq!(s.border_color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.border_color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn border_shorthand() {
         let s = parse_inline_style("border: 1px solid black");
         assert!(matches!(s.border_width, Some(CssLength::Px(v)) if (v - 1.0).abs() < 0.001));
-        assert_eq!(s.border_color, Some((0.0, 0.0, 0.0)));
+        assert_eq!(s.border_color, Some((0.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn invalid_property_ignored() {
         let s = parse_inline_style("invalid-prop: value; color: blue");
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
@@ -4746,7 +4887,7 @@ mod tests {
     #[test]
     fn multiple_properties() {
         let s = parse_inline_style("color: red; font-size: 24pt; font-weight: bold");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.font_size, Some(CssLength::Pt(v)) if (v - 24.0).abs() < 0.001));
         assert_eq!(s.font_weight, Some(FontWeight::Bold));
     }
@@ -4860,7 +5001,7 @@ mod tests {
     #[test]
     fn later_declaration_wins() {
         let s = parse_inline_style("color: red; color: blue");
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
@@ -4873,13 +5014,13 @@ mod tests {
     fn important_not_breaking() {
         // !important should not prevent the value from being parsed
         let s = parse_inline_style("color: red !important");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn important_with_other_declarations() {
         let s = parse_inline_style("color: red !important; font-size: 18pt");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
     }
 
@@ -4911,7 +5052,7 @@ mod tests {
     #[test]
     fn uppercase_property_name() {
         let s = parse_inline_style("COLOR: red");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -4923,26 +5064,26 @@ mod tests {
     #[test]
     fn uppercase_hex_color() {
         let s = parse_inline_style("color: #FF0000");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn uppercase_named_color() {
         let s = parse_inline_style("color: RED");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn extra_whitespace_around_values() {
         let s = parse_inline_style("  color :  red  ;  font-size :  18pt  ");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
     }
 
     #[test]
     fn extra_semicolons() {
         let s = parse_inline_style(";;color: red;;;font-size: 18pt;;");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
     }
 
@@ -4990,7 +5131,7 @@ mod tests {
     #[test]
     fn border_color_first() {
         let s = parse_inline_style("border: red 2px solid");
-        assert_eq!(s.border_color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.border_color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.border_width, Some(CssLength::Px(v)) if (v - 2.0).abs() < 0.001));
     }
 
@@ -5104,7 +5245,7 @@ mod tests {
     fn stylesheet_single_rule() {
         let sheet = parse_stylesheet("p { color: red }");
         assert_eq!(sheet.rules.len(), 1);
-        assert_eq!(sheet.rules[0].style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(sheet.rules[0].style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5145,7 +5286,7 @@ mod tests {
         let sheet = parse_stylesheet("p { color: red }");
         let elem = test_elem("p", vec![], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5153,7 +5294,7 @@ mod tests {
         let sheet = parse_stylesheet(".red { color: red }");
         let elem = test_elem("p", vec!["red"], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5175,7 +5316,7 @@ mod tests {
             vec![("div", vec![], None, vec![])],
         );
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5189,7 +5330,7 @@ mod tests {
             vec![("div", vec![], None, vec![])],
         );
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5214,7 +5355,7 @@ mod tests {
         let sheet = parse_stylesheet("p { color: red } .blue { color: blue }");
         let elem = test_elem("p", vec!["blue"], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(style.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     // ── Attribute selector tests ──────────────────────────────
@@ -5224,14 +5365,14 @@ mod tests {
         let sheet = parse_stylesheet("[data-x] { color: red }");
         let elem = test_elem("p", vec![], None, vec![("data-x", "")], vec![]);
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn match_attr_equals() {
         let sheet = parse_stylesheet("[data-role=\"primary\"] { color: red }");
         let elem = test_elem("p", vec![], None, vec![("data-role", "primary")], vec![]);
-        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5246,7 +5387,7 @@ mod tests {
         );
         assert_eq!(
             match_rules(&elem_match, &sheet).color,
-            Some((1.0, 0.0, 0.0))
+            Some((1.0, 0.0, 0.0, 1.0))
         );
 
         let elem_no = test_elem(
@@ -5265,8 +5406,8 @@ mod tests {
         let a = test_elem("p", vec![], None, vec![("lang", "en")], vec![]);
         let b = test_elem("p", vec![], None, vec![("lang", "en-US")], vec![]);
         let c = test_elem("p", vec![], None, vec![("lang", "english")], vec![]);
-        assert_eq!(match_rules(&a, &sheet).color, Some((1.0, 0.0, 0.0)));
-        assert_eq!(match_rules(&b, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&a, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(match_rules(&b, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(match_rules(&c, &sheet).color.is_none());
     }
 
@@ -5290,16 +5431,16 @@ mod tests {
             vec![("class", "bigbox")],
             vec![],
         );
-        assert_eq!(match_rules(&a, &sheet_prefix).color, Some((1.0, 0.0, 0.0)));
-        assert_eq!(match_rules(&b, &sheet_suffix).color, Some((1.0, 0.0, 0.0)));
-        assert_eq!(match_rules(&c, &sheet_substr).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&a, &sheet_prefix).color, Some((1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(match_rules(&b, &sheet_suffix).color, Some((1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(match_rules(&c, &sheet_substr).color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn match_attr_compound_with_type() {
         let sheet = parse_stylesheet("p[class=\"foo\"] { color: red }");
         let elem = test_elem("p", vec!["foo"], None, vec![("class", "foo")], vec![]);
-        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5414,7 +5555,7 @@ mod tests {
         let mut first = test_elem("p", vec![], None, vec![], vec![]);
         first.sibling_index = 0;
         first.sibling_count = 3;
-        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
 
         let mut second = test_elem("p", vec![], None, vec![], vec![]);
         second.sibling_index = 1;
@@ -5428,7 +5569,7 @@ mod tests {
         let mut li2 = test_elem("li", vec![], None, vec![], vec![]);
         li2.sibling_index = 1; // 2nd
         li2.sibling_count = 4;
-        assert_eq!(match_rules(&li2, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&li2, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
 
         let mut li1 = test_elem("li", vec![], None, vec![], vec![]);
         li1.sibling_index = 0;
@@ -5440,7 +5581,7 @@ mod tests {
     fn match_not_pseudo() {
         let sheet = parse_stylesheet("p:not(.skip) { color: red }");
         let plain = test_elem("p", vec![], None, vec![], vec![]);
-        assert_eq!(match_rules(&plain, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&plain, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
 
         let skipped = test_elem("p", vec!["skip"], None, vec![], vec![]);
         assert!(match_rules(&skipped, &sheet).color.is_none());
@@ -5460,7 +5601,7 @@ mod tests {
             sibling_index: 0,
             sibling_count: 2,
         }];
-        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
 
         // A p following a div should NOT match h1+p.
         let mut p2 = test_elem("p", vec![], None, vec![], vec![]);
@@ -5502,7 +5643,7 @@ mod tests {
                 sibling_count: 3,
             },
         ];
-        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5518,7 +5659,7 @@ mod tests {
         );
         first.sibling_index = 0;
         first.sibling_count = 2;
-        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
 
         let mut second = test_elem(
             "p",
@@ -5672,6 +5813,8 @@ mod tests {
         let resolved = sheet.resolve_page_style(1, 1);
         let mb = resolved.margin_boxes.top_left.as_ref().expect("top-left");
         assert_eq!(mb.content, vec![ContentItem::String("Y".to_string())]);
+        // Margin-box `color` is a v1 cut for alpha — alpha is dropped at
+        // parse time, so this assertion is the 3-tuple opaque value.
         assert_eq!(mb.color, Some((1.0, 0.0, 0.0)));
     }
 
@@ -5802,7 +5945,7 @@ mod tests {
     #[test]
     fn merge_style_non_none_wins() {
         let mut target = ComputedStyle {
-            color: Some((1.0, 0.0, 0.0)),
+            color: Some((1.0, 0.0, 0.0, 1.0)),
             ..ComputedStyle::default()
         };
         let source = ComputedStyle {
@@ -5810,7 +5953,7 @@ mod tests {
             ..ComputedStyle::default()
         };
         merge_style(&mut target, &source);
-        assert_eq!(target.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(target.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(target.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
     }
 
@@ -5836,7 +5979,7 @@ mod tests {
         let mut s = parse_inline_style("--fg: red; color: var(--fg)");
         assert!(s.color.is_none());
         s.resolve_vars();
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(s.var_decls.is_empty());
     }
 
@@ -5844,7 +5987,7 @@ mod tests {
     fn resolve_vars_uses_fallback_when_undefined() {
         let mut s = parse_inline_style("color: var(--missing, blue)");
         s.resolve_vars();
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
