@@ -1065,6 +1065,31 @@ with describe("HtmlDocument - WS-1B fallback font"):
         )
 
     @test
+    def bundled_fallback_license_present():
+        """WS-1B Rung 6 (CI sanity): every TTF / OTF committed under
+        `assets/fonts/` must ship a sibling `<stem>-LICENSE` file. The
+        DejaVu / Bitstream Vera license is permissive but redistribution
+        still requires the copyright text. `tools/check_fallback_font_license.py`
+        runs the same check; we wrap it as a unit test so the harness
+        catches a missing license at PR time, not release time."""
+        import subprocess
+        import sys
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "tools" / "check_fallback_font_license.py"
+        assert script.exists(), f"missing {script}"
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"license check failed (exit {result.returncode}):\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    @test
     def cobra_check_marks_render():
         """Integration: the COBRA-notice fixture relies on `&#9745;`
         (ballot box ☑) rendering inline with surrounding Latin text.
