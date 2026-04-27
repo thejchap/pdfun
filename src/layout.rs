@@ -3444,6 +3444,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fixed_layout_pins_column_widths() {
+        // CSS 2.1 §17.5.2.1 — `table-layout: fixed` pins the column
+        // widths to the hints. Cell content does not widen the column,
+        // even if the intrinsic max-content is much larger than the hint.
+        let hints = vec![Some(180.0), Some(60.0), Some(360.0)];
+        let widths = apply_col_hints_fixed(3, &hints, 600.0);
+        assert_eq!(widths, vec![180.0, 60.0, 360.0]);
+    }
+
     // ── margin collapse (Stage B1) ──────────────────────────
     #[test]
     fn collapse_two_positives_picks_the_larger() {
