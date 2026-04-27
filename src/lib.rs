@@ -31,6 +31,7 @@ mod font_metrics;
 mod html_render;
 mod image;
 mod layout;
+mod url_fetcher;
 
 // ── Built-in PDF fonts ─────────────────────────────────────────
 
