@@ -1691,6 +1691,15 @@ impl<'a> HtmlRenderer<'a> {
         let border_collapse = table_style
             .and_then(|s| s.border_collapse)
             .unwrap_or_default();
+        let table_layout = table_style
+            .and_then(|s| s.table_layout)
+            .unwrap_or_default();
+
+        // Walk the table's <colgroup> / <col> children for per-column
+        // styles. `None` ≡ no <colgroup> declared (fall through to the
+        // intrinsic width algorithm); `Some(empty)` is treated the same.
+        let cs = extract_col_styles(table_handle);
+        let col_styles = if cs.is_empty() { None } else { Some(cs) };
 
         let table = Table {
             rows,
@@ -1699,6 +1708,8 @@ impl<'a> HtmlRenderer<'a> {
             default_line_height,
             caption,
             border_collapse,
+            col_styles,
+            table_layout,
         };
         self.layout.push_table(table);
     }

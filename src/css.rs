@@ -855,6 +855,7 @@ macro_rules! with_style_fields {
             (clear,             copy,  no),
             (vertical_align,    copy,  no),
             (border_collapse,   copy,  no),
+            (table_layout,      copy,  no),
             (overflow,          copy,  no),
             (position,          copy,  no),
             (top,               copy,  no),
@@ -999,6 +1000,7 @@ pub struct ComputedStyle {
     pub clear: Option<ClearValue>,
     pub vertical_align: Option<VerticalAlignValue>,
     pub border_collapse: Option<BorderCollapseValue>,
+    pub table_layout: Option<TableLayoutValue>,
     pub overflow: Option<Overflow>,
     pub position: Option<Position>,
     pub top: Option<CssLength>,
@@ -2292,6 +2294,18 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     _ => return Err(location.new_custom_error(())),
                 };
                 self.style.border_collapse = Some(bc);
+            }
+            "table-layout" => {
+                // CSS 2.1 §17.5.2 — `auto` (default) lets cell content
+                // widen the column; `fixed` pins column widths.
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let tl = match ident.to_ascii_lowercase().as_str() {
+                    "auto" => TableLayoutValue::Auto,
+                    "fixed" => TableLayoutValue::Fixed,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.table_layout = Some(tl);
             }
             "content" => {
                 // Only the literal-string form of `content`. `none` and the

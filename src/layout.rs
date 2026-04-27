@@ -384,6 +384,16 @@ pub struct Table {
     pub default_line_height: Option<f32>,
     pub caption: Option<Box<Paragraph>>,
     pub border_collapse: css::BorderCollapseValue,
+    /// Per-column style records built from `<colgroup>` / `<col>` (CSS
+    /// 2.1 §17.3). `None` when no `<colgroup>` was declared, in which
+    /// case the layout falls through to its intrinsic algorithm.
+    /// `Some(empty)` means the table had a colgroup but no columns
+    /// (treated the same as `None`).
+    pub col_styles: Option<Vec<css::ColStyle>>,
+    /// CSS `table-layout` (CSS 2.1 §17.5.2). `Auto` (default) treats
+    /// `<col width>` as a preferred-width hint bounded below by the
+    /// content's min-width; `Fixed` pins column widths to their hints.
+    pub table_layout: css::TableLayoutValue,
 }
 
 pub struct ImageBlock {
@@ -850,6 +860,130 @@ fn measure_cell_intrinsic(cell: &TableCell) -> Result<(f32, f32), String> {
         }
     }
     Ok((min_width, max_width))
+}
+
+/// Resolve a `<col>` width hint to a point value in the context of the
+/// table's containing area. Percent hints resolve against `container`.
+/// Other length units use a fallback `LengthContext` (rem/vw/vh inside
+/// table column hints aren't yet contextual — see TODO).
+fn resolve_col_hint(hint: Option<css::CssLength>, container: f32) -> Option<f32> {
+    let len = hint?;
+    let ctx = css::LengthContext {
+        em: 12.0,
+        rem: 12.0,
+        vw: css::LengthContext::DEFAULT_VW,
+        vh: css::LengthContext::DEFAULT_VH,
+        container,
+    };
+    Some(len.resolve_ctx(&ctx))
+}
+
+/// Resolve `<col>` width hints to per-column point values (or `None`
+/// where no hint was given). Percent hints use `container_width` as the
+/// reference.
+pub(crate) fn resolve_col_hints(
+    col_styles: &[css::ColStyle],
+    container_width: f32,
+) -> Vec<Option<f32>> {
+    col_styles
+        .iter()
+        .map(|cs| resolve_col_hint(cs.width, container_width))
+        .collect()
+}
+
+/// CSS 2.1 §17.5.2 column-width resolution.
+///
+/// Two modes:
+///
+/// - **`auto`** (default): explicit column hints raise the column's
+///   *preferred* width, but `col_min` is **left at the content
+///   minimum**. This way a long unbreakable word (a URL, a hash) in a
+///   column hinted to `width: 10%` still claims its real intrinsic
+///   minimum and never clips. Per CSS 2.1 §17.5.2.2, also preserves the
+///   invariant `col_max[i] >= col_preferred[i]`.
+/// - **`fixed`**: column widths are pinned to their hints. Cells cannot
+///   widen the column (overflow or wrap). Hint-less columns split the
+///   leftover space evenly. CSS 2.1 §17.5.2.1.
+///
+/// Percent hints exceeding 100% in `auto` mode are scaled proportionally
+/// down to fit so a malformed `[60%, 60%]` still uses the table's full
+/// area instead of overflowing — matches Blink and WeasyPrint.
+pub(crate) fn apply_col_hints_auto(
+    col_min: &[f32],
+    col_max: &mut [f32],
+    col_preferred: &mut [f32],
+    hints: &[Option<f32>],
+) {
+    debug_assert_eq!(col_min.len(), col_max.len());
+    debug_assert_eq!(col_min.len(), col_preferred.len());
+    debug_assert_eq!(col_min.len(), hints.len());
+    for i in 0..col_min.len() {
+        // `col_preferred[i]` starts at the intrinsic max-content; an
+        // explicit hint overrides only if it's *larger* than the
+        // content's min-width — content-min is the floor either way.
+        if let Some(h) = hints[i] {
+            let pref = h.max(col_min[i]);
+            col_preferred[i] = pref;
+            if col_max[i] < pref {
+                col_max[i] = pref;
+            }
+        }
+    }
+}
+
+/// `table-layout: fixed` — pin column widths to hints, even-split
+/// leftover area among hint-less columns. Returns the resolved widths.
+pub(crate) fn apply_col_hints_fixed(
+    column_count: usize,
+    hints: &[Option<f32>],
+    container_width: f32,
+) -> Vec<f32> {
+    let mut widths = vec![0.0_f32; column_count];
+    let mut hinted_total = 0.0_f32;
+    let mut unhinted = 0_usize;
+    for i in 0..column_count {
+        match hints.get(i).copied().flatten() {
+            Some(h) => {
+                widths[i] = h;
+                hinted_total += h;
+            }
+            None => unhinted += 1,
+        }
+    }
+    if unhinted > 0 {
+        let leftover = (container_width - hinted_total).max(0.0);
+        let share = leftover / unhinted as f32;
+        for i in 0..column_count {
+            if hints.get(i).copied().flatten().is_none() {
+                widths[i] = share;
+            }
+        }
+    } else if hinted_total > container_width && hinted_total > 0.0 {
+        // Total hints overflow the container — scale proportionally
+        // so the table still fits. (CSS 2.1 §17.5.2.1 doesn't prescribe
+        // this but every UA does it.)
+        let scale = container_width / hinted_total;
+        for w in &mut widths {
+            *w *= scale;
+        }
+    }
+    widths
+}
+
+/// Pre-process auto-mode percent hints so their sum doesn't exceed
+/// `container_width`. Per Blink/WeasyPrint, `[60%, 60%]` resolves to
+/// `[300pt, 300pt]` of a 600pt area, not `[360, 360]` overflowing.
+/// Acts in-place on the resolved hint values.
+pub(crate) fn scale_overlong_percent_hints(hints: &mut [Option<f32>], container_width: f32) {
+    let total: f32 = hints.iter().filter_map(|h| *h).sum();
+    if total > container_width && total > 0.0 {
+        let scale = container_width / total;
+        for h in hints.iter_mut() {
+            if let Some(v) = h {
+                *v *= scale;
+            }
+        }
+    }
 }
 
 fn rgb_to_f32(c: (f64, f64, f64)) -> (f32, f32, f32) {
@@ -3261,6 +3395,53 @@ mod tests {
     fn wrap_text_rejects_unknown_font() {
         let err = wrap_text_impl("hello", 100.0, "NotAFont", 12.0).unwrap_err();
         assert!(err.contains("unknown font"));
+    }
+
+    // ── <col> width hint resolution (CSS 2.1 §17.5.2) ────────
+
+    #[test]
+    fn auto_layout_explicit_widths_set_preferred_not_min() {
+        // Container = 600pt, hints = 30%/10%/60%, intrinsic mins = 10pt.
+        // Auto layout must:
+        //   * raise col_preferred to the resolved hint when the hint is
+        //     larger than the content min-width
+        //   * leave col_min UNCHANGED (this is the bug-prevention assert
+        //     — the naive `col_min = col_max = hint` plan would clip a
+        //     long unbreakable word in a hinted-narrow column).
+        //   * keep col_max >= col_preferred.
+        let col_min = vec![10.0_f32; 3];
+        let mut col_max = vec![20.0_f32, 20.0, 20.0];
+        let mut col_preferred = col_max.clone();
+        let hints = vec![Some(180.0), Some(60.0), Some(360.0)]; // 30/10/60% of 600
+        let col_min_before = col_min.clone();
+        apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &hints);
+        assert_eq!(col_preferred, vec![180.0, 60.0, 360.0]);
+        // col_min was not touched — even after applying hints. This is
+        // what the long-URL test below relies on.
+        assert_eq!(col_min, col_min_before);
+        for i in 0..3 {
+            assert!(
+                col_max[i] >= col_preferred[i],
+                "col_max[{i}]={} should be >= col_preferred[{i}]={}",
+                col_max[i],
+                col_preferred[i]
+            );
+        }
+
+        // Bug-prevention assert: a long word with min-width 80 in
+        // column 1 (hinted to 60) must not be clipped to 60.
+        // col_min is the floor for col_preferred, so the column gets
+        // its real intrinsic minimum (80) regardless of the smaller hint.
+        let col_min2 = vec![10.0_f32, 80.0, 10.0];
+        let mut col_max2 = vec![20.0_f32, 80.0, 20.0];
+        let mut col_preferred2 = col_max2.clone();
+        let hints2 = vec![Some(180.0), Some(60.0), Some(360.0)];
+        apply_col_hints_auto(&col_min2, &mut col_max2, &mut col_preferred2, &hints2);
+        assert!(
+            col_preferred2[1] >= 80.0,
+            "long word in column 1 (min 80, hint 60) was clipped to {}",
+            col_preferred2[1]
+        );
     }
 
     // ── margin collapse (Stage B1) ──────────────────────────
