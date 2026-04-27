@@ -25,7 +25,8 @@ use crate::{BUILTIN_FONTS, PageContent, PdfDocument, PdfOp, RegisteredFont};
 /// chunks fall back to per-char '?' substitution (the WS-1A bound).
 fn push_show_text(page: &mut PageContent, font_name: &str, font_size: f32, text: &str) {
     if crate::is_embedded_font(font_name) {
-        page.operations.push(PdfOp::ShowGlyphs(text.chars().collect()));
+        page.operations
+            .push(PdfOp::ShowGlyphs(text.chars().collect()));
         return;
     }
     // Built-in path: split into alternating WinAnsi / non-WinAnsi
@@ -69,8 +70,7 @@ fn push_show_text(page: &mut PageContent, font_name: &str, font_size: f32, text:
                         name: fallback.to_string(),
                         size: font_size,
                     });
-                    page.operations
-                        .push(PdfOp::ShowGlyphs(s.chars().collect()));
+                    page.operations.push(PdfOp::ShowGlyphs(s.chars().collect()));
                     page.operations.push(PdfOp::SetFont {
                         name: font_name.to_string(),
                         size: font_size,
@@ -145,7 +145,7 @@ pub struct BlockStyle {
     /// Foreground color in RGBA. The alpha channel composes with
     /// `BlockStyle::opacity` per `WS-2`'s rules: leaf blocks multiply
     /// `opacity * color_alpha`; group blocks render through a Form
-    /// XObject `/Group` and the leaves keep their own α.
+    /// `XObject` `/Group` and the leaves keep their own α.
     pub color: Option<(f32, f32, f32, f32)>,
     pub background_color: Option<(f32, f32, f32, f32)>,
     pub margin_top: f32,
@@ -502,19 +502,19 @@ pub enum Block {
 /// entering an `opacity < 1` container so subsequent child draw ops
 /// are diverted into a new `Vec<PdfOp>` instead of the page's main
 /// stream. Popped on exit, at which point the captured ops are wrapped
-/// into a Form XObject (Transparency Group) and the page emits a
+/// into a Form `XObject` (Transparency Group) and the page emits a
 /// `gs + Do` pair to apply the parent's α and invoke the group.
 struct TransparencyCapture {
     opacity: f32,
     /// Saved page operations Vec from before the capture began —
     /// restored on exit (with a `Do` op appended for the captured
-    /// XObject).
+    /// `XObject`).
     saved_ops: Vec<PdfOp>,
     /// Saved `images_used` snapshot — restored on exit; the captured
-    /// XObject takes ownership of any image refs added in between.
+    /// `XObject` takes ownership of any image refs added in between.
     saved_images_used: Vec<usize>,
     /// y-coordinate of the page cursor when the capture began. Used
-    /// to compute the Form XObject's `/BBox`.
+    /// to compute the Form `XObject`'s `/BBox`.
     capture_start_y: f32,
 }
 
@@ -985,7 +985,9 @@ fn resolve_col_hint(hint: Option<css::CssLength>, container: f32) -> Option<f32>
 
 /// Resolve `<col>` width hints to per-column point values (or `None`
 /// where no hint was given). Percent hints use `container_width` as the
-/// reference.
+/// reference. Test-only helper — production code uses `resolve_col_hint`
+/// per-column inline with the layout pass.
+#[cfg(test)]
 pub(crate) fn resolve_col_hints(
     col_styles: &[css::ColStyle],
     container_width: f32,
@@ -1127,7 +1129,7 @@ pub(crate) fn rgb_only4(c: (f32, f32, f32, f32)) -> (f32, f32, f32) {
 /// Per ISO 32000-1 §11.3.7 + CSS Compositing & Blending L1 §4 this is
 /// **only valid for leaf paints** (a box with no descendants drawn in
 /// the same pass). For an `opacity < 1` block that contains descendants,
-/// the renderer wraps the subtree in a Form XObject `/Group` and
+/// the renderer wraps the subtree in a Form `XObject` `/Group` and
 /// applies the parent opacity on the surrounding stream — see
 /// `needs_transparency_group`. Multiplying through to leaves makes
 /// overlapping translucent children show through each other incorrectly.
@@ -1143,7 +1145,7 @@ pub(crate) fn effective_leaf_alpha(opacity: f32, color_alpha: f32) -> f32 {
 }
 
 /// Whether a block that has `opacity < 1` and `has_descendant_draws`
-/// must be rendered through a Form XObject Transparency Group rather
+/// must be rendered through a Form `XObject` Transparency Group rather
 /// than via leaf-alpha multiplication. `opacity >= 1.0` always returns
 /// `false` (no group needed); otherwise the rule is "any descendant
 /// draws -> group" so that overlapping translucent children composite
@@ -1170,7 +1172,7 @@ pub(crate) fn push_alpha_if_translucent(ops: &mut Vec<PdfOp>, alpha: f32) {
 }
 
 /// Collect the unique opacities referenced inside a captured Form
-/// XObject's op stream. Mirrors `collect_alphas_in_ops` in `lib.rs` —
+/// `XObject`'s op stream. Mirrors `collect_alphas_in_ops` in `lib.rs` —
 /// duplicated here because the `lib.rs` helper takes `&[lib::PdfOp]`
 /// (same type, but we don't expose it via re-export).
 #[inline]
@@ -1187,7 +1189,7 @@ pub(crate) fn collect_alphas_in_captured_ops(ops: &[PdfOp]) -> Vec<f32> {
 }
 
 /// Collect the indices of any nested `DrawFormXObject` ops referenced
-/// from inside a captured Form XObject. The XObject's `/Resources
+/// from inside a captured Form `XObject`. The `XObject`'s `/Resources
 /// /XObject` dict needs to bind every nested `/Fm<idx>` so the inner
 /// invocation resolves.
 #[inline]
@@ -1205,7 +1207,7 @@ pub(crate) fn captured_form_xobject_indices(ops: &[PdfOp]) -> Vec<usize> {
 
 /// Collect the font names referenced by `SetFont` ops inside a
 /// captured op stream — used to bind `/F<idx>` resources on the Form
-/// XObject so the group is a self-contained PDF object.
+/// `XObject` so the group is a self-contained PDF object.
 #[inline]
 pub(crate) fn captured_fonts_in_ops(ops: &[PdfOp]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -1537,11 +1539,7 @@ impl LayoutInner {
     /// new page so the new page-frame is sized correctly. Returns the
     /// resolved style so callers (e.g. `stamp_margin_boxes`) can also
     /// pull the per-page margin-box declarations.
-    pub fn apply_page_style_for(
-        &mut self,
-        page_num: usize,
-        total_pages: usize,
-    ) -> css::PageStyle {
+    pub fn apply_page_style_for(&mut self, page_num: usize, total_pages: usize) -> css::PageStyle {
         let resolved = self.resolve_page_style_for(page_num, total_pages);
         if let Some(w) = resolved.width {
             self.page_width = w;
@@ -1688,7 +1686,9 @@ impl LayoutInner {
         // already exists.
         let fallback_used = doc.pages.iter().any(|p| {
             let page = p.lock().unwrap();
-            page.fonts_used.iter().any(|n| n == crate::FALLBACK_FONT_NAME)
+            page.fonts_used
+                .iter()
+                .any(|n| n == crate::FALLBACK_FONT_NAME)
         });
         if fallback_used {
             crate::register_fallback_if_needed(&mut doc.registered_fonts)
@@ -1996,14 +1996,8 @@ impl LayoutInner {
             // semantics already cover this case.
             if !captured_ops.is_empty() {
                 let alphas = collect_alphas_in_captured_ops(&captured_ops);
-                let bbox = [
-                    0.0_f32,
-                    0.0_f32,
-                    page.width as f32,
-                    page.height as f32,
-                ];
-                let nested_xobjects =
-                    captured_form_xobject_indices(&captured_ops);
+                let bbox = [0.0_f32, 0.0_f32, page.width as f32, page.height as f32];
+                let nested_xobjects = captured_form_xobject_indices(&captured_ops);
                 let fonts_used = captured_fonts_in_ops(&captured_ops);
                 page.form_xobjects.push(crate::FormXObjectData {
                     bbox,
@@ -2400,8 +2394,7 @@ impl LayoutInner {
         }
 
         if style.border_width > 0.0 && !matches!(style.border_style, Some(css::BorderStyle::None)) {
-            let ((r, g, b), a) =
-                split_rgba(style.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
+            let ((r, g, b), a) = split_rgba(style.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
             push_alpha_if_translucent(&mut page.operations, a);
             page.operations.push(PdfOp::SetStrokeColor { r, g, b });
             page.operations
@@ -2560,12 +2553,7 @@ impl LayoutInner {
                     x: marker_x,
                     y: baseline_y,
                 });
-                push_show_text(
-                    &mut page,
-                    &marker.font_name,
-                    marker.font_size,
-                    &marker.text,
-                );
+                push_show_text(&mut page, &marker.font_name, marker.font_size, &marker.text);
                 page.operations.push(PdfOp::EndText);
             }
 
@@ -2857,10 +2845,7 @@ impl LayoutInner {
         // If there are no `@page` rules, we may still have a top-level
         // `margin_boxes` field set by a non-CSS API consumer — fall back
         // to the universal slot in that case.
-        let has_any_rule_box = self
-            .page_rules
-            .iter()
-            .any(|r| r.decls.margin_boxes.any());
+        let has_any_rule_box = self.page_rules.iter().any(|r| r.decls.margin_boxes.any());
         if !has_any_rule_box && !self.margin_boxes.any() {
             return;
         }
@@ -3156,8 +3141,7 @@ impl LayoutInner {
             if !band.has_border || band.row_bottoms.is_empty() {
                 return;
             }
-            let ((r, g, b), a) =
-                split_rgba(band.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
+            let ((r, g, b), a) = split_rgba(band.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
             let w = band.max_border_width;
             let total_w: f32 = col_widths.iter().sum();
             let bottom_y = *band
@@ -3592,8 +3576,7 @@ impl LayoutInner {
         }
         let mut page = page.lock().unwrap();
         page.operations.push(PdfOp::SaveState);
-        let ((r, g, b), a) =
-            split_rgba(self.column_rule_color.unwrap_or((0.75, 0.75, 0.75, 1.0)));
+        let ((r, g, b), a) = split_rgba(self.column_rule_color.unwrap_or((0.75, 0.75, 0.75, 1.0)));
         push_alpha_if_translucent(&mut page.operations, a);
         page.operations.push(PdfOp::SetStrokeColor { r, g, b });
         page.operations

@@ -22,7 +22,7 @@ pub fn transcode_to_pdf_winansi(s: &str) -> Result<Vec<u8>, char> {
 }
 
 /// Map a single Unicode codepoint to its PDF `WinAnsiEncoding` byte.
-/// Returns `None` if the codepoint is not in the WinAnsi repertoire.
+/// Returns `None` if the codepoint is not in the `WinAnsi` repertoire.
 fn char_to_winansi_byte(ch: char) -> Option<u8> {
     let cp = ch as u32;
     // ASCII (0x00..=0x7E) passes through unchanged. U+007F is the DEL
@@ -55,7 +55,10 @@ fn char_to_winansi_byte(ch: char) -> Option<u8> {
         '\u{2019}' => Some(0x92), // '
         '\u{201C}' => Some(0x93), // "
         '\u{201D}' => Some(0x94), // "
-        '\u{2022}' => Some(0x95), // •
+        // U+2022 BULLET and U+00AD SOFT HYPHEN both map to byte 0x95
+        // per PDF's WinAnsiEncoding. (Latin-1 puts soft hyphen at 0xAD;
+        // PDF spec doesn't.)
+        '\u{2022}' | '\u{00AD}' => Some(0x95),
         '\u{2013}' => Some(0x96), // –
         '\u{2014}' => Some(0x97), // —
         '\u{02DC}' => Some(0x98), // ˜
@@ -65,8 +68,6 @@ fn char_to_winansi_byte(ch: char) -> Option<u8> {
         '\u{0153}' => Some(0x9C), // œ
         '\u{017E}' => Some(0x9E), // ž
         '\u{0178}' => Some(0x9F), // Ÿ
-        // 0xAD soft hyphen — PDF maps to bullet, not to 0xAD.
-        '\u{00AD}' => Some(0x95),
         // 0xA0..=0xFF Latin-1 supplement passes through 1:1 (modulo the
         // soft-hyphen override above).
         _ if (0xA0..=0xFF).contains(&cp) => Some(cp as u8),
@@ -88,7 +89,7 @@ mod tests {
         assert_eq!(transcode_to_pdf_winansi("€"), Ok(vec![0x80]));
     }
 
-    /// Codepoints outside the WinAnsi repertoire surface as `Err(c)`
+    /// Codepoints outside the `WinAnsi` repertoire surface as `Err(c)`
     /// carrying the offending character. WS-1B uses the carried char to
     /// decide whether to split the run onto a Unicode-capable fallback.
     #[test]
@@ -119,6 +120,8 @@ mod tests {
     ///    maps some other glyph there.
     #[test]
     fn pdf_winansi_undefined_slots_map_to_bullet() {
+        const UNDEFINED_SLOTS: [u8; 7] = [0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D, 0xAD];
+
         // (1) Canonical bullet round-trips to 0x95.
         assert_eq!(transcode_to_pdf_winansi("\u{2022}"), Ok(vec![0x95]));
         // (2) Soft hyphen -> bullet per PDF spec.
@@ -126,7 +129,6 @@ mod tests {
 
         // (3) Sweep every Unicode codepoint that *can* map (the table
         // is finite) and verify none of the undefined slots show up.
-        const UNDEFINED_SLOTS: [u8; 7] = [0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D, 0xAD];
         // Scan a generous range covering ASCII, Latin-1, the 0x80-9F
         // override window, and the small set of higher codepoints in
         // the WinAnsi repertoire (Œ, ž, etc. — all <= U+20AC).

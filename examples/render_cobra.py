@@ -20,14 +20,16 @@ from pathlib import Path
 
 from pdfun import HtmlDocument
 
-HERE = Path(__file__).parent
-HTML_PATH = HERE / "cobra_notice.html"
-PDF_OUT = HERE / "cobra_notice.pdf"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "cobra"
+HTML_PATH = FIXTURE_DIR / "cobra_notice.html"
+PDF_OUT = FIXTURE_DIR / "cobra_notice.pdf"
 
 
 def main() -> int:
+    """Render the COBRA fixture HTML to PDF and report the output size."""
     html = HTML_PATH.read_text()
-    doc = HtmlDocument(string=html, base_url=str(HERE))
+    doc = HtmlDocument(string=html, base_url=str(FIXTURE_DIR))
     doc.write_pdf(str(PDF_OUT))
     print(f"wrote {PDF_OUT} ({PDF_OUT.stat().st_size} bytes)")
     return 0

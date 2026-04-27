@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 125/133 behaviors implemented · 120/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 129/137 behaviors implemented · 121/137 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -282,6 +282,10 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Table of contents | — | ✅ | ✅ | ✅ (7) `tests/test_html.py::toc_true_prepends_heading_list`, `tests/test_html.py::toc_emits_internal_link_per_heading`, `tests/test_html.py::toc_isolates_itself_on_dedicated_page`, `tests/test_html.py::toc_string_sets_custom_title`, `tests/test_html.py::toc_preserves_existing_heading_ids`, `tests/test_html.py::toc_false_is_a_no_op`, `tests/test_html.py::toc_on_empty_document_no_op` |
 | Custom font embedding (CIDFont + ToUnicode) | — | ✅ | ✅ | ✅ (1) `tests/test_pdfun.py::register_font_returns_name` |
 | Font subsetting (only used glyphs embedded) | — | ✅ | ✅ | ✅ (1) `tests/test_pdfun.py::embedded_font_has_widths` |
+| PDF WinAnsiEncoding text emission for built-in fonts | ISO 32000-1 Annex D.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::winansi_chars_in_text_op` |
+| Auto-promote non-WinAnsi runs onto a Type0/CID fallback face | ISO 32000-1 §9.7 | ✅ | ✅ | ⚠️ untested |
+| Page-level Transparency Group + Form XObject groups for opacity<1 with descendants | ISO 32000-1 §11.6.5 | ✅ | ✅ | ⚠️ untested |
+| Pluggable URL fetcher trait for <img>/background-image/@font-face url() | — | ✅ | ✅ | ⚠️ untested |
 | Stream compression | — | ✅ | ✅ | ⚠️ untested |
 | PDF encryption | — | 🟡 | ❌ | — |
 | PDF/A compliance | — | ✅ | ❌ | — |

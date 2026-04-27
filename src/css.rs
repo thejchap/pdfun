@@ -952,7 +952,7 @@ with_style_fields!(gen_merge);
 #[derive(Clone, Debug, Default)]
 pub struct ComputedStyle {
     /// Foreground color (CSS Color 3 §3.1). Stored as RGBA — α < 1.0
-    /// flows through `WS-2`'s ExtGState `ca`/`CA` plumbing so translucent
+    /// flows through `WS-2`'s `ExtGState` `ca`/`CA` plumbing so translucent
     /// `rgba()` text actually paints translucently.
     pub color: Option<(f32, f32, f32, f32)>,
     /// Background color (CSS Backgrounds & Borders 3 §3). RGBA so
@@ -5431,9 +5431,18 @@ mod tests {
             vec![("class", "bigbox")],
             vec![],
         );
-        assert_eq!(match_rules(&a, &sheet_prefix).color, Some((1.0, 0.0, 0.0, 1.0)));
-        assert_eq!(match_rules(&b, &sheet_suffix).color, Some((1.0, 0.0, 0.0, 1.0)));
-        assert_eq!(match_rules(&c, &sheet_substr).color, Some((1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(
+            match_rules(&a, &sheet_prefix).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            match_rules(&b, &sheet_suffix).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            match_rules(&c, &sheet_substr).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
     }
 
     #[test]
@@ -5555,7 +5564,10 @@ mod tests {
         let mut first = test_elem("p", vec![], None, vec![], vec![]);
         first.sibling_index = 0;
         first.sibling_count = 3;
-        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(
+            match_rules(&first, &sheet).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
 
         let mut second = test_elem("p", vec![], None, vec![], vec![]);
         second.sibling_index = 1;
@@ -5581,7 +5593,10 @@ mod tests {
     fn match_not_pseudo() {
         let sheet = parse_stylesheet("p:not(.skip) { color: red }");
         let plain = test_elem("p", vec![], None, vec![], vec![]);
-        assert_eq!(match_rules(&plain, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(
+            match_rules(&plain, &sheet).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
 
         let skipped = test_elem("p", vec!["skip"], None, vec![], vec![]);
         assert!(match_rules(&skipped, &sheet).color.is_none());
@@ -5659,7 +5674,10 @@ mod tests {
         );
         first.sibling_index = 0;
         first.sibling_count = 2;
-        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(
+            match_rules(&first, &sheet).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
 
         let mut second = test_elem(
             "p",
@@ -5927,7 +5945,7 @@ mod tests {
 
         // Lexicographic ordering of the tuples.
         let mut tuples = [universal, left_only, first_only, first_left, nth];
-        tuples.sort();
+        tuples.sort_unstable();
         assert_eq!(
             tuples,
             [(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1), (1, 0, 0)]

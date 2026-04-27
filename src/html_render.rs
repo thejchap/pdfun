@@ -1706,9 +1706,7 @@ impl<'a> HtmlRenderer<'a> {
         let border_collapse = table_style
             .and_then(|s| s.border_collapse)
             .unwrap_or_default();
-        let table_layout = table_style
-            .and_then(|s| s.table_layout)
-            .unwrap_or_default();
+        let table_layout = table_style.and_then(|s| s.table_layout).unwrap_or_default();
 
         // Walk the table's <colgroup> / <col> children for per-column
         // styles. `None` ≡ no <colgroup> declared (fall through to the
@@ -2656,8 +2654,7 @@ pub fn render_dom_to_layout(
     // for individual fallback chunks otherwise.
     #[cfg(feature = "bundled-fallback-font")]
     {
-        if let Ok(m) =
-            crate::font_metrics::extract_custom_font_metrics(crate::FALLBACK_FONT_BYTES)
+        if let Ok(m) = crate::font_metrics::extract_custom_font_metrics(crate::FALLBACK_FONT_BYTES)
         {
             metrics_map.insert(crate::FALLBACK_FONT_NAME.to_string(), m);
         }

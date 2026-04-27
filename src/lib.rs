@@ -149,7 +149,7 @@ pub(crate) enum PdfOp {
         dx: f32,
         dy: f32,
     },
-    /// Invoke a captured Form XObject (Transparency Group) for an
+    /// Invoke a captured Form `XObject` (Transparency Group) for an
     /// `opacity < 1` container with drawn descendants. `index` indexes
     /// into `PageContent::form_xobjects`. Emits the PDF `Do` operator
     /// referencing `/Fm<index>` — the surrounding stream is expected
@@ -180,9 +180,9 @@ pub(crate) struct HeadingEntry {
     pub(crate) y: f32,
 }
 
-/// A captured Form XObject built from a translucent block subtree
+/// A captured Form `XObject` built from a translucent block subtree
 /// (CSS Compositing & Blending L1 §4: an `opacity < 1` block with
-/// drawn descendants must render through a Transparency Group XObject
+/// drawn descendants must render through a Transparency Group `XObject`
 /// per ISO 32000-1 §11.6.5). The captured ops were temporarily diverted
 /// from a `PageContent` while the subtree rendered; they're emitted as
 /// a `/Subtype /Form` indirect object with a `/Group << /S /Transparency
@@ -200,7 +200,7 @@ pub(crate) struct FormXObjectData {
     /// Indices into the same `PageContent::form_xobjects` for nested
     /// transparency groups (an `opacity:0.5` block inside another).
     pub(crate) nested_xobjects: Vec<usize>,
-    /// Alphas referenced by `SetAlpha` ops inside this Form XObject's
+    /// Alphas referenced by `SetAlpha` ops inside this Form `XObject`'s
     /// content stream. The page-level emission path re-derives this
     /// via `collect_alphas_in_ops` so the field is documentation-only.
     #[allow(dead_code)]
@@ -217,9 +217,9 @@ pub(crate) struct PageContent {
     pub(crate) links: Vec<LinkAnnotation>,
     /// Indices into `PdfDocument::images` of images used on this page.
     pub(crate) images_used: Vec<usize>,
-    /// Captured Form XObjects (Transparency Groups) for `opacity < 1`
+    /// Captured Form `XObjects` (Transparency Groups) for `opacity < 1`
     /// containers with drawn descendants. Each entry is rendered as an
-    /// indirect Form XObject and referenced from this page's `/Resources
+    /// indirect Form `XObject` and referenced from this page's `/Resources
     /// /XObject` dict via `/Fm<idx>`. The page's `operations` Vec
     /// references them through `PdfOp::DrawFormXObject { index }`.
     pub(crate) form_xobjects: Vec<FormXObjectData>,
@@ -242,7 +242,7 @@ impl PageContent {
 }
 
 /// Transcode `text` into PDF `WinAnsiEncoding` bytes, substituting `?`
-/// per-char for codepoints outside the WinAnsi repertoire. WS-1A treats
+/// per-char for codepoints outside the `WinAnsi` repertoire. WS-1A treats
 /// non-mappable codepoints as unrenderable on built-in fonts; WS-1B
 /// will replace this fallback with a split-and-promote onto a Unicode
 /// face. The substitution is per-char so a single rogue codepoint in
@@ -341,7 +341,7 @@ fn char_is_winansi(ch: char) -> bool {
 
 /// Escape a byte buffer for PDF literal string encoding (`(...)`).
 /// Parentheses and backslashes must be escaped per ISO 32000-1 §7.3.4.2.
-/// Accepts arbitrary bytes — used after WinAnsi transcoding so the input
+/// Accepts arbitrary bytes — used after `WinAnsi` transcoding so the input
 /// is already in the encoding the built-in font expects.
 fn pdf_escape(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
@@ -378,8 +378,7 @@ pub(crate) const FALLBACK_FONT_FAMILY: &str = "__pdfun_fallback";
 /// Bundled `DejaVu` Sans font bytes. Kept inside a Cargo feature gate so
 /// users who ship their own `@font-face` can drop the ~750 KB.
 #[cfg(feature = "bundled-fallback-font")]
-pub(crate) const FALLBACK_FONT_BYTES: &[u8] =
-    include_bytes!("../assets/fonts/DejaVuSans.ttf");
+pub(crate) const FALLBACK_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
 
 /// True if `name` refers to an embedded (subset+embed) face — either a
 /// user-registered `Custom-N` or the bundled `__pdfun_fallback`. All
@@ -685,8 +684,8 @@ fn build_custom_font_data(
 /// Collect the unique opacities referenced by `SetAlpha` ops in `ops`,
 /// returning them in first-seen order. The index in the returned `Vec`
 /// plus 1 becomes the suffix of the `/GsN` `ExtGState` resource name.
-/// Used both for top-level page content and for captured Form XObject
-/// content streams (each XObject carries its own resource dict).
+/// Used both for top-level page content and for captured Form `XObject`
+/// content streams (each `XObject` carries its own resource dict).
 fn collect_alphas_in_ops(ops: &[PdfOp]) -> Vec<f32> {
     let mut out: Vec<f32> = Vec::new();
     for op in ops {
@@ -1364,8 +1363,11 @@ impl PdfDocument {
             // captured on this page. The XObjects are emitted below;
             // the page's /Resources /XObject dict references each as
             // `/Fm<idx>`.
-            let form_xobject_refs: Vec<Ref> =
-                page.form_xobjects.iter().map(|_| allocator.alloc()).collect();
+            let form_xobject_refs: Vec<Ref> = page
+                .form_xobjects
+                .iter()
+                .map(|_| allocator.alloc())
+                .collect();
 
             let content_bytes =
                 write_page_content_stream(&page, &font_refs, &custom_data, &page_alphas);
@@ -1438,8 +1440,7 @@ impl PdfDocument {
             // transparency model. PDF 1.4+. ISO 32000-1 §11.6.5.
             for (fm_data, fm_ref) in page.form_xobjects.iter().zip(form_xobject_refs.iter()) {
                 let fm_alphas = collect_alphas_in_ops(&fm_data.operations);
-                let fm_alpha_refs: Vec<Ref> =
-                    fm_alphas.iter().map(|_| allocator.alloc()).collect();
+                let fm_alpha_refs: Vec<Ref> = fm_alphas.iter().map(|_| allocator.alloc()).collect();
                 let fm_content =
                     write_ops(&fm_data.operations, &font_refs, &custom_data, &fm_alphas);
                 let compressed_fm = image::compress(&fm_content);
@@ -1470,10 +1471,8 @@ impl PdfDocument {
                             let mut xobjects = resources.x_objects();
                             for &img_idx in &fm_data.images_used {
                                 let resource_name = format!("Im{img_idx}");
-                                xobjects.pair(
-                                    Name(resource_name.as_bytes()),
-                                    image_refs[img_idx].0,
-                                );
+                                xobjects
+                                    .pair(Name(resource_name.as_bytes()), image_refs[img_idx].0);
                             }
                             for &nested_idx in &fm_data.nested_xobjects {
                                 let resource_name = format!("Fm{nested_idx}");
