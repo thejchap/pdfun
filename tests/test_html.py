@@ -4943,7 +4943,7 @@ with describe("opacity"):
 
 
 with describe("rgba/hsla alpha plumbing (WS-2)"):
-    """End-to-end coverage for `rgba()` / `hsla()` α < 1.0 flowing all
+    """End-to-end coverage for `rgba()` / `hsla()` alpha < 1.0 flowing all
     the way through to PDF's ExtGState `ca` / `CA` channels. ISO
     32000-1 §11.3.7."""
 
@@ -4973,7 +4973,7 @@ with describe("rgba/hsla alpha plumbing (WS-2)"):
         expect(data).to_contain(b"/CA 0.5")
 
     @test
-    def translucent_border_uses_CA():
+    def translucent_border_uses_ca_channel():
         """A translucent border (`rgba(0,0,255,0.5)` on a stroked rect)
         emits the `/Gs<N> gs` gate before the `0 0 1 RG` stroke color
         — and the ExtGState entry sets `CA` (stroking alpha)."""
@@ -4994,7 +4994,7 @@ with describe("rgba/hsla alpha plumbing (WS-2)"):
 
     @test
     def opaque_color_emits_no_extgstate():
-        """`rgba(...)` with α = 1.0 (or plain `rgb()`) does NOT emit a
+        """`rgba(...)` with alpha = 1.0 (or plain `rgb()`) does NOT emit a
         `/Gs<N> gs` gate — only the opaque rg/RG ops. Cheap path."""
         html = '<p style="color: rgba(255, 0, 0, 1.0)">opaque</p>'
         data = HtmlDocument(string=html).to_bytes()
