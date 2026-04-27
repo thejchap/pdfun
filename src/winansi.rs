@@ -25,8 +25,11 @@ pub fn transcode_to_pdf_winansi(s: &str) -> Result<Vec<u8>, char> {
 /// Returns `None` if the codepoint is not in the WinAnsi repertoire.
 fn char_to_winansi_byte(ch: char) -> Option<u8> {
     let cp = ch as u32;
-    // ASCII passes through unchanged.
-    if cp < 0x80 {
+    // ASCII (0x00..=0x7E) passes through unchanged. U+007F is the DEL
+    // control character — PDF's WinAnsi puts the bullet glyph at byte
+    // 0x7F instead, so we have no canonical byte to emit for U+007F.
+    // Treat it as out-of-range so the caller can fallback or substitute.
+    if cp < 0x7F {
         return Some(cp as u8);
     }
     // 0x80..=0x9F: PDF defines specific glyphs in this window — these
@@ -83,5 +86,52 @@ mod tests {
         assert_eq!(transcode_to_pdf_winansi("•"), Ok(vec![0x95]));
         assert_eq!(transcode_to_pdf_winansi("Œ"), Ok(vec![0x8C]));
         assert_eq!(transcode_to_pdf_winansi("€"), Ok(vec![0x80]));
+    }
+
+    /// ISO 32000-1 Annex D.2 — PDF's `WinAnsiEncoding` defines the seven
+    /// slots that Windows-1252 leaves undefined (0x7F, 0x81, 0x8D, 0x8F,
+    /// 0x90, 0x9D, 0xAD) as `bullet`. A transcoder built from `iconv
+    /// WINDOWS-1252` would either error on those slots or assign them
+    /// to other glyphs — this test guards the invariants that follow:
+    ///
+    /// 1. The Unicode bullet (U+2022) must round-trip to byte 0x95
+    ///    (the canonical bullet slot).
+    /// 2. Soft hyphen (U+00AD) — which Latin-1 puts at byte 0xAD — must
+    ///    map to bullet (0x95) per the PDF spec, not to its Latin-1
+    ///    byte. (Iconv would emit 0xAD; PDF would render that as
+    ///    bullet too, but we normalize on 0x95 to keep the encoding
+    ///    consistent with the spec's documented bullet slot.)
+    /// 3. None of the seven "undefined-in-Win-1252" output bytes
+    ///    (0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D, 0xAD) is ever produced
+    ///    for a non-bullet input — i.e. our table never accidentally
+    ///    maps some other glyph there.
+    #[test]
+    fn pdf_winansi_undefined_slots_map_to_bullet() {
+        // (1) Canonical bullet round-trips to 0x95.
+        assert_eq!(transcode_to_pdf_winansi("\u{2022}"), Ok(vec![0x95]));
+        // (2) Soft hyphen -> bullet per PDF spec.
+        assert_eq!(transcode_to_pdf_winansi("\u{00AD}"), Ok(vec![0x95]));
+
+        // (3) Sweep every Unicode codepoint that *can* map (the table
+        // is finite) and verify none of the undefined slots show up.
+        const UNDEFINED_SLOTS: [u8; 7] = [0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D, 0xAD];
+        // Scan a generous range covering ASCII, Latin-1, the 0x80-9F
+        // override window, and the small set of higher codepoints in
+        // the WinAnsi repertoire (Œ, ž, etc. — all <= U+20AC).
+        for cp in 0x00u32..=0x20ACu32 {
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
+            let Ok(bytes) = transcode_to_pdf_winansi(&ch.to_string()) else {
+                continue;
+            };
+            for b in bytes {
+                assert!(
+                    !UNDEFINED_SLOTS.contains(&b) || b == 0x95,
+                    "codepoint U+{cp:04X} produced byte 0x{b:02X} which is a Win-1252 undefined slot \
+                     that PDF maps to bullet — only U+2022/U+00AD should reach a bullet byte (0x95)"
+                );
+            }
+        }
     }
 }
