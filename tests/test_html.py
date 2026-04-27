@@ -12,6 +12,33 @@ from tests._pdf_helpers import content_stream
 _FIXTURE_TTF_PATH = Path(__file__).parent / "fixtures" / "font.ttf"
 
 
+def _find_text_x(content: bytes, marker: bytes) -> float | None:
+    """Find the x-coordinate (operand 1) of the most recent `Td` operator
+    preceding `marker` in `content`. Returns `None` if no Td is found.
+
+    The PDF text operator `tx ty Td` carries the baseline position in
+    operands `tx ty`. The renderer emits text positions via `Td` (move
+    to next line), so this is the right hook for "where did cell text X
+    get drawn?" assertions.
+    """
+    idx = content.find(marker)
+    if idx < 0:
+        return None
+    td_idx = content.rfind(b" Td\n", 0, idx)
+    if td_idx < 0:
+        return None
+    line_start = content.rfind(b"\n", 0, td_idx)
+    if line_start < 0:
+        line_start = 0
+    line = content[line_start + 1 : td_idx].split()
+    if len(line) < 2:
+        return None
+    try:
+        return float(line[0])
+    except ValueError:
+        return None
+
+
 def _font_data_uri(b: bytes | None = None) -> str:
     raw = b if b is not None else _FIXTURE_TTF_PATH.read_bytes()
     return "data:font/ttf;base64," + base64.b64encode(raw).decode()
@@ -3750,6 +3777,65 @@ with describe("tables"):
         content = content_stream(data)
         expect(content).to_contain(b"Left")
         expect(content).to_contain(b"Right")
+
+    # spec: CSS 2.1 §17.5.2 (WS-5)
+    @test
+    def cobra_cost_table_columns():
+        """Mirror the COBRA cost table's 30%/10%/60% colgroup hints and
+        verify the cell-text x-coordinates land at approximately the
+        column boundaries.
+
+        Default page is 612pt wide with 1in (72pt) margins, so the
+        usable column area is 468pt. After the table's own margin (0pt
+        by default) the column boundaries fall at:
+
+            col 0:  72pt        (start)
+            col 1:  72 + 0.3*468 = 212.4pt
+            col 2:  72 + 0.4*468 = 259.2pt
+            (right edge: 540pt)
+
+        Cell text is offset by the cell's left padding (default 6pt).
+        The PDF `Td` operator `x y Td` gives the baseline position, so
+        we look for `Tm`/`Td` operands matching the expected x.
+        """
+        html = (
+            "<table>"
+            "<colgroup>"
+            '<col style="width: 30%">'
+            '<col style="width: 10%">'
+            '<col style="width: 60%">'
+            "</colgroup>"
+            "<tr><td>A</td><td>B</td><td>C</td></tr>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # All three cells render
+        expect(content).to_contain(b"(A) Tj")
+        expect(content).to_contain(b"(B) Tj")
+        expect(content).to_contain(b"(C) Tj")
+        # The text-position lines for A, B, C must be in increasing x.
+        # Each cell-text "<x> <y> Td" precedes its "(.) Tj" line.
+        ax = _find_text_x(content, b"(A) Tj")
+        bx = _find_text_x(content, b"(B) Tj")
+        cx = _find_text_x(content, b"(C) Tj")
+        assert ax is not None and bx is not None and cx is not None, (
+            f"expected three Td/Tj pairs; got x positions {ax}, {bx}, {cx}"
+        )
+        assert ax < bx < cx, (
+            f"col x-positions out of order — expected ax < bx < cx, "
+            f"got {ax}, {bx}, {cx}"
+        )
+        # Approximate location asserts: col 1 starts ~140pt to the right
+        # of col 0; col 2 ~47pt to the right of col 1. Allow 1pt slop
+        # for padding rounding.
+        assert 130 < (bx - ax) < 150, (
+            f"expected col 0→1 gap ≈ 30% of 468 = 140pt; got {bx - ax}"
+        )
+        assert 35 < (cx - bx) < 60, (
+            f"expected col 1→2 gap ≈ 10% of 468 = 47pt; got {cx - bx}"
+        )
 
     # spec: CSS 2.1 §17.5.1 painter's order, §17.3 col properties (WS-5)
     @test
