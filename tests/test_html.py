@@ -808,20 +808,22 @@ with describe("HtmlDocument - WinAnsi text encoding (WS-1A)"):
         content = content_stream(data)
         # The hex string between < > carries every byte uppercase-hex:
         # so 0x97 em-dash appears as "97", 0x93 as "93", 0x94 as "94".
-        assert b"<" in content and b">" in content, "expected hex string form"
+        assert b"<" in content
+        assert b">" in content
         # Find the hex-string segment for our text and assert the
         # expected bytes are present.
         import re
 
+        found_run = False
         for m in re.finditer(rb"<([0-9A-Fa-f]+)>", content):
             hexbytes = bytes.fromhex(m.group(1).decode())
             if b"he said" in hexbytes:
                 assert b"\x97" in hexbytes, "em-dash 0x97 missing"
                 assert b"\x93" in hexbytes, "left-quote 0x93 missing"
                 assert b"\x94" in hexbytes, "right-quote 0x94 missing"
+                found_run = True
                 break
-        else:
-            raise AssertionError("text run with 'he said' not found")
+        assert found_run, "text run with 'he said' not found"
 
     @test
     def disc_marker_is_bullet():
@@ -866,8 +868,7 @@ with describe("HtmlDocument - WinAnsi text encoding (WS-1A)"):
         finally:
             pdf.close()
         assert spanish in extracted, (
-            f"text layer extraction expected to contain {spanish!r}, "
-            f"got {extracted!r}"
+            f"text layer extraction expected to contain {spanish!r}, got {extracted!r}"
         )
 
     @test
