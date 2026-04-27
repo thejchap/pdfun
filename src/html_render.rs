@@ -1549,11 +1549,14 @@ impl<'a> HtmlRenderer<'a> {
                     }
                 });
 
-                // Built-in PDF fonts use WinAnsi encoding, which has limited
-                // Unicode support. Use ASCII-safe marker glyphs.
+                // Built-in PDF fonts use WinAnsi encoding. Disc maps
+                // to the bullet glyph (U+2022) which transcodes to
+                // WinAnsi byte 0x95; Circle and Square stay ASCII
+                // because their canonical glyphs (◦ U+25E6, ■ U+25A0)
+                // are outside WinAnsi.
                 let marker_text = match resolved_lst {
                     css::ListStyleType::None => String::new(),
-                    css::ListStyleType::Disc => "*".to_string(),
+                    css::ListStyleType::Disc => "\u{2022}".to_string(),
                     css::ListStyleType::Circle => "o".to_string(),
                     css::ListStyleType::Square => "#".to_string(),
                     css::ListStyleType::Decimal => format!("{}.", entry.counter),

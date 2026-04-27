@@ -439,11 +439,13 @@ with describe("HtmlDocument - lists"):
 
     @test
     def ul_has_bullet_marker():
-        """<ul><li> has a disc bullet marker (rendered as ASCII '*')."""
+        """<ul><li> emits a disc bullet marker as WinAnsi byte 0x95
+        (the PDF-spec bullet • slot). Pre-WS-1A this rendered as the
+        ASCII '*' substitute."""
         doc = HtmlDocument(string="<ul><li>Item</li></ul>")
         data = doc.to_bytes()
         content = content_stream(data)
-        expect(content).to_contain(b"(*)")
+        expect(content).to_contain(b"<95>")
 
     @test
     def ul_multiple_items():
@@ -504,8 +506,9 @@ with describe("HtmlDocument - lists"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         content = content_stream(data)
-        # depth 0 = disc ('*'), depth 1 = circle ('o')
-        expect(content).to_contain(b"(*)")
+        # depth 0 = disc (WinAnsi byte 0x95 -> hex `<95>`),
+        # depth 1 = circle (ASCII 'o' -> literal `(o)`).
+        expect(content).to_contain(b"<95>")
         expect(content).to_contain(b"(o)")
 
     @test
@@ -819,6 +822,23 @@ with describe("HtmlDocument - WinAnsi text encoding (WS-1A)"):
                 break
         else:
             raise AssertionError("text run with 'he said' not found")
+
+    @test
+    def disc_marker_is_bullet():
+        """The list `Disc` marker emits the WinAnsi bullet byte (0x95),
+        not an ASCII asterisk substitute. pdf-writer hex-encodes
+        non-ASCII Tj literals — so we look for `<95>` (the marker
+        emitted by itself) or `95` inside a hex run."""
+        doc = HtmlDocument(string="<ul><li>x</li></ul>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Negative: the asterisk substitute is gone.
+        assert b"(*)" not in content, (
+            "list disc marker still emits ASCII '*' instead of WinAnsi bullet 0x95"
+        )
+        # Positive: a Tj of just byte 0x95 — pdf-writer renders
+        # non-ASCII byte strings as `<95>`.
+        assert b"<95>" in content, f"expected `<95> Tj` for bullet, got: {content!r}"
 
     @test
     def winansi_non_mappable_falls_back_to_question_mark():
@@ -3006,13 +3026,15 @@ with describe("list-style-type"):
 
     @test
     def disc_marker_explicit():
-        """list-style-type: disc produces '*' ASCII marker."""
+        """list-style-type: disc produces WinAnsi bullet byte 0x95
+        (rendered as `<95>` in the content stream by pdf-writer when
+        the literal contains non-ASCII)."""
         doc = HtmlDocument(
             string='<ul style="list-style-type: disc"><li>Item</li></ul>'
         )
         data = doc.to_bytes()
         content = content_stream(data)
-        expect(content).to_contain(b"(*)")
+        expect(content).to_contain(b"<95>")
 
     @test
     def square_marker():
@@ -3038,9 +3060,10 @@ with describe("list-style-type"):
         # Both contain "Item" but the "none" variant has no marker
         expect(data_with_content).to_contain(b"Item")
         expect(data_none_content).to_contain(b"Item")
-        # The marker ShowText call is absent in the "none" version
-        assert b"(*)" in data_with_content
-        assert b"(*)" not in data_none_content
+        # The marker ShowText call is absent in the "none" version.
+        # Disc renders as WinAnsi bullet byte 0x95 (`<95>` hex form).
+        assert b"<95>" in data_with_content
+        assert b"<95>" not in data_none_content
 
     @test
     def decimal_via_stylesheet():
@@ -3080,7 +3103,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
     @test
     def inside_renders_marker_and_text():
@@ -3091,7 +3115,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
     # spec: CSS Lists 3 §3; behaviors: lists-style-position
     @test
@@ -3119,7 +3144,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
 
 with describe("definition lists and figures"):
