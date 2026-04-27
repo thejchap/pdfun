@@ -88,6 +88,18 @@ mod tests {
         assert_eq!(transcode_to_pdf_winansi("€"), Ok(vec![0x80]));
     }
 
+    /// Codepoints outside the WinAnsi repertoire surface as `Err(c)`
+    /// carrying the offending character. WS-1B uses the carried char to
+    /// decide whether to split the run onto a Unicode-capable fallback.
+    #[test]
+    fn winansi_errs_on_non_win1252() {
+        // U+2611 BALLOT BOX WITH CHECK — definitely not in WinAnsi.
+        assert_eq!(transcode_to_pdf_winansi("\u{2611}"), Err('\u{2611}'));
+        // The error must carry the *first* non-mappable char, not the
+        // last, so the splitter can preserve the WinAnsi-safe prefix.
+        assert_eq!(transcode_to_pdf_winansi("ok ☑ done"), Err('\u{2611}'));
+    }
+
     /// ISO 32000-1 Annex D.2 — PDF's `WinAnsiEncoding` defines the seven
     /// slots that Windows-1252 leaves undefined (0x7F, 0x81, 0x8D, 0x8F,
     /// 0x90, 0x9D, 0xAD) as `bullet`. A transcoder built from `iconv
