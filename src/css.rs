@@ -457,6 +457,170 @@ pub struct PageStyle {
     pub margin_boxes: MarginBoxes,
 }
 
+/// Which side of a page spread a `:left` / `:right` pseudo-class targets.
+/// Per CSS Paged Media L3 §4.4 the side is determined by the page parity
+/// in the writing direction. pdfun assumes LTR for now (page 1 = right);
+/// a follow-up workstream will plumb `direction: rtl` from `<html>`.
+// TODO(WS-4 follow-up): honor `direction: rtl` so RTL docs treat
+// page 1 as `:left`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageSide {
+    Left,
+    Right,
+}
+
+/// Parsed prelude of an `@page` rule. Each pseudo-class flag (or named
+/// page slot) contributes to the CSS Paged Media L3 §4.4 specificity
+/// tuple `(f, g, h)` where:
+///
+/// - `f` = page-name count + `:nth(N)` count
+/// - `g` = `:first` + `:blank` count
+/// - `h` = `:left` + `:right` count
+///
+/// A page can match multiple selectors at once (e.g. `:first:right` on
+/// page 1 of an LTR document beats both `:first` and `:right`
+/// individually). The cascade is therefore *not* first-match-wins —
+/// `resolve_page_style` walks every matching rule in ascending
+/// specificity order and merges per-property.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PageSelector {
+    /// Page name slot (e.g. `@page cover { … }`). Pages aren't bound to
+    /// names yet — when set, the selector is parsed but never matches.
+    /// TODO(WS-4 follow-up): plumb `page: <name>` element styles.
+    pub page_name: Option<String>,
+    /// `:first` — matches the first generated page.
+    pub first: bool,
+    /// `:blank` — matches a page forced empty by `break-before: page`.
+    /// pdfun's pagination doesn't yet expose forced-empty pages, so
+    /// `:blank` is parsed and stored but never matches in v1.
+    /// TODO(WS-4 follow-up): synthesize-empty-page detection.
+    pub blank: bool,
+    /// `:left` / `:right` — page parity in the writing direction.
+    pub side: Option<PageSide>,
+    /// `:nth(N)` — literal integer page index. `An+B` form is a v1 cut.
+    /// TODO(WS-4 follow-up): full `An+B` grammar.
+    pub nth: Option<u32>,
+}
+
+impl PageSelector {
+    /// CSS Paged Media L3 §4.4 specificity tuple. Larger tuples win in
+    /// the per-property cascade.
+    pub fn specificity(&self) -> (u16, u16, u16) {
+        let f = u16::from(self.page_name.is_some()) + u16::from(self.nth.is_some());
+        let g = u16::from(self.first) + u16::from(self.blank);
+        let h = u16::from(self.side.is_some());
+        (f, g, h)
+    }
+
+    /// Returns `true` if this selector matches the page at `page_num`
+    /// (1-indexed). LTR-only: page 1 is `:right`, page 2 is `:left`,
+    /// etc. `:blank` never matches in v1; named pages don't match
+    /// because the element-binding is not implemented yet.
+    pub fn matches(&self, page_num: usize, _total_pages: usize) -> bool {
+        if self.page_name.is_some() {
+            return false;
+        }
+        if self.blank {
+            return false;
+        }
+        if self.first && page_num != 1 {
+            return false;
+        }
+        if let Some(side) = self.side {
+            // LTR: odd 1-indexed pages are right-hand, even are left.
+            let actual = if page_num.is_multiple_of(2) {
+                PageSide::Left
+            } else {
+                PageSide::Right
+            };
+            if side != actual {
+                return false;
+            }
+        }
+        if let Some(n) = self.nth
+            && page_num as u32 != n
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Parse an `@page` prelude (the text between `@page` and the opening
+/// `{`) into a `PageSelector`. Recognized syntax:
+///
+/// ```text
+/// @page                  -> default selector, matches every page
+/// @page :first           -> matches page 1
+/// @page :left | :right   -> matches by parity (LTR)
+/// @page :blank           -> stored, never matches in v1
+/// @page :nth(N)          -> matches page N (literal integer)
+/// @page :first:right     -> combined; specificity sums per-component
+/// @page name             -> page-name slot (parsed, never matches in v1)
+/// @page name:first       -> page-name + first
+/// ```
+///
+/// Unknown pseudo-class tokens are silently dropped — matching browser
+/// behavior for paged-media at-rules with unknown flags. Whitespace
+/// around the prelude is trimmed.
+pub(crate) fn parse_page_selector(prelude: &str) -> PageSelector {
+    let prelude = prelude.trim();
+    let mut selector = PageSelector::default();
+    if prelude.is_empty() {
+        return selector;
+    }
+
+    // Split on `:` to separate the optional page-name from the
+    // pseudo-class chain. The first segment (before any `:`) is the page
+    // name; subsequent segments are pseudo-class names possibly carrying
+    // `(args)`.
+    let mut segments = prelude.split(':');
+    if let Some(name) = segments.next() {
+        let name = name.trim();
+        if !name.is_empty() {
+            selector.page_name = Some(name.to_string());
+        }
+    }
+
+    for seg in segments {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        // Detect `nth(...)` — strip arg list before matching.
+        let (token, arg) = if let Some(open) = seg.find('(') {
+            let close = seg.rfind(')').unwrap_or(seg.len());
+            let arg = if close > open + 1 {
+                Some(seg[open + 1..close].trim())
+            } else {
+                None
+            };
+            (&seg[..open], arg)
+        } else {
+            (seg, None)
+        };
+        match token.to_ascii_lowercase().as_str() {
+            "first" => selector.first = true,
+            "blank" => selector.blank = true,
+            "left" => selector.side = Some(PageSide::Left),
+            "right" => selector.side = Some(PageSide::Right),
+            "nth" => {
+                if let Some(a) = arg
+                    && let Ok(n) = a.parse::<u32>()
+                {
+                    selector.nth = Some(n);
+                }
+                // TODO(WS-4 follow-up): full `An+B` form.
+            }
+            _ => {
+                // Unknown pseudo-class — drop silently.
+            }
+        }
+    }
+
+    selector
+}
+
 /// A single `content:` value item inside a `@page` margin box.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContentItem {
@@ -5185,6 +5349,75 @@ mod tests {
                 ContentItem::CounterPages,
             ]
         );
+    }
+
+    // ── @page pseudo-selector (WS-4) ────────────────────────
+
+    /// Helper: parse an `@page` prelude (between `@page` and `{`) into a
+    /// `PageSelector`. Used by the rung-1 parser tests; the public
+    /// stylesheet parser uses this same routine internally.
+    fn parse_page_selector_text(prelude: &str) -> PageSelector {
+        super::parse_page_selector(prelude)
+    }
+
+    #[test]
+    fn parses_at_page_first() {
+        // CSS Paged Media L3 §4.4 — `:first` is a pseudo-class, not a name.
+        let sel = parse_page_selector_text(":first");
+        assert!(sel.first);
+        assert!(!sel.blank);
+        assert!(sel.side.is_none());
+        assert!(sel.nth.is_none());
+        assert!(sel.page_name.is_none());
+        assert_eq!(sel.specificity(), (0, 1, 0));
+    }
+
+    #[test]
+    fn parses_at_page_left() {
+        let sel = parse_page_selector_text(":left");
+        assert_eq!(sel.side, Some(PageSide::Left));
+        assert_eq!(sel.specificity(), (0, 0, 1));
+    }
+
+    #[test]
+    fn parses_at_page_right() {
+        let sel = parse_page_selector_text(":right");
+        assert_eq!(sel.side, Some(PageSide::Right));
+        assert_eq!(sel.specificity(), (0, 0, 1));
+    }
+
+    #[test]
+    fn parses_at_page_blank() {
+        let sel = parse_page_selector_text(":blank");
+        assert!(sel.blank);
+        assert_eq!(sel.specificity(), (0, 1, 0));
+    }
+
+    #[test]
+    fn parses_at_page_nth_literal() {
+        let sel = parse_page_selector_text(":nth(3)");
+        assert_eq!(sel.nth, Some(3));
+        // `:nth(N)` is a `f`-class selector per CSS Paged Media L3.
+        assert_eq!(sel.specificity(), (1, 0, 0));
+    }
+
+    #[test]
+    fn parses_at_page_combined_first_right() {
+        let sel = parse_page_selector_text(":first:right");
+        assert!(sel.first);
+        assert_eq!(sel.side, Some(PageSide::Right));
+        assert_eq!(sel.specificity(), (0, 1, 1));
+    }
+
+    #[test]
+    fn parses_at_page_empty_prelude_is_universal() {
+        // Bare `@page { … }` matches every page with specificity (0, 0, 0).
+        let sel = parse_page_selector_text("");
+        assert!(!sel.first);
+        assert!(!sel.blank);
+        assert!(sel.side.is_none());
+        assert!(sel.nth.is_none());
+        assert_eq!(sel.specificity(), (0, 0, 0));
     }
 
     #[test]
