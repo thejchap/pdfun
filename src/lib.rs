@@ -216,6 +216,85 @@ pub(crate) fn transcode_with_fallback(text: &str) -> Vec<u8> {
     out
 }
 
+/// One contiguous chunk of a text run, classified by whether the entire
+/// chunk lives in the PDF `WinAnsiEncoding` repertoire (WS-1A's
+/// `transcode_to_pdf_winansi` would accept it) or contains codepoints
+/// that need promotion onto a Unicode-capable face (WS-1B's job).
+///
+/// Sequencing: the slices produced by [`split_at_non_winansi`] always
+/// alternate `WinAnsi` and `NonWinAnsi`, never two of the same kind in
+/// a row — and never an empty slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunChunk<'a> {
+    /// Substring whose every codepoint maps cleanly to a `WinAnsi` byte.
+    /// Built-in Type1 fonts can render this directly.
+    WinAnsi(&'a str),
+    /// Substring whose every codepoint is *outside* the `WinAnsi`
+    /// repertoire. Layout will promote this onto the bundled fallback
+    /// face (or, with the feature off, leave it as '?' substitutes).
+    NonWinAnsi(&'a str),
+}
+
+/// Split a text run into alternating `WinAnsi` / `NonWinAnsi` chunks
+/// based on WS-1A's transcoder verdict per char. No allocation per
+/// chunk — slices borrow from the input.
+///
+/// `"Café ☑ done"` → `[WinAnsi("Café "), NonWinAnsi("☑"), WinAnsi(" done")]`.
+pub(crate) fn split_at_non_winansi(text: &str) -> Vec<RunChunk<'_>> {
+    let mut out: Vec<RunChunk<'_>> = Vec::new();
+    if text.is_empty() {
+        return out;
+    }
+    // We walk char_indices once, batching consecutive codepoints with
+    // the same WinAnsi-mappable verdict into a single slice. The
+    // verdict is computed by feeding each char through WS-1A's
+    // transcoder via `char_is_winansi`.
+    let mut chunk_start = 0usize;
+    let mut chunk_is_win: Option<bool> = None;
+    for (idx, ch) in text.char_indices() {
+        let is_win = char_is_winansi(ch);
+        match chunk_is_win {
+            None => {
+                chunk_is_win = Some(is_win);
+                chunk_start = idx;
+            }
+            Some(prev) if prev != is_win => {
+                let slice = &text[chunk_start..idx];
+                out.push(if prev {
+                    RunChunk::WinAnsi(slice)
+                } else {
+                    RunChunk::NonWinAnsi(slice)
+                });
+                chunk_start = idx;
+                chunk_is_win = Some(is_win);
+            }
+            _ => {}
+        }
+    }
+    // Trailing chunk: covers chunk_start..text.len().
+    if let Some(prev) = chunk_is_win {
+        let slice = &text[chunk_start..];
+        if !slice.is_empty() {
+            out.push(if prev {
+                RunChunk::WinAnsi(slice)
+            } else {
+                RunChunk::NonWinAnsi(slice)
+            });
+        }
+    }
+    out
+}
+
+/// Whether a single codepoint maps cleanly to a `WinAnsi` byte. Defined
+/// as "WS-1A's transcoder accepts the one-char string". Kept private —
+/// callers outside the splitter should go through the transcoder
+/// directly so the `WinAnsi` spec lives in exactly one place.
+fn char_is_winansi(ch: char) -> bool {
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+    winansi::transcode_to_pdf_winansi(s).is_ok()
+}
+
 /// Escape a byte buffer for PDF literal string encoding (`(...)`).
 /// Parentheses and backslashes must be escaped per ISO 32000-1 §7.3.4.2.
 /// Accepts arbitrary bytes — used after WinAnsi transcoding so the input
@@ -238,7 +317,189 @@ fn pdf_escape(bytes: &[u8]) -> Vec<u8> {
 pub(crate) struct RegisteredFont {
     pub(crate) data: Vec<u8>,
     pub(crate) family: String,
-    pub(crate) name: String, // e.g. "Custom-0"
+    pub(crate) name: String, // e.g. "Custom-0" or "__pdfun_fallback"
+}
+
+/// Internal name reserved for the bundled `DejaVu` Sans fallback face. A
+/// run hits this face only when WS-1A's `WinAnsi` transcoder rejects a
+/// codepoint and WS-1B promotes that codepoint onto a Unicode-capable
+/// font. Treated like `Custom-N` everywhere — same Type0/CIDFont2
+/// Identity-H plumbing, same `ToUnicode` `CMap` pipeline.
+pub(crate) const FALLBACK_FONT_NAME: &str = "__pdfun_fallback";
+
+/// Family name advertised on the `@font-face` registry for the bundled
+/// fallback. Lower-cased internally to match cascade lookup behaviour.
+pub(crate) const FALLBACK_FONT_FAMILY: &str = "__pdfun_fallback";
+
+/// Bundled `DejaVu` Sans font bytes. Kept inside a Cargo feature gate so
+/// users who ship their own `@font-face` can drop the ~750 KB.
+#[cfg(feature = "bundled-fallback-font")]
+pub(crate) const FALLBACK_FONT_BYTES: &[u8] =
+    include_bytes!("../assets/fonts/DejaVuSans.ttf");
+
+/// True if `name` refers to an embedded (subset+embed) face — either a
+/// user-registered `Custom-N` or the bundled `__pdfun_fallback`. All
+/// embedded faces flow through the same Type0/CIDFont2/Identity-H path
+/// at PDF write time.
+pub(crate) fn is_embedded_font(name: &str) -> bool {
+    name.starts_with("Custom-") || name == FALLBACK_FONT_NAME
+}
+
+/// Eagerly validate the bundled font bytes once; cache the validated
+/// view so subsequent calls are zero-cost. Returns `Err` only if the
+/// embedded TTF fails `ttf_parser::Face::parse` — which would indicate
+/// the asset committed alongside this source is corrupt.
+#[cfg(feature = "bundled-fallback-font")]
+fn fallback_font_bytes() -> Result<&'static [u8], String> {
+    use std::sync::OnceLock;
+    static VALIDATED: OnceLock<Result<(), String>> = OnceLock::new();
+    let parsed = VALIDATED.get_or_init(|| {
+        ttf_parser::Face::parse(FALLBACK_FONT_BYTES, 0)
+            .map(|_| ())
+            .map_err(|e| format!("bundled fallback font failed to parse: {e}"))
+    });
+    match parsed {
+        Ok(()) => Ok(FALLBACK_FONT_BYTES),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+/// Append a `RegisteredFont` for the bundled fallback face if the given
+/// vector does not already carry one. Returns the registered name on
+/// success, `Err(msg)` if the embedded bytes failed eager validation,
+/// and `Ok(None)` when the `bundled-fallback-font` feature is off (the
+/// caller is expected to fall back to '?' substitution).
+///
+/// Idempotent: calling it twice on the same vector yields the existing
+/// entry the second time. The first call is the only one that pays the
+/// `ttf_parser` parse cost.
+#[allow(dead_code)]
+pub(crate) fn register_fallback_if_needed(
+    registered: &mut Vec<RegisteredFont>,
+) -> Result<Option<String>, String> {
+    if registered.iter().any(|rf| rf.name == FALLBACK_FONT_NAME) {
+        return Ok(Some(FALLBACK_FONT_NAME.to_string()));
+    }
+
+    #[cfg(feature = "bundled-fallback-font")]
+    {
+        let bytes = fallback_font_bytes()?;
+        registered.push(RegisteredFont {
+            data: bytes.to_vec(),
+            family: FALLBACK_FONT_FAMILY.to_string(),
+            name: FALLBACK_FONT_NAME.to_string(),
+        });
+        Ok(Some(FALLBACK_FONT_NAME.to_string()))
+    }
+
+    #[cfg(not(feature = "bundled-fallback-font"))]
+    {
+        let _ = registered; // suppress unused-mut warning when feature is off
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_font_registers_lazily() {
+        // Empty registry: nothing has been registered yet.
+        let mut registered: Vec<RegisteredFont> = Vec::new();
+        assert!(registered.iter().all(|rf| rf.name != FALLBACK_FONT_NAME));
+
+        // First call: registers exactly one entry named __pdfun_fallback
+        // (under the default-on `bundled-fallback-font` feature). With
+        // the feature off this returns Ok(None) and registers nothing.
+        let first = register_fallback_if_needed(&mut registered).expect("ok");
+        if cfg!(feature = "bundled-fallback-font") {
+            assert_eq!(first, Some(FALLBACK_FONT_NAME.to_string()));
+            assert_eq!(registered.len(), 1);
+            assert_eq!(registered[0].name, FALLBACK_FONT_NAME);
+            assert_eq!(registered[0].family, FALLBACK_FONT_FAMILY);
+            assert!(!registered[0].data.is_empty());
+        } else {
+            assert_eq!(first, None);
+            assert!(registered.is_empty());
+            return;
+        }
+
+        // Second call: idempotent — no new entry, returns the same name.
+        let second = register_fallback_if_needed(&mut registered).expect("ok");
+        assert_eq!(second, Some(FALLBACK_FONT_NAME.to_string()));
+        assert_eq!(registered.len(), 1);
+    }
+
+    #[cfg(feature = "bundled-fallback-font")]
+    #[test]
+    fn fallback_font_bytes_parse_via_ttf_parser() {
+        // Eager validation: the embedded asset must round-trip through
+        // ttf_parser::Face::parse without error so we never produce a
+        // corrupt PDF embed.
+        let bytes = fallback_font_bytes().expect("bundled font parses");
+        ttf_parser::Face::parse(bytes, 0).expect("ttf_parser accepts bytes");
+    }
+
+    #[test]
+    fn embedded_font_classifier_accepts_fallback() {
+        assert!(is_embedded_font(FALLBACK_FONT_NAME));
+        assert!(is_embedded_font("Custom-0"));
+        assert!(is_embedded_font("Custom-42"));
+        assert!(!is_embedded_font("Helvetica"));
+        assert!(!is_embedded_font("Times-Roman"));
+    }
+
+    #[test]
+    fn split_run_at_non_winansi() {
+        // Mixed run from the COBRA fixture: a Latin-1 prefix, a single
+        // non-WinAnsi codepoint, then a Latin-1 suffix. The splitter
+        // must produce exactly three alternating chunks; no empty
+        // slices, no double-classification.
+        let chunks = split_at_non_winansi("Café ☑ done");
+        assert_eq!(
+            chunks,
+            vec![
+                RunChunk::WinAnsi("Café "),
+                RunChunk::NonWinAnsi("☑"),
+                RunChunk::WinAnsi(" done"),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_pure_winansi_run_is_single_chunk() {
+        let chunks = split_at_non_winansi("Café au lait");
+        assert_eq!(chunks, vec![RunChunk::WinAnsi("Café au lait")]);
+    }
+
+    #[test]
+    fn split_pure_non_winansi_run_is_single_chunk() {
+        let chunks = split_at_non_winansi("☑☐");
+        assert_eq!(chunks, vec![RunChunk::NonWinAnsi("☑☐")]);
+    }
+
+    #[test]
+    fn split_empty_run_yields_no_chunks() {
+        let chunks = split_at_non_winansi("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn split_consecutive_non_winansi_chars_collapse() {
+        // Two non-WinAnsi codepoints back-to-back must collapse into a
+        // single NonWinAnsi chunk — the layout-side promotion path is
+        // cheaper if it can emit one BeginText/EndText per chunk.
+        let chunks = split_at_non_winansi("a☑☐b");
+        assert_eq!(
+            chunks,
+            vec![
+                RunChunk::WinAnsi("a"),
+                RunChunk::NonWinAnsi("☑☐"),
+                RunChunk::WinAnsi("b"),
+            ]
+        );
+    }
 }
 
 // ── Indirect-ref allocator ─────────────────────────────────────
@@ -763,7 +1024,7 @@ fn write_font_objects(
     custom_data: &BTreeMap<String, CustomFontData>,
 ) {
     for fr in font_refs {
-        if fr.name.starts_with("Custom-") {
+        if is_embedded_font(&fr.name) {
             let Some(cfd) = custom_data.get(&fr.name) else {
                 continue;
             };
@@ -846,7 +1107,7 @@ fn write_font_objects(
 #[pyclass]
 pub(crate) struct PdfDocument {
     pub(crate) pages: Vec<Arc<Mutex<PageContent>>>,
-    registered_fonts: Vec<RegisteredFont>,
+    pub(crate) registered_fonts: Vec<RegisteredFont>,
     pub(crate) images: Vec<image::ImageData>,
     pub(crate) title: Option<String>,
     pub(crate) author: Option<String>,
@@ -945,7 +1206,7 @@ impl PdfDocument {
         let font_refs: Vec<FontRefs> = all_fonts
             .iter()
             .map(|name| {
-                let is_custom = name.starts_with("Custom-");
+                let is_custom = is_embedded_font(name);
                 FontRefs {
                     name: name.clone(),
                     type0_ref: allocator.alloc(),

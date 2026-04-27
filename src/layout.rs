@@ -8,22 +8,81 @@ use crate::css;
 use crate::font_metrics;
 use crate::{BUILTIN_FONTS, PageContent, PdfDocument, PdfOp, RegisteredFont};
 
-/// Emit the right "show text" operator for a font: built-in fonts use
-/// `Tj` with a `(WinAnsi)` literal string, but `@font-face` faces are
-/// embedded as Type0 / `CIDFontType2` / Identity-H — for those we have
-/// to emit a `Vec<char>` that the page writer remaps into 16-bit glyph
-/// IDs.
+/// Push the right sequence of ops to render `text` at `font_size` using
+/// `font_name` as the active face. For embedded faces (`Custom-*`,
+/// `__pdfun_fallback`) this is a single `ShowGlyphs`. For built-in
+/// (Type1, `WinAnsi`-encoded) faces, runs whose every codepoint is in the
+/// `WinAnsi` repertoire emit a `ShowText` with the transcoded bytes.
 ///
-/// For the built-in path, transcode the input UTF-8 text into PDF's
-/// `WinAnsiEncoding` byte string here so the content stream carries
-/// the bytes the viewer expects (`Caf\xe9`, not the raw UTF-8 `Caf\xc3\xa9`).
-/// Non-mappable codepoints fall back to `?` per char — WS-1B will
-/// replace that fallback with a split-and-promote onto a Unicode face.
-fn show_text_for(font_name: &str, text: String) -> PdfOp {
-    if font_name.starts_with("Custom-") {
-        PdfOp::ShowGlyphs(text.chars().collect())
-    } else {
-        PdfOp::ShowText(crate::transcode_with_fallback(&text))
+/// Mixed runs (e.g. `"Café ☑ done"` on Helvetica) are split via
+/// [`crate::split_at_non_winansi`] and the non-`WinAnsi` chunks promoted
+/// onto the bundled `__pdfun_fallback` Identity-H face — emitting an
+/// in-line `Tf` switch + `ShowGlyphs` then switching back. WS-1B
+/// guarantees the surrounding `BeginText`/`EndText` brackets stay
+/// intact; PDF allows `Tf` inside a text object.
+///
+/// When the `bundled-fallback-font` feature is disabled, non-`WinAnsi`
+/// chunks fall back to per-char '?' substitution (the WS-1A bound).
+fn push_show_text(page: &mut PageContent, font_name: &str, font_size: f32, text: &str) {
+    if crate::is_embedded_font(font_name) {
+        page.operations.push(PdfOp::ShowGlyphs(text.chars().collect()));
+        return;
+    }
+    // Built-in path: split into alternating WinAnsi / non-WinAnsi
+    // chunks. A pure-WinAnsi run (the common case) collapses into a
+    // single chunk and emits exactly one `ShowText`.
+    let chunks = crate::split_at_non_winansi(text);
+    if chunks.is_empty() {
+        return;
+    }
+    let only_winansi = chunks
+        .iter()
+        .all(|c| matches!(c, crate::RunChunk::WinAnsi(_)));
+    if only_winansi {
+        // Hot path: avoid re-walking `text` — go straight through the
+        // WS-1A transcoder. `transcode_with_fallback` is idempotent
+        // here because every char is mappable.
+        page.operations
+            .push(PdfOp::ShowText(crate::transcode_with_fallback(text)));
+        return;
+    }
+    // Mixed run. Lazy-register the fallback name on this page's
+    // `fonts_used` so the PDF resource dict carries it; the actual
+    // `RegisteredFont` entry is populated centrally in
+    // `LayoutInner::finish` once we know any page hit this path.
+    let fallback = crate::FALLBACK_FONT_NAME;
+    let fallback_available = cfg!(feature = "bundled-fallback-font");
+    if fallback_available && !page.fonts_used.iter().any(|n| n == fallback) {
+        page.fonts_used.push(fallback.to_string());
+    }
+    for chunk in chunks {
+        match chunk {
+            crate::RunChunk::WinAnsi(s) => {
+                page.operations
+                    .push(PdfOp::ShowText(crate::transcode_with_fallback(s)));
+            }
+            crate::RunChunk::NonWinAnsi(s) => {
+                if fallback_available {
+                    // Switch to the fallback face for this chunk, then
+                    // switch back. PDF §9.4.3 allows `Tf` inside `BT…ET`.
+                    page.operations.push(PdfOp::SetFont {
+                        name: fallback.to_string(),
+                        size: font_size,
+                    });
+                    page.operations
+                        .push(PdfOp::ShowGlyphs(s.chars().collect()));
+                    page.operations.push(PdfOp::SetFont {
+                        name: font_name.to_string(),
+                        size: font_size,
+                    });
+                } else {
+                    // Feature off: bound the damage as WS-1A did —
+                    // `transcode_with_fallback` substitutes '?' per char.
+                    page.operations
+                        .push(PdfOp::ShowText(crate::transcode_with_fallback(s)));
+                }
+            }
+        }
     }
 }
 
@@ -1314,6 +1373,20 @@ impl LayoutInner {
         // so no additional scoping is needed.
         self.stamp_fixed_blocks(doc);
 
+        // Lazy-register the bundled fallback face if any page emitted a
+        // run that promoted to it. Done last so a document that never
+        // hits a non-WinAnsi codepoint pays zero parse cost. Idempotent
+        // — `register_fallback_if_needed` early-returns if the entry
+        // already exists.
+        let fallback_used = doc.pages.iter().any(|p| {
+            let page = p.lock().unwrap();
+            page.fonts_used.iter().any(|n| n == crate::FALLBACK_FONT_NAME)
+        });
+        if fallback_used {
+            crate::register_fallback_if_needed(&mut doc.registered_fonts)
+                .map_err(|e| format!("fallback font registration failed: {e}"))?;
+        }
+
         Ok(())
     }
 
@@ -2090,8 +2163,12 @@ impl LayoutInner {
                     x: marker_x,
                     y: baseline_y,
                 });
-                page.operations
-                    .push(show_text_for(&marker.font_name, marker.text.clone()));
+                push_show_text(
+                    &mut page,
+                    &marker.font_name,
+                    marker.font_size,
+                    &marker.text,
+                );
                 page.operations.push(PdfOp::EndText);
             }
 
@@ -2207,8 +2284,12 @@ impl LayoutInner {
                     x: atom_x + text_offset_x,
                     y: seg_y,
                 });
-                page.operations
-                    .push(show_text_for(&segment.font_name, segment.text.clone()));
+                push_show_text(
+                    &mut page,
+                    &segment.font_name,
+                    segment.font_size,
+                    &segment.text,
+                );
                 page.operations.push(PdfOp::EndText);
 
                 if let Some(url) = &segment.link_url {
@@ -2506,7 +2587,7 @@ impl LayoutInner {
             size: font_size,
         });
         page.operations.push(PdfOp::SetTextPosition { x, y });
-        page.operations.push(show_text_for(&font_name, text));
+        push_show_text(page, &font_name, font_size, &text);
         page.operations.push(PdfOp::EndText);
         // Restore default fill color to black so later ops (if any) see
         // a predictable state. Since margin boxes are stamped last, this
@@ -2839,8 +2920,12 @@ impl LayoutInner {
                         });
                         page.operations
                             .push(PdfOp::SetTextPosition { x, y: baseline_y });
-                        page.operations
-                            .push(show_text_for(&segment.font_name, segment.text.clone()));
+                        push_show_text(
+                            &mut page,
+                            &segment.font_name,
+                            segment.font_size,
+                            &segment.text,
+                        );
                         page.operations.push(PdfOp::EndText);
                         x += segment.width;
                     }
