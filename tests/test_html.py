@@ -871,6 +871,27 @@ with describe("HtmlDocument - WinAnsi text encoding (WS-1A)"):
         )
 
     @test
+    def spanish_text_round_trip():
+        """Integration: render Spanish text with Latin-1 codepoints
+        plus the inverted question/exclamation marks, then byte-compare
+        the extracted text against the original input. Rung 8 of the
+        WS-1A acceptance gate — this is the "Café español" defect
+        the workstream exists to fix."""
+        import fitz
+
+        original = "¿Hablas español? Instrucciones en la última página."
+        doc = HtmlDocument(string=f"<p>{original}</p>")
+        data = doc.to_bytes()
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf).strip()
+        finally:
+            pdf.close()
+        assert extracted == original, (
+            f"round-trip mismatch:\n  expected: {original!r}\n  got: {extracted!r}"
+        )
+
+    @test
     def winansi_non_mappable_falls_back_to_question_mark():
         """A codepoint outside WinAnsi (e.g. U+2611 ballot box) falls
         back to '?' on built-in fonts (WS-1A bound). WS-1B will
