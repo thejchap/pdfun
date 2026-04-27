@@ -746,16 +746,24 @@ with describe("HtmlDocument - unicode"):
     @test
     def hex_entity():
         """Hex character reference &#x2603; (☃) is outside the WinAnsi
-        repertoire — on a built-in font WS-1A falls back to '?' per
-        char (WS-1B will promote to a Unicode-capable face). Pre
-        WS-1A this test asserted the UTF-8 hex `E29883`, which never
-        actually rendered as a snowman."""
+        repertoire. WS-1A bounded the damage by emitting '?'; WS-1B
+        promotes the run onto the bundled `__pdfun_fallback`
+        Identity-H face so the snowman actually renders. We assert the
+        PDF round-trips through the text layer (pymupdf decodes the
+        ToUnicode CMap)."""
+        import fitz
+
         doc = HtmlDocument(string="<p>&#x2603;</p>")
         data = doc.to_bytes()
-        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        # '?' = 0x3F; pdf-writer uses literal form for ASCII-only.
-        expect(content).to_contain(b"(?)")
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert "☃" in extracted, (
+            f"snowman did not round-trip via fallback: {extracted!r}"
+        )
 
     @test
     def multiple_named_entities():
@@ -893,14 +901,113 @@ with describe("HtmlDocument - WinAnsi text encoding (WS-1A)"):
         )
 
     @test
-    def winansi_non_mappable_falls_back_to_question_mark():
-        """A codepoint outside WinAnsi (e.g. U+2611 ballot box) falls
-        back to '?' on built-in fonts (WS-1A bound). WS-1B will
-        replace this fallback with a Unicode-capable font."""
+    def winansi_non_mappable_promotes_to_fallback():
+        """A codepoint outside WinAnsi (e.g. U+2611 ballot box) used to
+        fall back to '?' (WS-1A bound). WS-1B promotes such runs onto
+        the bundled `__pdfun_fallback` Identity-H face — so the WinAnsi
+        prefix and suffix still show as Tj literals on F1, but the
+        ballot box no longer mangles to '?'.
+
+        We assert (a) the prefix/suffix WinAnsi bytes still appear on
+        F1, (b) at least one Tf switch to F2 (the fallback face) is
+        emitted between them, and (c) no '?' substitute leaks in."""
         doc = HtmlDocument(string="<p>ok ☑ done</p>")
         data = doc.to_bytes()
         content = content_stream(data)
-        expect(content).to_contain(b"ok ? done")
+        # Prefix on F1 should still appear (either as a literal or as
+        # uppercase hex). "ok " contains only ASCII so the literal form
+        # is reliable.
+        assert b"(ok ) Tj" in content, (
+            f"expected `(ok ) Tj` on built-in font, got: {content!r}"
+        )
+        # Fallback face was activated at least once.
+        assert b"/F2" in content, (
+            f"expected fallback font /F2 in content stream, got: {content!r}"
+        )
+        # The non-WinAnsi run is no longer substituted with '?'.
+        assert b"ok ? done" not in content, (
+            "non-WinAnsi run still falls back to '?' instead of promoting"
+        )
+
+
+with describe("HtmlDocument - WS-1B fallback font"):
+    # spec: ISO 32000-1 Annex D.2 + bundled DejaVu Sans;
+    # behaviors: text-encoding-fallback-font
+
+    @test
+    def unicode_text_emits_two_fonts():
+        """Mixed run `Café ☑ done` must produce a content stream that
+        switches F1 → F2 → F1 inside the same `BT…ET` block. The
+        WinAnsi prefix/suffix go on F1 (Helvetica + WinAnsiEncoding),
+        the ballot box goes on F2 (the bundled fallback as Identity-H
+        Type0)."""
+        doc = HtmlDocument(string="<p>Café ☑ done</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # F1 (Helvetica) is set first, then F2 (fallback), then F1
+        # again. We assert by ordered substring match.
+        idx_f1 = content.find(b"/F1 12 Tf")
+        idx_f2 = content.find(b"/F2 12 Tf")
+        idx_f1_after = content.find(b"/F1 12 Tf", idx_f1 + 1)
+        assert idx_f1 != -1, f"F1 (Helvetica) not set, got: {content!r}"
+        assert idx_f2 != -1, f"F2 (fallback) not set, got: {content!r}"
+        assert idx_f1_after != -1, "fallback run did not switch back to F1"
+        assert idx_f1 < idx_f2 < idx_f1_after, (
+            f"font switches not ordered F1→F2→F1, got indices "
+            f"F1={idx_f1} F2={idx_f2} F1'={idx_f1_after}"
+        )
+        # The fallback content is a ShowGlyphs op — pdf-writer renders
+        # a Type0/Identity-H Tj as a (\xHH\xLL) literal pair.
+        # The "Café " prefix (with WinAnsi 0xE9) appears either as a
+        # parenthesised literal containing 0xE9 or as <Caf…> hex.
+        assert (
+            b"(Caf\xe9 ) Tj" in content
+            or b"<436166E920>" in content
+        ), f"WinAnsi prefix `Café ` missing, got: {content!r}"
+
+    @test
+    def fallback_face_carries_identity_h_encoding():
+        """The bundled fallback face is embedded as Type0/Identity-H
+        with a CIDFontType2 descendant — same plumbing as
+        user-supplied `@font-face`. The font dict in the PDF body must
+        carry `/Encoding /Identity-H` so viewers know how to decode the
+        glyph IDs."""
+        doc = HtmlDocument(string="<p>Café ☑ done</p>")
+        data = doc.to_bytes()
+        # Identity-H is what we declare on the Type0 wrapper; the
+        # presence of *any* Identity-H font dict tells us the fallback
+        # was registered at PDF write time.
+        assert b"/Encoding /Identity-H" in data, (
+            "fallback face missing /Encoding /Identity-H — "
+            "subsetting/embedding pipeline not engaged"
+        )
+        assert b"/Subtype /CIDFontType2" in data, (
+            "fallback face missing CIDFontType2 descendant — "
+            "Type0 embed pipeline not engaged"
+        )
+
+    @test
+    def ballot_box_round_trips_through_text_layer():
+        """Acceptance gate: a U+2611 ballot box rendered with no
+        `@font-face` declared must round-trip through the PDF text
+        layer. WS-1A made this read as '?'; WS-1B promotes it onto the
+        bundled fallback so `pymupdf.Page.get_text` recovers the
+        original codepoint."""
+        import fitz
+
+        doc = HtmlDocument(string="<p>ok ☑ done</p>")
+        data = doc.to_bytes()
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert "☑" in extracted, (
+            f"ballot box did not round-trip through text layer: {extracted!r}"
+        )
+        assert "?" not in extracted, (
+            f"text layer still shows '?' substitute: {extracted!r}"
+        )
 
 
 with describe("HtmlDocument - nesting"):

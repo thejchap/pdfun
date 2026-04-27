@@ -1023,7 +1023,7 @@ fn write_font_objects(
     custom_data: &BTreeMap<String, CustomFontData>,
 ) {
     for fr in font_refs {
-        if fr.name.starts_with("Custom-") {
+        if is_embedded_font(&fr.name) {
             let Some(cfd) = custom_data.get(&fr.name) else {
                 continue;
             };
@@ -1106,7 +1106,7 @@ fn write_font_objects(
 #[pyclass]
 pub(crate) struct PdfDocument {
     pub(crate) pages: Vec<Arc<Mutex<PageContent>>>,
-    registered_fonts: Vec<RegisteredFont>,
+    pub(crate) registered_fonts: Vec<RegisteredFont>,
     pub(crate) images: Vec<image::ImageData>,
     pub(crate) title: Option<String>,
     pub(crate) author: Option<String>,
@@ -1205,7 +1205,7 @@ impl PdfDocument {
         let font_refs: Vec<FontRefs> = all_fonts
             .iter()
             .map(|name| {
-                let is_custom = name.starts_with("Custom-");
+                let is_custom = is_embedded_font(name);
                 FontRefs {
                     name: name.clone(),
                     type0_ref: allocator.alloc(),
