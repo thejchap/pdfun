@@ -2784,13 +2784,144 @@ pub struct CssRule {
     pub style: ComputedStyle,
 }
 
+/// A single `@page` rule: its prelude (the `PageSelector`) and its
+/// declaration block (raw, unmerged). Multiple rules may match the same
+/// page; `Stylesheet::resolve_page_style` walks them in ascending
+/// specificity order and merges per-property.
+#[derive(Clone, Debug, Default)]
+pub struct PageRule {
+    pub selector: PageSelector,
+    pub decls: PageStyle,
+}
+
 /// A parsed stylesheet: a list of CSS rules.
+///
+/// `@page` rules are stored in `page_rules` in source order. Use
+/// `resolve_page_style(page_num, total_pages)` to compute the merged
+/// `PageStyle` for a given page; the merge follows CSS Paged Media L3
+/// §4.4 (specificity tuple `(f, g, h)`) and is applied per-property,
+/// not per-block, so margin boxes layered across rules combine
+/// individual properties from each.
+///
+/// `page_style` is the legacy back-compat view: it holds the resolution
+/// for a single-page document (page 1 of 1) so existing callers that
+/// haven't been migrated to `resolve_page_style` continue to work.
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
     pub rules: Vec<CssRule>,
     pub page_style: PageStyle,
+    pub page_rules: Vec<PageRule>,
     #[allow(dead_code)]
     pub font_faces: Vec<FontFaceRule>,
+}
+
+impl Stylesheet {
+    /// Resolve the effective `@page` style for `page_num` (1-indexed) in
+    /// a document of `total_pages`. Walks `self.page_rules` in
+    /// ascending specificity order (CSS Paged Media L3 §4.4) and merges
+    /// each matching rule's declarations per property. Margin boxes
+    /// cascade per-property: a more-specific `@page :first { @top-left { … } }`
+    /// only overlays the properties it sets, leaving the rest of
+    /// `@top-left`'s properties from the base `@page` intact.
+    pub fn resolve_page_style(&self, page_num: usize, total_pages: usize) -> PageStyle {
+        let mut indexed: Vec<(usize, &PageRule)> = self
+            .page_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.selector.matches(page_num, total_pages))
+            .collect();
+        // Stable sort: ascending specificity, then source-order tiebreak.
+        // Source order is the second key so that, for two rules of equal
+        // specificity, the later declaration wins (standard CSS cascade).
+        indexed.sort_by_key(|(idx, r)| (r.selector.specificity(), *idx));
+        let mut merged = PageStyle::default();
+        for (_, rule) in indexed {
+            merge_page_style(&mut merged, &rule.decls);
+        }
+        merged
+    }
+}
+
+/// Per-property merge of `src` into `dst`. Each `Some(_)` field in
+/// `src` overrides the corresponding field in `dst`; `None` fields in
+/// `src` leave `dst` unchanged. Margin boxes merge per-position with
+/// per-property semantics (see `merge_margin_box`).
+fn merge_page_style(dst: &mut PageStyle, src: &PageStyle) {
+    if src.width.is_some() {
+        dst.width = src.width;
+    }
+    if src.height.is_some() {
+        dst.height = src.height;
+    }
+    if src.margin_top.is_some() {
+        dst.margin_top = src.margin_top;
+    }
+    if src.margin_right.is_some() {
+        dst.margin_right = src.margin_right;
+    }
+    if src.margin_bottom.is_some() {
+        dst.margin_bottom = src.margin_bottom;
+    }
+    if src.margin_left.is_some() {
+        dst.margin_left = src.margin_left;
+    }
+    merge_margin_boxes(&mut dst.margin_boxes, &src.margin_boxes);
+}
+
+/// Per-position, per-property merge of margin-box declarations.
+fn merge_margin_boxes(dst: &mut MarginBoxes, src: &MarginBoxes) {
+    let positions = [
+        MarginBoxPosition::TopLeft,
+        MarginBoxPosition::TopCenter,
+        MarginBoxPosition::TopRight,
+        MarginBoxPosition::BottomLeft,
+        MarginBoxPosition::BottomCenter,
+        MarginBoxPosition::BottomRight,
+    ];
+    for pos in positions {
+        let s = match pos {
+            MarginBoxPosition::TopLeft => src.top_left.as_ref(),
+            MarginBoxPosition::TopCenter => src.top_center.as_ref(),
+            MarginBoxPosition::TopRight => src.top_right.as_ref(),
+            MarginBoxPosition::BottomLeft => src.bottom_left.as_ref(),
+            MarginBoxPosition::BottomCenter => src.bottom_center.as_ref(),
+            MarginBoxPosition::BottomRight => src.bottom_right.as_ref(),
+        };
+        let Some(s) = s else { continue };
+        let slot = match pos {
+            MarginBoxPosition::TopLeft => &mut dst.top_left,
+            MarginBoxPosition::TopCenter => &mut dst.top_center,
+            MarginBoxPosition::TopRight => &mut dst.top_right,
+            MarginBoxPosition::BottomLeft => &mut dst.bottom_left,
+            MarginBoxPosition::BottomCenter => &mut dst.bottom_center,
+            MarginBoxPosition::BottomRight => &mut dst.bottom_right,
+        };
+        let target = slot.get_or_insert_with(MarginBox::default);
+        merge_margin_box(target, s);
+    }
+}
+
+/// Per-property merge of a single margin box. `content` is treated as
+/// "overrides when non-empty"; the spec says an empty `content` value
+/// produces no generated content anyway, so an empty Vec from a
+/// less-specific rule never occludes a non-empty Vec from a
+/// more-specific one.
+fn merge_margin_box(dst: &mut MarginBox, src: &MarginBox) {
+    if !src.content.is_empty() {
+        dst.content.clone_from(&src.content);
+    }
+    if src.font_family.is_some() {
+        dst.font_family.clone_from(&src.font_family);
+    }
+    if src.font_size.is_some() {
+        dst.font_size = src.font_size;
+    }
+    if src.color.is_some() {
+        dst.color = src.color;
+    }
+    if src.text_align.is_some() {
+        dst.text_align.clone_from(&src.text_align);
+    }
 }
 
 // ── Selector parsing ──────────────────────────────────────
@@ -3360,16 +3491,28 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
 // ── Stylesheet parsing ────────────────────────────────────
 
 /// Parse a CSS stylesheet (from `<style>` blocks) into rules.
+///
+/// `@page` rules are routed through `parse_page_selector` so each rule
+/// keeps its prelude (e.g. `:first`, `:left`, `:right`, `:blank`,
+/// `:nth(N)`) and contributes to the per-page cascade documented on
+/// `Stylesheet::resolve_page_style`. The legacy `page_style` field on
+/// the returned `Stylesheet` is kept populated for callers that
+/// haven't migrated to the per-page resolver — it holds the resolution
+/// for page 1 of a single-page document, which is what the previous
+/// "single global @page" model effectively returned.
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
-    let mut page_style = PageStyle::default();
+    let mut page_rules = Vec::new();
     let mut font_faces = Vec::new();
-    parse_stylesheet_manual(css, &mut rules, &mut page_style, &mut font_faces);
-    Stylesheet {
+    parse_stylesheet_manual(css, &mut rules, &mut page_rules, &mut font_faces);
+    let mut sheet = Stylesheet {
         rules,
-        page_style,
+        page_style: PageStyle::default(),
+        page_rules,
         font_faces,
-    }
+    };
+    sheet.page_style = sheet.resolve_page_style(1, 1);
+    sheet
 }
 
 /// Find the byte index of the `}` that matches the `{` at position
@@ -3485,7 +3628,7 @@ fn skip_leading_at_statements(mut remaining: &str) -> &str {
 fn parse_stylesheet_manual(
     css: &str,
     rules: &mut Vec<CssRule>,
-    page_style: &mut PageStyle,
+    page_rules: &mut Vec<PageRule>,
     font_faces: &mut Vec<FontFaceRule>,
 ) {
     let mut remaining = css;
@@ -3505,14 +3648,21 @@ fn parse_stylesheet_manual(
 
         // Handle @page rule — may contain nested `@top-center { ... }`
         // blocks, so we need to find the matching close brace honoring
-        // nesting.
-        if selector_text.starts_with("@page") {
+        // nesting. The prelude (text after `@page` and before `{`) may
+        // carry pseudo-class selectors per CSS Paged Media L3 §4.4
+        // (`:first`, `:left`, `:right`, `:blank`, `:nth(N)`); we route
+        // each rule through `parse_page_selector` so they cascade with
+        // per-property specificity.
+        if let Some(prelude) = selector_text.strip_prefix("@page") {
             let Some(brace_close) = find_matching_close(after_open) else {
                 break;
             };
             let body = &after_open[..brace_close];
             remaining = &after_open[brace_close + 1..];
-            parse_page_body(body, page_style);
+            let selector = parse_page_selector(prelude);
+            let mut decls = PageStyle::default();
+            parse_page_body(body, &mut decls);
+            page_rules.push(PageRule { selector, decls });
             continue;
         }
 
@@ -3528,7 +3678,7 @@ fn parse_stylesheet_manual(
             let body = &after_open[..brace_close];
             remaining = &after_open[brace_close + 1..];
             if media_query_applies_to_print(prelude) {
-                parse_stylesheet_manual(body, rules, page_style, font_faces);
+                parse_stylesheet_manual(body, rules, page_rules, font_faces);
             }
             continue;
         }
@@ -5418,6 +5568,57 @@ mod tests {
         assert!(sel.side.is_none());
         assert!(sel.nth.is_none());
         assert_eq!(sel.specificity(), (0, 0, 0));
+    }
+
+    #[test]
+    fn margin_box_cascades_per_property() {
+        // Given:
+        //   @page          { @top-left { content: "X"; color: red } }
+        //   @page :first   { @top-left { content: "Y" } }
+        // page 1 should resolve to content="Y" AND color=red — the more
+        // specific rule overrides `content`, the universal rule's `color`
+        // falls through (per-property cascade, not whole-block).
+        let css = r#"
+            @page { @top-left { content: "X"; color: red } }
+            @page :first { @top-left { content: "Y" } }
+        "#;
+        let sheet = parse_stylesheet(css);
+        let resolved = sheet.resolve_page_style(1, 1);
+        let mb = resolved.margin_boxes.top_left.as_ref().expect("top-left");
+        assert_eq!(mb.content, vec![ContentItem::String("Y".to_string())]);
+        assert_eq!(mb.color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn margin_box_universal_falls_through_for_other_pages() {
+        // The universal `@page` margin box should still apply on pages
+        // that don't match `:first`.
+        let css = r#"
+            @page { @top-left { content: "X"; color: red } }
+            @page :first { @top-left { content: "Y" } }
+        "#;
+        let sheet = parse_stylesheet(css);
+        let resolved = sheet.resolve_page_style(2, 5);
+        let mb = resolved.margin_boxes.top_left.as_ref().expect("top-left");
+        assert_eq!(mb.content, vec![ContentItem::String("X".to_string())]);
+        assert_eq!(mb.color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn page_size_and_margin_resolve_per_specificity() {
+        // `@page` declares a default 1in margin; `@page :first` overrides
+        // only the margin. Page 1 must use 0.25in (18pt) margins; page 2
+        // must use 1in (72pt) margins.
+        let css = r"
+            @page { size: letter; margin: 1in }
+            @page :first { margin: 0.25in }
+        ";
+        let sheet = parse_stylesheet(css);
+        let p1 = sheet.resolve_page_style(1, 2);
+        let p2 = sheet.resolve_page_style(2, 2);
+        assert_eq!(p1.width, Some(612.0));
+        assert_eq!(p1.margin_top, Some(18.0));
+        assert_eq!(p2.margin_top, Some(72.0));
     }
 
     #[test]
