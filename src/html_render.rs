@@ -2218,14 +2218,6 @@ impl<'a> HtmlRenderer<'a> {
 /// usual CSS inheritance rules — we apply the colgroup's parsed
 /// properties first, then let the `<col>`'s inline style override.
 pub(crate) fn extract_col_styles(table_handle: &Handle) -> Vec<css::ColStyle> {
-    let mut out: Vec<css::ColStyle> = Vec::new();
-    let NodeData::Element { name, .. } = &table_handle.data else {
-        return out;
-    };
-    if name.local.as_ref() != "table" {
-        return out;
-    }
-
     fn col_element_span(handle: &Handle) -> u32 {
         let NodeData::Element { attrs, .. } = &handle.data else {
             return 1;
@@ -2270,7 +2262,7 @@ pub(crate) fn extract_col_styles(table_handle: &Handle) -> Vec<css::ColStyle> {
             if bw.is_some() || inline.border_color.is_some() || inline.border_style.is_some() {
                 let prev = style.border;
                 style.border = Some(css::ColBorder {
-                    width: bw.unwrap_or(prev.map(|b| b.width).unwrap_or(1.0)),
+                    width: bw.unwrap_or_else(|| prev.map_or(1.0, |b| b.width)),
                     color: inline
                         .border_color
                         .or(prev.map(|b| b.color))
@@ -2283,6 +2275,14 @@ pub(crate) fn extract_col_styles(table_handle: &Handle) -> Vec<css::ColStyle> {
             }
         }
         style
+    }
+
+    let mut out: Vec<css::ColStyle> = Vec::new();
+    let NodeData::Element { name, .. } = &table_handle.data else {
+        return out;
+    };
+    if name.local.as_ref() != "table" {
+        return out;
     }
 
     for child in table_handle.children.borrow().iter() {

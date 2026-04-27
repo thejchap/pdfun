@@ -393,6 +393,11 @@ pub struct Table {
     /// CSS `table-layout` (CSS 2.1 §17.5.2). `Auto` (default) treats
     /// `<col width>` as a preferred-width hint bounded below by the
     /// content's min-width; `Fixed` pins column widths to their hints.
+    // The `clippy::struct_field_names` lint flags this because the field
+    // name `table_layout` starts with the struct name `Table`. Renaming
+    // away from `table_layout` would diverge from the CSS property
+    // spelling — keep it.
+    #[allow(clippy::struct_field_names)]
     pub table_layout: css::TableLayoutValue,
 }
 
@@ -907,7 +912,7 @@ pub(crate) fn resolve_col_hints(
 ///
 /// Percent hints exceeding 100% in `auto` mode are scaled proportionally
 /// down to fit so a malformed `[60%, 60%]` still uses the table's full
-/// area instead of overflowing — matches Blink and WeasyPrint.
+/// area instead of overflowing — matches Blink and `WeasyPrint`.
 pub(crate) fn apply_col_hints_auto(
     col_min: &[f32],
     col_max: &mut [f32],
@@ -917,11 +922,11 @@ pub(crate) fn apply_col_hints_auto(
     debug_assert_eq!(col_min.len(), col_max.len());
     debug_assert_eq!(col_min.len(), col_preferred.len());
     debug_assert_eq!(col_min.len(), hints.len());
-    for i in 0..col_min.len() {
+    for (i, hint) in hints.iter().enumerate() {
         // `col_preferred[i]` starts at the intrinsic max-content; an
         // explicit hint overrides only if it's *larger* than the
         // content's min-width — content-min is the floor either way.
-        if let Some(h) = hints[i] {
+        if let Some(h) = *hint {
             let pref = h.max(col_min[i]);
             col_preferred[i] = pref;
             if col_max[i] < pref {
@@ -941,10 +946,10 @@ pub(crate) fn apply_col_hints_fixed(
     let mut widths = vec![0.0_f32; column_count];
     let mut hinted_total = 0.0_f32;
     let mut unhinted = 0_usize;
-    for i in 0..column_count {
+    for (i, w) in widths.iter_mut().enumerate() {
         match hints.get(i).copied().flatten() {
             Some(h) => {
-                widths[i] = h;
+                *w = h;
                 hinted_total += h;
             }
             None => unhinted += 1,
@@ -953,9 +958,9 @@ pub(crate) fn apply_col_hints_fixed(
     if unhinted > 0 {
         let leftover = (container_width - hinted_total).max(0.0);
         let share = leftover / unhinted as f32;
-        for i in 0..column_count {
+        for (i, w) in widths.iter_mut().enumerate() {
             if hints.get(i).copied().flatten().is_none() {
-                widths[i] = share;
+                *w = share;
             }
         }
     } else if hinted_total > container_width && hinted_total > 0.0 {
@@ -971,17 +976,15 @@ pub(crate) fn apply_col_hints_fixed(
 }
 
 /// Pre-process auto-mode percent hints so their sum doesn't exceed
-/// `container_width`. Per Blink/WeasyPrint, `[60%, 60%]` resolves to
+/// `container_width`. Per Blink / `WeasyPrint`, `[60%, 60%]` resolves to
 /// `[300pt, 300pt]` of a 600pt area, not `[360, 360]` overflowing.
 /// Acts in-place on the resolved hint values.
 pub(crate) fn scale_overlong_percent_hints(hints: &mut [Option<f32>], container_width: f32) {
     let total: f32 = hints.iter().filter_map(|h| *h).sum();
     if total > container_width && total > 0.0 {
         let scale = container_width / total;
-        for h in hints.iter_mut() {
-            if let Some(v) = h {
-                *v *= scale;
-            }
+        for v in hints.iter_mut().flatten() {
+            *v *= scale;
         }
     }
 }
@@ -2699,17 +2702,12 @@ impl LayoutInner {
         // hint vector is sized to `column_count` even if the colgroup
         // declared fewer / more <col>s — extra entries are dropped, and
         // missing entries are filled with `None`.
-        let mut col_hints: Vec<Option<f32>> = Vec::with_capacity(column_count);
+        let mut col_hints: Vec<Option<f32>> = vec![None; column_count];
         if let Some(col_styles) = &table.col_styles {
-            for i in 0..column_count {
-                let h = col_styles
-                    .get(i)
-                    .and_then(|cs| resolve_col_hint(cs.width, table_area_width));
-                col_hints.push(h);
+            for (h, cs) in col_hints.iter_mut().zip(col_styles.iter()) {
+                *h = resolve_col_hint(cs.width, table_area_width);
             }
             scale_overlong_percent_hints(&mut col_hints, table_area_width);
-        } else {
-            col_hints.resize(column_count, None);
         }
 
         let col_widths: Vec<f32> = if matches!(table.table_layout, css::TableLayoutValue::Fixed) {
@@ -2936,8 +2934,7 @@ impl LayoutInner {
             // cells' rectangle.
             if let Some(col_styles) = &table.col_styles {
                 let mut x_running = cell_x;
-                for idx in 0..column_count {
-                    let cwidth = col_widths[idx];
+                for (idx, &cwidth) in col_widths.iter().enumerate() {
                     if let Some(cs) = col_styles.get(idx)
                         && let Some((r, g, b)) = cs.background_color
                     {

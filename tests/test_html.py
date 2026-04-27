@@ -27,9 +27,7 @@ def _find_text_x(content: bytes, marker: bytes) -> float | None:
     td_idx = content.rfind(b" Td\n", 0, idx)
     if td_idx < 0:
         return None
-    line_start = content.rfind(b"\n", 0, td_idx)
-    if line_start < 0:
-        line_start = 0
+    line_start = max(content.rfind(b"\n", 0, td_idx), 0)
     line = content[line_start + 1 : td_idx].split()
     if len(line) < 2:
         return None
@@ -3820,13 +3818,11 @@ with describe("tables"):
         ax = _find_text_x(content, b"(A) Tj")
         bx = _find_text_x(content, b"(B) Tj")
         cx = _find_text_x(content, b"(C) Tj")
-        assert ax is not None and bx is not None and cx is not None, (
-            f"expected three Td/Tj pairs; got x positions {ax}, {bx}, {cx}"
-        )
-        assert ax < bx < cx, (
-            f"col x-positions out of order — expected ax < bx < cx, "
-            f"got {ax}, {bx}, {cx}"
-        )
+        assert ax is not None, f"expected Td/Tj for (A); got {ax}"
+        assert bx is not None, f"expected Td/Tj for (B); got {bx}"
+        assert cx is not None, f"expected Td/Tj for (C); got {cx}"
+        assert ax < bx, f"col 0→1 out of order: {ax} >= {bx}"
+        assert bx < cx, f"col 1→2 out of order: {bx} >= {cx}"
         # Approximate location asserts: col 1 starts ~140pt to the right
         # of col 0; col 2 ~47pt to the right of col 1. Allow 1pt slop
         # for padding rounding.

@@ -465,6 +465,7 @@ pub enum TableLayoutValue {
 /// CSS `visibility` (CSS 2.1 §11.2). Stored on `<col>` so future passes
 /// can implement `collapse` without re-threading the table column type.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)] // `Hidden` and `Collapse` are intentional v1 cuts.
 pub enum Visibility {
     /// Element is rendered normally.
     #[default]
