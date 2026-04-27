@@ -5421,6 +5421,34 @@ mod tests {
     }
 
     #[test]
+    fn specificity_tuple_orders_correctly() {
+        // Per CSS Paged Media L3 §4.4 the specificity tuple is sorted
+        // lexicographically (f, g, h). `:first:left` `(0,1,1)` beats both
+        // `:first` `(0,1,0)` and `:left` `(0,0,1)` individually.
+        let universal = parse_page_selector_text("").specificity();
+        let first_only = parse_page_selector_text(":first").specificity();
+        let left_only = parse_page_selector_text(":left").specificity();
+        let first_left = parse_page_selector_text(":first:left").specificity();
+        let nth = parse_page_selector_text(":nth(2)").specificity();
+
+        // Lexicographic ordering of the tuples.
+        let mut tuples = [universal, left_only, first_only, first_left, nth];
+        tuples.sort();
+        assert_eq!(
+            tuples,
+            [(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1), (1, 0, 0)]
+        );
+
+        // Sanity: the spec'd ordering — `:first:left` strictly outranks
+        // both `:first` and `:left`.
+        assert!(first_left > first_only);
+        assert!(first_left > left_only);
+        assert!(first_only > left_only);
+        // `:nth(N)` (an `f`-class) outranks every non-named pseudo combo.
+        assert!(nth > first_left);
+    }
+
+    #[test]
     fn merge_style_non_none_wins() {
         let mut target = ComputedStyle {
             color: Some((1.0, 0.0, 0.0)),
