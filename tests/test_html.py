@@ -2158,6 +2158,111 @@ with describe("@page margin boxes"):
         expect(content).to_contain(b"(Header)")
 
 
+# ── @page pseudo-class selectors (WS-4) ──────────────────────────────
+# spec: CSS Paged Media L3 §4.4
+with describe("@page pseudo-classes"):
+
+    @test
+    def page_layout_uses_first_margin():
+        """`@page :first { margin: 0.25in }` shrinks page 1's margins.
+
+        Page 1 should use 18pt margins; page 2 should fall back to the
+        base `@page` declaration's 1in (72pt). The first text run on
+        each page lives at `(margin_left, page_height - margin_top - …)`,
+        so the per-page Td coordinate distinguishes them.
+        """
+        import fitz
+
+        html = """<style>
+            @page { size: letter; margin: 1in; }
+            @page :first { margin: 0.25in; }
+            .pb { page-break-after: always; }
+        </style>
+        <p class="pb">Page one body</p>
+        <p>Page two body</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            # First text on page 1: bbox.x0 should be ~18pt (0.25in).
+            # First text on page 2: bbox.x0 should be ~72pt (1in).
+            blocks_1 = pdf[0].get_text("blocks")
+            blocks_2 = pdf[1].get_text("blocks")
+            x0_p1 = blocks_1[0][0]
+            x0_p2 = blocks_2[0][0]
+        # Tight tolerance: 0.25in = 18pt, 1in = 72pt.
+        expect(abs(x0_p1 - 18.0) < 2.0).to_equal(True)
+        expect(abs(x0_p2 - 72.0) < 2.0).to_equal(True)
+
+    @test
+    def at_bottom_right_paints_on_first_page():
+        """`@bottom-right` content renders on page 1 even when `:first`
+        narrows the margins.
+
+        Reproduces the COBRA defect: with `@page :first { margin: 0.25in }`
+        and `@page { @bottom-right { content: "Page " counter(page) } }`,
+        the footer was previously clipped because the first page used
+        the wrong margin. Now both pages should carry "Page 1" and
+        "Page 2" respectively.
+        """
+        import fitz
+
+        html = """<style>
+            @page { size: letter; margin: 1in;
+                @bottom-right { content: "Page " counter(page); }
+            }
+            @page :first { margin: 0.25in; }
+            .pb { page-break-after: always; }
+        </style>
+        <p class="pb">Body 1</p>
+        <p>Body 2</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            page1_text = pdf[0].get_text()
+            page2_text = pdf[1].get_text()
+        expect("Page 1" in page1_text).to_equal(True)
+        expect("Page 2" in page2_text).to_equal(True)
+
+    @test
+    def first_right_beats_first_alone_on_page_one():
+        """When both `@page :first` and `@page :first:right` declare a
+        margin, the higher-specificity `:first:right` wins on page 1
+        (LTR — page 1 is right-hand)."""
+        import fitz
+
+        html = """<style>
+            @page { size: letter; margin: 1in; }
+            @page :first { margin-top: 0.5in; }
+            @page :first:right { margin-top: 0.25in; }
+        </style>
+        <p>Hello</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            blocks = pdf[0].get_text("blocks")
+            y0 = blocks[0][1]
+        # 0.25in = 18pt. fitz reports y0 from page top, so first text
+        # baseline should be just below 18pt.
+        expect(y0 < 30.0).to_equal(True)
+        expect(y0 > 10.0).to_equal(True)
+
+    @test
+    def universal_at_page_only_continues_to_apply():
+        """A bare `@page { margin: 1in }` (specificity 0,0,0) still
+        applies on every page when no pseudo rules are present."""
+        import fitz
+
+        html = """<style>
+            @page { size: letter; margin: 1in; }
+            .pb { page-break-after: always; }
+        </style>
+        <p class="pb">Body 1</p>
+        <p>Body 2</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            x0_p1 = pdf[0].get_text("blocks")[0][0]
+            x0_p2 = pdf[1].get_text("blocks")[0][0]
+        expect(abs(x0_p1 - 72.0) < 2.0).to_equal(True)
+        expect(abs(x0_p2 - 72.0) < 2.0).to_equal(True)
+
+
 with describe("multi-column layout"):
 
     @test

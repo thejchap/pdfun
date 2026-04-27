@@ -2420,8 +2420,14 @@ fn collect_cell_text(
 
 /// Result of rendering a DOM: page style from `@page`, plus any non-fatal
 /// warnings produced along the way (e.g. image load failures).
+///
+/// `page_rules` is the list of all `@page` rules in source order; the
+/// PDF emitter walks them with `Stylesheet::resolve_page_style` to
+/// build the per-page style at each page-break boundary, honoring the
+/// CSS Paged Media L3 §4.4 specificity tuple.
 pub struct RenderOutcome {
     pub page_style: css::PageStyle,
+    pub page_rules: Vec<css::PageRule>,
     pub warnings: Vec<String>,
 }
 
@@ -2434,6 +2440,7 @@ pub fn render_dom_to_layout(
     let css_text = extract_style_blocks(document);
     let stylesheet = css::parse_stylesheet(&css_text);
     let page_style = stylesheet.page_style.clone();
+    let page_rules = stylesheet.page_rules.clone();
 
     // Build the @font-face runtime: parse each declared face, attempt
     // its src list, extract measurement metrics, and stash the lookup on
@@ -2471,6 +2478,7 @@ pub fn render_dom_to_layout(
     warnings.append(&mut renderer.warnings);
     RenderOutcome {
         page_style,
+        page_rules,
         warnings,
     }
 }

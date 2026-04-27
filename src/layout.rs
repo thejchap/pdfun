@@ -1095,6 +1095,10 @@ pub struct LayoutInner {
     /// Stamped onto every page after the main render loop completes so
     /// that `counter(pages)` can resolve to the final page count.
     pub margin_boxes: css::MarginBoxes,
+    /// All `@page` rules parsed from the stylesheet (in source order).
+    /// Used by `resolve_page_style_for` to compute the per-page width,
+    /// height, margin, and margin-box state. CSS Paged Media L3 §4.4.
+    pub page_rules: Vec<css::PageRule>,
     /// Collected `position: fixed` blocks. Stamped onto every page in
     /// `finish()` so the box appears across the full document.
     fixed_blocks: Vec<FixedBlock>,
@@ -1128,9 +1132,64 @@ impl LayoutInner {
             column_rule_color: None,
             images: Vec::new(),
             margin_boxes: css::MarginBoxes::default(),
+            page_rules: Vec::new(),
             fixed_blocks: Vec::new(),
             font_face_registered: Vec::new(),
         }
+    }
+
+    /// Resolve the effective `@page` style for `page_num` (1-indexed).
+    /// Walks every `@page` rule that matches the page (per CSS Paged
+    /// Media L3 §4.4) and merges declarations in ascending specificity
+    /// order. `total_pages` is unused by every v1 pseudo (`:first`,
+    /// `:left`, `:right`, `:nth(N)`, `:blank`) — it's accepted for
+    /// future-compat with selectors that depend on the document's total
+    /// length.
+    pub fn resolve_page_style_for(&self, page_num: usize, total_pages: usize) -> css::PageStyle {
+        let mut indexed: Vec<(usize, &css::PageRule)> = self
+            .page_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.selector.matches(page_num, total_pages))
+            .collect();
+        indexed.sort_by_key(|(idx, r)| (r.selector.specificity(), *idx));
+        let mut merged = css::PageStyle::default();
+        for (_, rule) in indexed {
+            css::merge_page_style_pub(&mut merged, &rule.decls);
+        }
+        merged
+    }
+
+    /// Apply the resolved per-page style to `self.margin_*` and
+    /// `self.page_{width,height}`. Called immediately before opening a
+    /// new page so the new page-frame is sized correctly. Returns the
+    /// resolved style so callers (e.g. `stamp_margin_boxes`) can also
+    /// pull the per-page margin-box declarations.
+    pub fn apply_page_style_for(
+        &mut self,
+        page_num: usize,
+        total_pages: usize,
+    ) -> css::PageStyle {
+        let resolved = self.resolve_page_style_for(page_num, total_pages);
+        if let Some(w) = resolved.width {
+            self.page_width = w;
+        }
+        if let Some(h) = resolved.height {
+            self.page_height = h;
+        }
+        if let Some(m) = resolved.margin_top {
+            self.margin_top = m;
+        }
+        if let Some(m) = resolved.margin_right {
+            self.margin_right = m;
+        }
+        if let Some(m) = resolved.margin_bottom {
+            self.margin_bottom = m;
+        }
+        if let Some(m) = resolved.margin_left {
+            self.margin_left = m;
+        }
+        resolved
     }
 
     pub fn push_paragraph(&mut self, para: Paragraph) {
@@ -1185,6 +1244,15 @@ impl LayoutInner {
         if !self.font_face_registered.is_empty() {
             doc.registered_fonts.append(&mut self.font_face_registered);
         }
+
+        // Apply per-page CSS resolution for page 1 before opening the
+        // first page. Subsequent pages re-resolve at each break in
+        // `advance_column_or_page`. CSS Paged Media L3 §4.4.
+        if !self.page_rules.is_empty() {
+            // `total_pages` is unused by every v1 pseudo-class.
+            let _ = self.apply_page_style_for(1, 1);
+        }
+
         let content_width = self.page_width - self.margin_left - self.margin_right;
         let content_top = self.page_height - self.margin_top;
         let blocks = std::mem::take(&mut self.blocks);
@@ -1397,9 +1465,9 @@ impl LayoutInner {
             &mut state.cursor_y,
             &mut state.current_col,
             state.col_count,
-            state.col_width,
-            state.col_gap,
-            state.content_top,
+            &mut state.col_width,
+            &mut state.col_gap,
+            &mut state.content_top,
             &mut state.pending_bottom,
         )
     }
@@ -1418,9 +1486,9 @@ impl LayoutInner {
             &mut state.cursor_y,
             &mut state.current_col,
             state.col_count,
-            state.col_width,
-            state.col_gap,
-            state.content_top,
+            &mut state.col_width,
+            &mut state.col_gap,
+            &mut state.content_top,
             &mut state.pending_bottom,
         );
     }
@@ -1434,9 +1502,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
         }
         let cx = self.col_x(state.current_col, state);
@@ -1476,9 +1544,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_bottom = 0.0;
             state.pending_container_top = 0.0;
@@ -1519,9 +1587,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_bottom = 0.0;
             state.pending_container_top = 0.0;
@@ -1548,9 +1616,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_container_top = 0.0;
         }
@@ -1703,9 +1771,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_bottom = 0.0;
         }
@@ -2250,9 +2318,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_bottom = 0.0;
         }
@@ -2282,14 +2350,54 @@ impl LayoutInner {
     /// total page count for `counter(pages)`. Each of the six supported
     /// positions (top/bottom × left/center/right) gets a single baseline
     /// of text inside the printable margin strip.
-    fn stamp_margin_boxes(&self, doc: &mut PdfDocument) {
-        let boxes = &self.margin_boxes;
-        if !boxes.any() {
+    ///
+    /// Per CSS Paged Media L3 §4.4 the margin-box content cascades
+    /// per-property across `@page` rules — `@page :first { @top-left { … } }`
+    /// only overlays the properties it sets, leaving the rest of
+    /// `@top-left`'s properties from the base `@page` intact. This is
+    /// achieved by calling `resolve_page_style_for(page_num)` per page
+    /// and reading the merged margin boxes from the result.
+    fn stamp_margin_boxes(&mut self, doc: &mut PdfDocument) {
+        // If there are no `@page` rules, we may still have a top-level
+        // `margin_boxes` field set by a non-CSS API consumer — fall back
+        // to the universal slot in that case.
+        let has_any_rule_box = self
+            .page_rules
+            .iter()
+            .any(|r| r.decls.margin_boxes.any());
+        if !has_any_rule_box && !self.margin_boxes.any() {
             return;
         }
         let total_pages = doc.pages.len();
+        // Snapshot pages from `doc.pages` length so we don't borrow
+        // `doc` mutably and immutably at once. We resolve the per-page
+        // boxes ahead of the loop because `resolve_page_style_for`
+        // reads `self.page_rules` which can't overlap a mut borrow on
+        // `self.margin_boxes`/`self.render_margin_box`.
+        let resolved: Vec<css::MarginBoxes> = (1..=total_pages)
+            .map(|page_num| {
+                if !self.page_rules.is_empty() {
+                    self.resolve_page_style_for(page_num, total_pages)
+                        .margin_boxes
+                } else {
+                    self.margin_boxes.clone()
+                }
+            })
+            .collect();
         for (idx, page_arc) in doc.pages.iter().enumerate() {
             let page_num = idx + 1;
+            let boxes = &resolved[idx];
+            if !boxes.any() {
+                continue;
+            }
+            // The page-frame size and margins for *this* page are what
+            // determine where the margin-strip lives; refresh
+            // `self.{page_width,page_height,margin_*}` for this page
+            // before rendering so the strip math lines up. (No-op if
+            // `page_rules` is empty.)
+            if !self.page_rules.is_empty() {
+                let _ = self.apply_page_style_for(page_num, total_pages);
+            }
             let mut page = page_arc.lock().unwrap();
             let positions = [
                 (&boxes.top_left, css::MarginBoxPosition::TopLeft),
@@ -2413,9 +2521,9 @@ impl LayoutInner {
         cursor_y: &mut f32,
         current_col: &mut u32,
         col_count: u32,
-        col_width: f32,
-        col_gap: f32,
-        content_top: f32,
+        col_width: &mut f32,
+        col_gap: &mut f32,
+        content_top: &mut f32,
         pending_bottom: &mut f32,
     ) -> Result<(), String> {
         if table.rows.is_empty() {
@@ -2426,11 +2534,26 @@ impl LayoutInner {
             return Ok(());
         }
 
+        // Snapshot the column geometry at the start of the table — if a
+        // page-break advances us mid-table, `advance_column_or_page`
+        // will have rewritten the caller's geometry to the new page's,
+        // but the table's intrinsic-width math wants the geometry it
+        // started with. (Spanning a table across pages with mismatched
+        // margins is a v1 cut; tracked separately.)
+        let col_width_v: f32 = *col_width;
+        let col_gap_v: f32 = *col_gap;
+        let content_top_v: f32 = *content_top;
+        // Snapshot `margin_left` so the col-position closure doesn't
+        // hold an immutable borrow of `self` across the mutable borrow
+        // we need when calling `advance_column_or_page` mid-table.
+        let margin_left_v: f32 = self.margin_left;
+
         // column_width helper (reused)
-        let col_x_for = |col: u32| -> f32 { self.margin_left + col as f32 * (col_width + col_gap) };
+        let col_x_for =
+            |col: u32| -> f32 { margin_left_v + col as f32 * (col_width_v + col_gap_v) };
 
         // Total available width for the table within the current column
-        let table_area_width = col_width - table.style.margin_left - table.style.margin_right;
+        let table_area_width = col_width_v - table.style.margin_left - table.style.margin_right;
 
         // Measure intrinsic min and max widths per column
         let mut col_min = vec![0.0_f32; column_count];
@@ -2590,7 +2713,7 @@ impl LayoutInner {
                 .fold(0.0_f32, f32::max);
 
             // Page-break check: move the entire row to next column/page if it doesn't fit
-            if *cursor_y - row_height < self.margin_bottom && *cursor_y < content_top {
+            if *cursor_y - row_height < self.margin_bottom && *cursor_y < content_top_v {
                 // Flush any pending collapse band before moving on.
                 if is_collapse && let Some(band) = collapse_band.take() {
                     let mut page = current_page.lock().unwrap();
@@ -2773,15 +2896,23 @@ impl LayoutInner {
         cursor_y: &mut f32,
         current_col: &mut u32,
         col_count: u32,
-        col_width: f32,
-        col_gap: f32,
-        content_top: f32,
+        col_width: &mut f32,
+        col_gap: &mut f32,
+        content_top: &mut f32,
         pending_bottom: &mut f32,
     ) {
-        let col_x_for = |col: u32| -> f32 { self.margin_left + col as f32 * (col_width + col_gap) };
+        // Snapshot the column geometry — see `render_table` for the
+        // rationale (mid-block page breaks may rewrite the caller's
+        // refs to the new page's geometry).
+        let col_width_v: f32 = *col_width;
+        let col_gap_v: f32 = *col_gap;
+        let content_top_v: f32 = *content_top;
+        let margin_left_v: f32 = self.margin_left;
+        let col_x_for =
+            |col: u32| -> f32 { margin_left_v + col as f32 * (col_width_v + col_gap_v) };
 
         // Scale down if wider than column content width
-        let box_width = col_width - img.style.margin_left - img.style.margin_right;
+        let box_width = col_width_v - img.style.margin_left - img.style.margin_right;
         let (draw_w, draw_h) = if img.width > box_width && img.width > 0.0 {
             let scale = box_width / img.width;
             (box_width, img.height * scale)
@@ -2793,7 +2924,7 @@ impl LayoutInner {
         let total_height = top_delta + draw_h + img.style.margin_bottom;
 
         // Page-break check
-        if *cursor_y - total_height < self.margin_bottom && *cursor_y < content_top {
+        if *cursor_y - total_height < self.margin_bottom && *cursor_y < content_top_v {
             self.advance_column_or_page(
                 current_page,
                 doc,
@@ -2830,25 +2961,54 @@ impl LayoutInner {
 
     /// Advance to the next column, or if already in the last column,
     /// draw rules on the current page and start a new one.
+    ///
+    /// When opening a new page, this re-resolves the per-page `@page`
+    /// style (CSS Paged Media L3 §4.4) so margins, page size, and
+    /// margin-box content can vary across pages (e.g. `:first` shrinks
+    /// page 1's margins, `:left`/`:right` flip mirror gutters). The
+    /// caller's column-relative cursor / col_width state is updated in
+    /// place to reflect the freshly resolved geometry.
     #[allow(clippy::too_many_arguments)]
     fn advance_column_or_page(
-        &self,
+        &mut self,
         current_page: &mut Arc<Mutex<PageContent>>,
         doc: &mut PdfDocument,
         cursor_y: &mut f32,
         current_col: &mut u32,
         col_count: u32,
-        col_width: f32,
-        col_gap: f32,
-        content_top: f32,
+        col_width: &mut f32,
+        col_gap: &mut f32,
+        content_top: &mut f32,
     ) {
         if *current_col < col_count - 1 {
             *current_col += 1;
-            *cursor_y = content_top;
+            *cursor_y = *content_top;
         } else {
-            self.draw_column_rules(current_page, content_top, col_width, col_gap, col_count);
+            self.draw_column_rules(current_page, *content_top, *col_width, *col_gap, col_count);
+            // Re-resolve `@page` for the page we're about to open. The
+            // page index is `doc.pages.len() + 1` because the new page
+            // hasn't been pushed yet.
+            if !self.page_rules.is_empty() {
+                let next_page_num = doc.pages.len() + 1;
+                let _ = self.apply_page_style_for(next_page_num, next_page_num);
+            }
             *current_page = new_page(doc, self.page_width, self.page_height);
-            *cursor_y = content_top;
+            // Recompute column / content geometry so blocks on the new
+            // page measure against the freshly resolved margins.
+            let new_content_width = self.page_width - self.margin_left - self.margin_right;
+            let (new_col_w, new_col_g) = if col_count > 1 {
+                let gap_total = (col_count - 1) as f32 * self.column_gap;
+                (
+                    (new_content_width - gap_total) / col_count as f32,
+                    self.column_gap,
+                )
+            } else {
+                (new_content_width, 0.0)
+            };
+            *col_width = new_col_w;
+            *col_gap = new_col_g;
+            *content_top = self.page_height - self.margin_top;
+            *cursor_y = *content_top;
             *current_col = 0;
         }
     }

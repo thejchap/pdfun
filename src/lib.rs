@@ -1486,29 +1486,46 @@ fn html_to_pdf(
     let base_path = base_url.map(std::path::PathBuf::from);
     let outcome =
         html_render::render_dom_to_layout(&parsed.document, &mut inner, base_path.as_deref());
-    let page_style = outcome.page_style;
     doc.warnings.extend(outcome.warnings);
-
-    // Apply @page CSS overrides
-    if let Some(w) = page_style.width {
+    // Hand the parsed `@page` rules to the layout. `LayoutInner` will
+    // re-resolve them at every page boundary so per-page selectors
+    // (`:first`, `:left`, `:right`, `:nth(N)`) can vary margins, page
+    // size, and margin-box content from one page to the next per CSS
+    // Paged Media L3 §4.4.
+    inner.page_rules = outcome.page_rules;
+    // Pre-seat the layout's margins/size from the universal `@page`
+    // rule (specificity 0,0,0) so any code reading the inner before the
+    // first page opens still sees a sensible default. We deliberately
+    // skip pseudo-class rules here — those are applied per-page at
+    // `new_page` time so page 2+ don't accidentally inherit page 1's
+    // `:first` margins.
+    let mut base = css::PageStyle::default();
+    for rule in &inner.page_rules {
+        if rule.selector.specificity() == (0, 0, 0) {
+            css::merge_page_style_pub(&mut base, &rule.decls);
+        }
+    }
+    if let Some(w) = base.width {
         inner.page_width = w;
     }
-    if let Some(h) = page_style.height {
+    if let Some(h) = base.height {
         inner.page_height = h;
     }
-    if let Some(m) = page_style.margin_top {
+    if let Some(m) = base.margin_top {
         inner.margin_top = m;
     }
-    if let Some(m) = page_style.margin_right {
+    if let Some(m) = base.margin_right {
         inner.margin_right = m;
     }
-    if let Some(m) = page_style.margin_bottom {
+    if let Some(m) = base.margin_bottom {
         inner.margin_bottom = m;
     }
-    if let Some(m) = page_style.margin_left {
+    if let Some(m) = base.margin_left {
         inner.margin_left = m;
     }
-    inner.margin_boxes = page_style.margin_boxes;
+    // `inner.margin_boxes` is filled per-page by `stamp_margin_boxes`
+    // walking `page_rules`; leave it at its default empty value here.
+    let _ = outcome.page_style;
 
     inner.finish(&mut doc).map_err(PyValueError::new_err)?;
     // Transfer any images collected during rendering to the document

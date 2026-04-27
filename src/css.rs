@@ -2842,6 +2842,13 @@ impl Stylesheet {
     }
 }
 
+/// Public re-export of `merge_page_style` for callers in other crate
+/// modules (e.g. `layout::LayoutInner::apply_page_style_for`). The
+/// merge is per-property; see `merge_page_style` for details.
+pub fn merge_page_style_pub(dst: &mut PageStyle, src: &PageStyle) {
+    merge_page_style(dst, src);
+}
+
 /// Per-property merge of `src` into `dst`. Each `Some(_)` field in
 /// `src` overrides the corresponding field in `dst`; `None` fields in
 /// `src` leave `dst` unchanged. Margin boxes merge per-position with
