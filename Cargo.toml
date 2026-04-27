@@ -11,6 +11,12 @@ crate-type = ["cdylib"]
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
+[features]
+# Opt-in HTTP backend for the URL fetcher. Off by default so the library
+# stays pure-Rust with zero network capability — server callers who want
+# remote `<img>` / `@font-face` URLs enable this feature explicitly.
+http-fetch = ["dep:ureq"]
+
 [dependencies]
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
@@ -23,3 +29,6 @@ html5ever = "0.38"
 cssparser = "0.37"
 png = "0.17"
 miniz_oxide = "0.8"
+# rustls + ring is the default in 3.x (no system OpenSSL); pure Rust
+# keeps the "no system deps" promise. Optional + opt-in via `http-fetch`.
+ureq = { version = "3", optional = true }

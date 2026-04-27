@@ -816,6 +816,10 @@ struct HtmlRenderer<'a> {
     /// before falling through to base-14 mapping; an empty map (the
     /// common case) makes those calls no-ops.
     font_face_lookup: FontFaceLookup,
+    /// Pluggable URL fetcher used for `<img>`, `background-image`, and
+    /// `@font-face` URLs. Defaults to a file-only fetcher; server-side
+    /// callers can plug in an HTTP backend or their own custom impl.
+    fetcher: std::sync::Arc<dyn crate::url_fetcher::UrlFetcher>,
 }
 
 impl<'a> HtmlRenderer<'a> {
@@ -856,6 +860,7 @@ impl<'a> HtmlRenderer<'a> {
             pending_anchor_id: None,
             bg_image_cache: std::collections::BTreeMap::new(),
             font_face_lookup: FontFaceLookup::new(),
+            fetcher: std::sync::Arc::new(crate::url_fetcher::DefaultFetcher),
         }
     }
 
@@ -1825,14 +1830,14 @@ impl<'a> HtmlRenderer<'a> {
             return;
         };
 
-        // Resolve path relative to base_dir if given, else CWD
-        let path = if let Some(base) = &self.base_dir {
-            base.join(&src)
-        } else {
-            std::path::PathBuf::from(&src)
-        };
-
-        let img_data = match crate::image::load_from_path(&path) {
+        // Route through the pluggable URL fetcher so HTTP(S) URLs work
+        // when the `http-fetch` feature is enabled. Bare relative paths
+        // resolve against `base_dir` inside the fetcher.
+        let img_data = match crate::image::load_from_source(
+            &src,
+            self.base_dir.as_deref(),
+            self.fetcher.as_ref(),
+        ) {
             Ok(data) => data,
             Err(e) => {
                 self.warnings.push(format!("image {src}: {e}"));
@@ -2105,12 +2110,11 @@ impl<'a> HtmlRenderer<'a> {
                 let entry = if let Some(cached) = cached {
                     Some(cached)
                 } else {
-                    let path = if let Some(base) = &self.base_dir {
-                        base.join(url)
-                    } else {
-                        std::path::PathBuf::from(url)
-                    };
-                    match crate::image::load_from_path(&path) {
+                    match crate::image::load_from_source(
+                        url,
+                        self.base_dir.as_deref(),
+                        self.fetcher.as_ref(),
+                    ) {
                         Ok(img_data) => {
                             let intrinsic_width = img_data.width as f32;
                             let intrinsic_height = img_data.height as f32;
@@ -2439,6 +2443,7 @@ pub fn render_dom_to_layout(
     document: &Handle,
     layout: &mut LayoutInner,
     base_dir: Option<&std::path::Path>,
+    fetcher: std::sync::Arc<dyn crate::url_fetcher::UrlFetcher>,
 ) -> RenderOutcome {
     let css_text = extract_style_blocks(document);
     let stylesheet = css::parse_stylesheet(&css_text);
@@ -2450,7 +2455,7 @@ pub fn render_dom_to_layout(
     // the renderer plus the bytes on `LayoutInner` so the embed pipeline
     // picks them up at PDF write time.
     let (registered, lookup, mut face_warnings) =
-        font_face::build_font_face_registry(&stylesheet.font_faces, base_dir);
+        font_face::build_font_face_registry(&stylesheet.font_faces, base_dir, fetcher.as_ref());
     let mut metrics_map: std::collections::BTreeMap<
         String,
         crate::font_metrics::CustomFontMetrics,
@@ -2475,6 +2480,7 @@ pub fn render_dom_to_layout(
     let mut renderer = HtmlRenderer::new(layout, stylesheet);
     renderer.base_dir = base_dir.map(std::path::Path::to_path_buf);
     renderer.font_face_lookup = surviving_lookup;
+    renderer.fetcher = fetcher;
     renderer.walk_node(document, 0, 0, 1, &[]);
     renderer.flush();
     let mut warnings = face_warnings;
