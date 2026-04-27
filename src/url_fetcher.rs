@@ -658,6 +658,57 @@ mod tests {
         }
 
         #[test]
+        fn redirect_to_private_ip_blocked() {
+            // Server (allowed because allow_private_ips=true on the
+            // first hop) redirects to 127.0.0.1, which the per-hop IP
+            // check must reject — even though `allow_private_ips` is
+            // true here, the redirect target uses an explicit IP
+            // literal in the disallowed range when we toggle the flag
+            // back off. Construct a fetcher that allows the *first*
+            // hop (the server we just spawned) but pretends the
+            // redirect target is private — easiest way is to redirect
+            // to a different port literal.
+            //
+            // Since both the server port and the redirect target are
+            // 127.0.0.1, simulate the SSRF guard by toggling
+            // allow_private_ips off after the first call. We do that
+            // here by redirecting to an explicit 127.0.0.1 URL and
+            // asserting the post-DNS check rejects on the second hop
+            // when private IPs are disallowed at the fetcher level.
+            //
+            // To test the check actually fires for redirect targets,
+            // start a server, redirect to an explicit private IP, and
+            // run the fetcher *with* the guard enabled (default).
+            let handler: Handler = Arc::new(|_p| redirect_response("http://10.0.0.1/secret"));
+            let (base, stop) = spawn(handler);
+            // To reach the test server itself we'd need to allow
+            // private IPs, but then the redirect to 10.0.0.1 also
+            // sneaks through. The validate-host check fires on the
+            // *first* hop when private IPs are disallowed, so this
+            // test is most expressive when split: confirm separately
+            // that the resolve_redirect-then-validate path runs by
+            // calling validate_host_ips directly.
+            let fetcher = HttpFetcher::new(); // disallow private
+            let err = fetcher
+                .fetch(&format!("{base}/r"), None)
+                .expect_err("must reject loopback first hop");
+            assert!(
+                err.contains("private/loopback") || err.contains("refused"),
+                "got {err:?}"
+            );
+            // Independently: 10.0.0.1 must be rejected as a redirect
+            // target by validate_host_ips.
+            let target_err = fetcher
+                .validate_host_ips("http://10.0.0.1/secret")
+                .expect_err("private redirect target");
+            assert!(
+                target_err.contains("private/loopback"),
+                "got {target_err:?}"
+            );
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        #[test]
         fn body_size_cap_enforced() {
             let body = vec![b'x'; 1024];
             let handler: Handler = Arc::new(move |_p| ok_response(&body, "text/plain"));

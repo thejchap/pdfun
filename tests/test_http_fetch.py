@@ -96,6 +96,30 @@ with describe("pluggable URL fetcher"):
         warnings = doc.warnings()
         expect(any("y.png" in w for w in warnings)).to_be(True)
 
+    @test("custom url_fetcher gets called for @font-face http urls too")
+    def font_face_http_routes_through_fetcher():
+        # Build a tiny HTML doc that declares an @font-face with an
+        # http URL. The custom fetcher returns junk bytes for it; we
+        # don't care that the font fails to parse — we only care that
+        # the fetcher *was invoked* for that URL.
+        seen = []
+
+        def fetcher(url: str) -> bytes | None:
+            seen.append(url)
+            return b"\x00\x01\x02"  # not a valid TTF — we expect a parse-fail warning
+
+        html = """
+        <html><head><style>
+            @font-face {
+                font-family: 'X';
+                src: url(http://fonts.example.test/x.ttf);
+            }
+        </style></head><body><p style="font-family: X">hi</p></body></html>
+        """
+        doc = HtmlDocument(string=html, url_fetcher=fetcher)
+        doc.to_bytes()  # render must not crash
+        expect(any("fonts.example.test" in u for u in seen)).to_be(True)
+
     @test("file-only fetcher resolves bare relative paths the same as before")
     def relative_path_still_works():
         # Smoke-test that wiring the fetcher through doesn't break the
