@@ -3045,22 +3045,36 @@ with describe("hsl colors"):
     # spec: CSS Color 3 §4.2.4; behaviors: color-hsla
     @test
     def hsla_accepts_alpha_component():
-        """hsla() parses (alpha is currently ignored)."""
+        """hsla()'s 4th component flows through `WS-2`'s ExtGState gate:
+        a `/Gs<N> gs` op precedes the `rg` color op, and the document
+        carries an `/ExtGState` resource."""
         html = '<p style="color: hsla(240, 100%, 50%, 0.5)">blue</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         content = content_stream(data)
+        # Color is still emitted — RGB channels are unchanged.
         expect(content).to_contain(b"0 0 1 rg")
+        # And the alpha is now active: `gs` referenced before `rg`.
+        idx_gs = content.index(b"gs")
+        idx_rg = content.index(b"0 0 1 rg")
+        expect(idx_gs < idx_rg).to_equal(True)
+        expect(data).to_contain(b"/ExtGState")
 
     # spec: CSS Color 3 §4.2.1; behaviors: color-rgba
     @test
     def rgba_accepts_alpha_component():
-        """rgba() parses with an optional alpha (alpha is currently ignored)."""
+        """rgba()'s 4th component flows through `WS-2`'s ExtGState gate:
+        the `/Gs<N> gs` op precedes the foreground `rg` and the resource
+        dict references `/ExtGState`."""
         html = '<p style="color: rgba(255, 0, 0, 0.5)">red</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"1 0 0 rg")
+        idx_gs = content.index(b"gs")
+        idx_rg = content.index(b"1 0 0 rg")
+        expect(idx_gs < idx_rg).to_equal(True)
+        expect(data).to_contain(b"/ExtGState")
 
 
 with describe("cmyk colors"):
@@ -4926,6 +4940,96 @@ with describe("opacity"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"/Gs1 gs")
+
+
+with describe("rgba/hsla alpha plumbing (WS-2)"):
+    """End-to-end coverage for `rgba()` / `hsla()` α < 1.0 flowing all
+    the way through to PDF's ExtGState `ca` / `CA` channels. ISO
+    32000-1 §11.3.7."""
+
+    @test
+    def translucent_fill_emits_extgstate():
+        """A `background-color: rgba(255, 0, 0, 0.5)` block emits a
+        `/Gs<N> gs` op immediately before the `1 0 0 rg` fill, and the
+        document's `/ExtGState` resource binds that key to `/ca 0.5
+        /CA 0.5` (non-stroking AND stroking — never stale)."""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " background-color: rgba(255, 0, 0, 0.5)'>x</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        # Background color is unchanged at the rg op.
+        expect(content).to_contain(b"1 0 0 rg")
+        # An ExtGState reference precedes it, gating the fill alpha.
+        idx_gs = content.index(b"gs")
+        idx_rg = content.index(b"1 0 0 rg")
+        expect(idx_gs < idx_rg).to_equal(True)
+        # The page resource dict + ExtGState entries land in the doc.
+        expect(data).to_contain(b"/ExtGState")
+        # ISO 32000-1 §11.3.7: both `ca` AND `CA` MUST be set together.
+        # A stale `CA` from a prior op carries through if not reset.
+        expect(data).to_contain(b"/ca 0.5")
+        expect(data).to_contain(b"/CA 0.5")
+
+    @test
+    def translucent_border_uses_CA():
+        """A translucent border (`rgba(0,0,255,0.5)` on a stroked rect)
+        emits the `/Gs<N> gs` gate before the `0 0 1 RG` stroke color
+        — and the ExtGState entry sets `CA` (stroking alpha)."""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " border: 2pt solid rgba(0, 0, 255, 0.5)'>x</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        # Stroke color (uppercase RG) for the border.
+        expect(content).to_contain(b"0 0 1 RG")
+        idx_gs = content.index(b"gs")
+        idx_rg = content.index(b"0 0 1 RG")
+        expect(idx_gs < idx_rg).to_equal(True)
+        expect(data).to_contain(b"/CA 0.5")
+        # Both channels are still set together — `ca` must be present too.
+        expect(data).to_contain(b"/ca 0.5")
+
+    @test
+    def opaque_color_emits_no_extgstate():
+        """`rgba(...)` with α = 1.0 (or plain `rgb()`) does NOT emit a
+        `/Gs<N> gs` gate — only the opaque rg/RG ops. Cheap path."""
+        html = '<p style="color: rgba(255, 0, 0, 1.0)">opaque</p>'
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        # No /Gs gate — full alpha needs no ExtGState reference.
+        expect(b"/Gs1 gs" not in content).to_equal(True)
+
+    @test
+    def page_group_entry_present_when_translucent():
+        """ISO 32000-1 §11.6.6 + WeasyPrint issue #2723: a page that
+        contains any `ca`/`CA != 1` gets a `/Group << /S /Transparency
+        /CS /DeviceRGB /I true >>` entry on the page object so the
+        viewer doesn't fall back to non-isolated-against-page-backdrop
+        and produce divergent renderings between Adobe / Foxit /
+        Preview."""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " background-color: rgba(255, 0, 0, 0.5)'>x</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # The page dict must carry the Transparency Group entry.
+        expect(data).to_contain(b"/Group")
+        expect(data).to_contain(b"/S /Transparency")
+        expect(data).to_contain(b"/CS /DeviceRGB")
+        expect(data).to_contain(b"/I true")
+
+    @test
+    def page_group_absent_when_fully_opaque():
+        """Pages that paint only opaque colors do NOT emit the page
+        Group entry — no extra dict cost on opaque pages."""
+        html = "<div style='background: rgb(255, 0, 0)'>x</div>"
+        data = HtmlDocument(string=html).to_bytes()
+        # No translucent paint anywhere → no page Group entry.
+        expect(b"/S /Transparency" not in data).to_equal(True)
 
 
 with describe("box-shadow"):
