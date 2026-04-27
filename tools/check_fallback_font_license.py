@@ -38,8 +38,7 @@ def check() -> list[str]:
         license_path = font.with_name(f"{font.stem}-LICENSE")
         if not license_path.exists():
             errors.append(
-                f"missing license file: {license_path} "
-                f"(required alongside {font.name})"
+                f"missing license file: {license_path} (required alongside {font.name})"
             )
             continue
         try:
@@ -54,6 +53,7 @@ def check() -> list[str]:
 
 
 def main() -> int:
+    """Entry point: run `check()` and surface any errors on stderr."""
     errors = check()
     if errors:
         for e in errors:

@@ -960,10 +960,9 @@ with describe("HtmlDocument - WS-1B fallback font"):
         # a Type0/Identity-H Tj as a (\xHH\xLL) literal pair.
         # The "Café " prefix (with WinAnsi 0xE9) appears either as a
         # parenthesised literal containing 0xE9 or as <Caf…> hex.
-        assert (
-            b"(Caf\xe9 ) Tj" in content
-            or b"<436166E920>" in content
-        ), f"WinAnsi prefix `Café ` missing, got: {content!r}"
+        assert b"(Caf\xe9 ) Tj" in content or b"<436166E920>" in content, (
+            f"WinAnsi prefix `Café ` missing, got: {content!r}"
+        )
 
     @test
     def fallback_face_carries_identity_h_encoding():
@@ -993,9 +992,7 @@ with describe("HtmlDocument - WS-1B fallback font"):
         `__pdfun_fallback` face — *not* silently swap to Helvetica.
         Pre-WS-1B that swap caused unknown-family runs to lose
         Unicode coverage; the fallback restores it."""
-        doc = HtmlDocument(
-            string='<p style="font-family: Roboto">Café ☑</p>'
-        )
+        doc = HtmlDocument(string='<p style="font-family: Roboto">Café ☑</p>')
         data = doc.to_bytes()
         content = content_stream(data)
         # The whole run renders on the fallback face — no Helvetica
@@ -1021,18 +1018,16 @@ with describe("HtmlDocument - WS-1B fallback font"):
         assert "Café" in extracted, (
             f"WinAnsi chars lost on fallback face: {extracted!r}"
         )
-        assert "☑" in extracted, (
-            f"ballot box lost on fallback face: {extracted!r}"
-        )
+        assert "☑" in extracted, f"ballot box lost on fallback face: {extracted!r}"
 
     @test
     def known_generic_family_still_wins_over_fallback():
         """If the CSS family list ends in a known generic
         (`sans-serif`, `serif`, `monospace`), the generic still wins —
         WS-1B only promotes when nothing in the list is recognised."""
-        doc = HtmlDocument(string='<p style="font-family: Roboto, sans-serif">hello</p>')
+        html = '<p style="font-family: Roboto, sans-serif">hello</p>'
+        doc = HtmlDocument(string=html)
         data = doc.to_bytes()
-        content = content_stream(data)
         # F1 here should be Helvetica (the generic match), not the
         # fallback. We can't trivially distinguish F1 across documents,
         # but we can assert the Type0/CIDFontType2 (fallback) embed is
@@ -1078,7 +1073,7 @@ with describe("HtmlDocument - WS-1B fallback font"):
         repo_root = Path(__file__).resolve().parent.parent
         script = repo_root / "tools" / "check_fallback_font_license.py"
         assert script.exists(), f"missing {script}"
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603 -- internal repo script, no untrusted input
             [sys.executable, str(script)],
             capture_output=True,
             text=True,
@@ -1115,9 +1110,7 @@ with describe("HtmlDocument - WS-1B fallback font"):
 
         # Both faces must appear in the resource dict — Helvetica for
         # the Latin runs and __pdfun_fallback for the ballot boxes.
-        assert b"/Helvetica" in data, (
-            "Helvetica missing from font resource dict"
-        )
+        assert b"/Helvetica" in data, "Helvetica missing from font resource dict"
         assert b"/__pdfun_fallback" in data, (
             "__pdfun_fallback missing from font resource dict"
         )
