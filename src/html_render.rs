@@ -2719,4 +2719,21 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn col_span_replicates_style() {
+        // `background-color` (longhand) — the `background` shorthand isn't
+        // parsed by `parse_inline_style` yet (a separate workstream).
+        let html = "<table><colgroup>\
+            <col span=\"3\" style=\"width:10%; background-color: yellow\">\
+            </colgroup><tr><td>a</td><td>b</td><td>c</td></tr></table>";
+        with_first_table(html, |table| {
+            let cols = extract_col_styles(table);
+            assert_eq!(cols.len(), 3);
+            for c in &cols {
+                assert!(matches!(c.width, Some(css::CssLength::Pct(v)) if (v - 10.0).abs() < 1e-3));
+                assert_eq!(c.background_color, Some((1.0, 1.0, 0.0)));
+            }
+        });
+    }
 }
