@@ -3445,6 +3445,30 @@ mod tests {
     }
 
     #[test]
+    fn percents_summing_over_100_scale_down() {
+        // [60%, 60%] of a 600pt table area would naively resolve to
+        // [360, 360] = 720pt — overflowing the table. Per Blink and
+        // WeasyPrint, percents over 100% scale proportionally so the
+        // table still fits its container.
+        let cs = vec![
+            css::ColStyle {
+                width: Some(css::CssLength::Pct(60.0)),
+                ..Default::default()
+            },
+            css::ColStyle {
+                width: Some(css::CssLength::Pct(60.0)),
+                ..Default::default()
+            },
+        ];
+        let mut hints = resolve_col_hints(&cs, 600.0);
+        assert!((hints[0].unwrap() - 360.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 360.0).abs() < 1e-3);
+        scale_overlong_percent_hints(&mut hints, 600.0);
+        assert!((hints[0].unwrap() - 300.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 300.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn explicit_length_widths_are_honored() {
         // `<col style="width: 100pt">` resolves to 100pt regardless of
         // the table's container width — only `%` is container-relative.
