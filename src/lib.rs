@@ -215,6 +215,85 @@ pub(crate) fn transcode_with_fallback(text: &str) -> Vec<u8> {
     out
 }
 
+/// One contiguous chunk of a text run, classified by whether the entire
+/// chunk lives in the PDF `WinAnsiEncoding` repertoire (WS-1A's
+/// `transcode_to_pdf_winansi` would accept it) or contains codepoints
+/// that need promotion onto a Unicode-capable face (WS-1B's job).
+///
+/// Sequencing: the slices produced by [`split_at_non_winansi`] always
+/// alternate `WinAnsi` and `NonWinAnsi`, never two of the same kind in
+/// a row — and never an empty slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunChunk<'a> {
+    /// Substring whose every codepoint maps cleanly to a WinAnsi byte.
+    /// Built-in Type1 fonts can render this directly.
+    WinAnsi(&'a str),
+    /// Substring whose every codepoint is *outside* the WinAnsi
+    /// repertoire. Layout will promote this onto the bundled fallback
+    /// face (or, with the feature off, leave it as '?' substitutes).
+    NonWinAnsi(&'a str),
+}
+
+/// Split a text run into alternating `WinAnsi` / `NonWinAnsi` chunks
+/// based on WS-1A's transcoder verdict per char. No allocation per
+/// chunk — slices borrow from the input.
+///
+/// `"Café ☑ done"` → `[WinAnsi("Café "), NonWinAnsi("☑"), WinAnsi(" done")]`.
+pub(crate) fn split_at_non_winansi(text: &str) -> Vec<RunChunk<'_>> {
+    let mut out: Vec<RunChunk<'_>> = Vec::new();
+    if text.is_empty() {
+        return out;
+    }
+    // We walk char_indices once, batching consecutive codepoints with
+    // the same WinAnsi-mappable verdict into a single slice. The
+    // verdict is computed by feeding each char through WS-1A's
+    // transcoder via `char_is_winansi`.
+    let mut chunk_start = 0usize;
+    let mut chunk_is_win: Option<bool> = None;
+    for (idx, ch) in text.char_indices() {
+        let is_win = char_is_winansi(ch);
+        match chunk_is_win {
+            None => {
+                chunk_is_win = Some(is_win);
+                chunk_start = idx;
+            }
+            Some(prev) if prev != is_win => {
+                let slice = &text[chunk_start..idx];
+                out.push(if prev {
+                    RunChunk::WinAnsi(slice)
+                } else {
+                    RunChunk::NonWinAnsi(slice)
+                });
+                chunk_start = idx;
+                chunk_is_win = Some(is_win);
+            }
+            _ => {}
+        }
+    }
+    // Trailing chunk: covers chunk_start..text.len().
+    if let Some(prev) = chunk_is_win {
+        let slice = &text[chunk_start..];
+        if !slice.is_empty() {
+            out.push(if prev {
+                RunChunk::WinAnsi(slice)
+            } else {
+                RunChunk::NonWinAnsi(slice)
+            });
+        }
+    }
+    out
+}
+
+/// Whether a single codepoint maps cleanly to a WinAnsi byte. Defined
+/// as "WS-1A's transcoder accepts the one-char string". Kept private —
+/// callers outside the splitter should go through the transcoder
+/// directly so the WinAnsi spec lives in exactly one place.
+fn char_is_winansi(ch: char) -> bool {
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+    winansi::transcode_to_pdf_winansi(s).is_ok()
+}
+
 /// Escape a byte buffer for PDF literal string encoding (`(...)`).
 /// Parentheses and backslashes must be escaped per ISO 32000-1 §7.3.4.2.
 /// Accepts arbitrary bytes — used after WinAnsi transcoding so the input
@@ -368,6 +447,57 @@ mod fallback_tests {
         assert!(is_embedded_font("Custom-42"));
         assert!(!is_embedded_font("Helvetica"));
         assert!(!is_embedded_font("Times-Roman"));
+    }
+
+    #[test]
+    fn split_run_at_non_winansi() {
+        // Mixed run from the COBRA fixture: a Latin-1 prefix, a single
+        // non-WinAnsi codepoint, then a Latin-1 suffix. The splitter
+        // must produce exactly three alternating chunks; no empty
+        // slices, no double-classification.
+        let chunks = split_at_non_winansi("Café ☑ done");
+        assert_eq!(
+            chunks,
+            vec![
+                RunChunk::WinAnsi("Café "),
+                RunChunk::NonWinAnsi("☑"),
+                RunChunk::WinAnsi(" done"),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_pure_winansi_run_is_single_chunk() {
+        let chunks = split_at_non_winansi("Café au lait");
+        assert_eq!(chunks, vec![RunChunk::WinAnsi("Café au lait")]);
+    }
+
+    #[test]
+    fn split_pure_non_winansi_run_is_single_chunk() {
+        let chunks = split_at_non_winansi("☑☐");
+        assert_eq!(chunks, vec![RunChunk::NonWinAnsi("☑☐")]);
+    }
+
+    #[test]
+    fn split_empty_run_yields_no_chunks() {
+        let chunks = split_at_non_winansi("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn split_consecutive_non_winansi_chars_collapse() {
+        // Two non-WinAnsi codepoints back-to-back must collapse into a
+        // single NonWinAnsi chunk — the layout-side promotion path is
+        // cheaper if it can emit one BeginText/EndText per chunk.
+        let chunks = split_at_non_winansi("a☑☐b");
+        assert_eq!(
+            chunks,
+            vec![
+                RunChunk::WinAnsi("a"),
+                RunChunk::NonWinAnsi("☑☐"),
+                RunChunk::WinAnsi("b"),
+            ]
+        );
     }
 }
 
