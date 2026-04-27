@@ -191,14 +191,19 @@ pub(crate) struct HeadingEntry {
 pub(crate) struct FormXObjectData {
     pub(crate) bbox: [f32; 4],
     pub(crate) operations: Vec<PdfOp>,
+    /// Stored for completeness; the page-level emission path
+    /// re-derives the font set from the captured ops via
+    /// `lib::write_ops`, so this field is documentation-only.
+    #[allow(dead_code)]
     pub(crate) fonts_used: Vec<String>,
     pub(crate) images_used: Vec<usize>,
     /// Indices into the same `PageContent::form_xobjects` for nested
     /// transparency groups (an `opacity:0.5` block inside another).
     pub(crate) nested_xobjects: Vec<usize>,
     /// Alphas referenced by `SetAlpha` ops inside this Form XObject's
-    /// content stream — collected so the XObject's own `/Resources`
-    /// dict can re-bind the matching `/Gs<N>` ExtGStates.
+    /// content stream. The page-level emission path re-derives this
+    /// via `collect_alphas_in_ops` so the field is documentation-only.
+    #[allow(dead_code)]
     pub(crate) alphas: Vec<f32>,
 }
 

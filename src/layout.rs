@@ -1112,7 +1112,12 @@ pub(crate) fn split_rgba(c: (f32, f32, f32, f32)) -> ((f32, f32, f32), f32) {
 
 /// Drop the alpha channel of a 4-tuple color. Used at sites that don't
 /// carry alpha through the rendering pipeline (e.g. column rules,
-/// margin-box `color`, `<col>` backgrounds).
+/// margin-box `color`, `<col>` backgrounds). Test-only today; the
+/// `css::rgb_only` variant is the cascade-side equivalent and is what
+/// production code calls. Kept here as the layout-side counterpart so
+/// future rendering paths that need to drop alpha at draw time have
+/// the seam ready.
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn rgb_only4(c: (f32, f32, f32, f32)) -> (f32, f32, f32) {
     (c.0, c.1, c.2)
@@ -1122,10 +1127,16 @@ pub(crate) fn rgb_only4(c: (f32, f32, f32, f32)) -> (f32, f32, f32) {
 /// Per ISO 32000-1 §11.3.7 + CSS Compositing & Blending L1 §4 this is
 /// **only valid for leaf paints** (a box with no descendants drawn in
 /// the same pass). For an `opacity < 1` block that contains descendants,
-/// the renderer must wrap the subtree in a Form XObject `/Group` and
-/// apply the parent opacity on the surrounding stream — see
+/// the renderer wraps the subtree in a Form XObject `/Group` and
+/// applies the parent opacity on the surrounding stream — see
 /// `needs_transparency_group`. Multiplying through to leaves makes
 /// overlapping translucent children show through each other incorrectly.
+///
+/// pdfun's current container path always wraps `opacity < 1` in a
+/// Transparency Group (see `enter_container_node`), so this helper is
+/// not on the runtime hot path — it stays as a documented predicate
+/// + unit-tested seam for any future leaf-fast-path optimization.
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn effective_leaf_alpha(opacity: f32, color_alpha: f32) -> f32 {
     (opacity * color_alpha).clamp(0.0, 1.0)
@@ -1133,10 +1144,15 @@ pub(crate) fn effective_leaf_alpha(opacity: f32, color_alpha: f32) -> f32 {
 
 /// Whether a block that has `opacity < 1` and `has_descendant_draws`
 /// must be rendered through a Form XObject Transparency Group rather
-/// than via leaf-alpha multiplication. `opacity ≥ 1.0` always returns
+/// than via leaf-alpha multiplication. `opacity >= 1.0` always returns
 /// `false` (no group needed); otherwise the rule is "any descendant
-/// draws → group" so that overlapping translucent children composite
+/// draws -> group" so that overlapping translucent children composite
 /// correctly per CSS Compositing & Blending L1 §4.
+///
+/// Today's container code applies the group rule unconditionally for
+/// `opacity < 1` containers — `has_descendant_draws == false` is a
+/// micro-optimization left for a follow-up; this helper is the seam.
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn needs_transparency_group(opacity: f32, has_descendant_draws: bool) -> bool {
     opacity < 1.0 && has_descendant_draws
