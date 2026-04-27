@@ -1,10 +1,15 @@
 //! PDF `WinAnsiEncoding` transcoder (ISO 32000-1 Annex D.2).
 //!
-//! NB: PDF's `WinAnsiEncoding` is **not** identical to Windows-1252. The
-//! seven slots Windows-1252 leaves undefined (0x7F, 0x81, 0x8D, 0x8F,
-//! 0x90, 0x9D, 0xAD) are all mapped to the bullet glyph `•` in the PDF
-//! spec — a transcoder built from `iconv WINDOWS-1252` would mis-encode
-//! those slots.
+//! `WinAnsiEncoding` is the PDF-defined byte → glyph table for built-in
+//! Type 1 fonts. It is similar to Windows-1252 but not identical: per the
+//! PDF spec, byte values that have no other glyph assignment in the
+//! table — 0x7F, 0x81, 0x8D, 0x8F, 0x90, 0x9D, and 0xAD — all render as
+//! `•` (bullet). A transcoder built blindly from `iconv WINDOWS-1252`
+//! would emit those bytes for codepoints they represent in Windows-1252
+//! (DEL at 0x7F, soft hyphen at 0xAD), which would render as bullets in
+//! a PDF reader rather than the intended glyphs. We always emit
+//! 0x95 (the canonical bullet slot) for both U+2022 BULLET and
+//! U+00AD SOFT HYPHEN, and never emit the seven shadow-bullet bytes.
 
 /// Transcode a `&str` into PDF `WinAnsiEncoding` bytes. Returns `Err(c)`
 /// carrying the first non-mappable character so a downstream caller (e.g.

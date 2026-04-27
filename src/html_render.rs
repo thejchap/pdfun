@@ -2273,8 +2273,13 @@ pub(crate) fn extract_col_styles(table_handle: &Handle) -> Vec<css::ColStyle> {
                 style.background_color = Some(css::rgb_only(bg));
             }
             // border-* longhands are folded into a single ColBorder if any
-            // of width/color/style are non-default.
-            let bw = inline.border_width.map(|len| len.resolve(0.0));
+            // of width/color/style are non-default. Use the fallback length
+            // context so em/rem/vw/vh widths don't collapse to zero (a 0
+            // em_base would zero them out; LengthContext::fallback supplies
+            // the spec-default 12pt em + Letter viewport).
+            let bw = inline
+                .border_width
+                .map(|len| len.resolve_ctx(&css::LengthContext::fallback()));
             if bw.is_some() || inline.border_color.is_some() || inline.border_style.is_some() {
                 let prev = style.border;
                 style.border = Some(css::ColBorder {

@@ -102,18 +102,49 @@ impl UrlFetcher for DefaultFetcher {
             Scheme::Data => {
                 Err("data: URIs must be handled by the resolver, not the fetcher".to_string())
             }
-            Scheme::File | Scheme::Other => read_local(url, base_dir),
+            Scheme::File => read_local(url, base_dir),
+            Scheme::Other => {
+                // `Scheme::Other` means `parse_scheme` did not recognize a
+                // valid RFC 3986 scheme — but the URL may still *look* like
+                // it has a scheme (e.g. `ftp://`) and we should reject that
+                // explicitly rather than letting `read_local` try to open
+                // the literal path "ftp://...". Bare relative/absolute paths
+                // (no `://`) fall through to `read_local`.
+                if let Some(scheme) = unrecognized_scheme(url) {
+                    Err(format!("unsupported URL scheme: {scheme:?}"))
+                } else {
+                    read_local(url, base_dir)
+                }
+            }
         }
+    }
+}
+
+/// If `url` looks like it carries a URI scheme (matches RFC 3986's
+/// `scheme ":" "//"` shape) but `parse_scheme` returned `Other`, return
+/// the unrecognized scheme so the caller can refuse it. Returns `None`
+/// for bare paths.
+fn unrecognized_scheme(url: &str) -> Option<&str> {
+    let (prefix, _) = url.split_once("://")?;
+    let mut chars = prefix.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    if chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
+        Some(prefix)
+    } else {
+        None
     }
 }
 
 /// Resolve `url` (a `file://` URL or a bare relative/absolute path) into
 /// a local path, honoring `base_dir` for relatives, then read the bytes.
+/// Strips the `file://` prefix case-insensitively to match
+/// `parse_scheme`'s case handling per RFC 3986 §3.1.
 fn read_local(url: &str, base_dir: Option<&Path>) -> Result<FetchedResource, String> {
-    let path_str = if let Some(rest) = url.strip_prefix("file://") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("FILE://") {
-        rest
+    let path_str = if url.len() >= 7 && url[..7].eq_ignore_ascii_case("file://") {
+        &url[7..]
     } else {
         url
     };
@@ -495,6 +526,46 @@ mod tests {
             .fetch("data:text/plain,hi", None)
             .expect_err("rejects");
         assert!(err.contains("data:"), "got {err:?}");
+    }
+
+    /// Regression: an unrecognized scheme like `ftp://` must not be
+    /// silently forwarded to the local-file path. The classifier returns
+    /// `Scheme::Other` for these, but `DefaultFetcher` should still
+    /// recognize them as "looks like a URL" and return an explicit
+    /// "unsupported URL scheme" error rather than a confusing
+    /// "no such file: ftp://..." error.
+    #[test]
+    fn default_fetcher_rejects_unrecognized_scheme() {
+        for url in ["ftp://example.com/x", "gopher://x", "mailto:foo@bar"] {
+            // mailto: has no `//` so falls into the bare-path branch — but
+            // we also want ftp/gopher (which do have //) explicitly caught.
+            if url.contains("://") {
+                let err = DefaultFetcher.fetch(url, None).expect_err("rejects");
+                assert!(
+                    err.contains("unsupported URL scheme"),
+                    "expected scheme rejection for {url:?}, got {err:?}"
+                );
+            }
+        }
+    }
+
+    /// Regression: `parse_scheme` is case-insensitive (`File://` → `File`)
+    /// so `read_local`'s prefix stripping must match. Before the fix,
+    /// `File://path` was classified as a file scheme but kept the
+    /// `File://` prefix and failed with "no such file".
+    #[test]
+    fn default_fetcher_strips_file_prefix_case_insensitively() {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        path.push(format!("pdfun-fileci-{}-{}.txt", std::process::id(), nanos));
+        std::fs::write(&path, b"ok").unwrap();
+        let url = format!("File://{}", path.to_str().unwrap());
+        let res = DefaultFetcher.fetch(&url, None).unwrap();
+        assert_eq!(res.bytes, b"ok");
+        let _ = std::fs::remove_file(&path);
     }
 
     // ── HTTP-feature tests ──────────────────────────────────────
