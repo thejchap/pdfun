@@ -225,10 +225,10 @@ pub(crate) fn transcode_with_fallback(text: &str) -> Vec<u8> {
 /// a row — and never an empty slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RunChunk<'a> {
-    /// Substring whose every codepoint maps cleanly to a WinAnsi byte.
+    /// Substring whose every codepoint maps cleanly to a `WinAnsi` byte.
     /// Built-in Type1 fonts can render this directly.
     WinAnsi(&'a str),
-    /// Substring whose every codepoint is *outside* the WinAnsi
+    /// Substring whose every codepoint is *outside* the `WinAnsi`
     /// repertoire. Layout will promote this onto the bundled fallback
     /// face (or, with the feature off, leave it as '?' substitutes).
     NonWinAnsi(&'a str),
@@ -284,10 +284,10 @@ pub(crate) fn split_at_non_winansi(text: &str) -> Vec<RunChunk<'_>> {
     out
 }
 
-/// Whether a single codepoint maps cleanly to a WinAnsi byte. Defined
+/// Whether a single codepoint maps cleanly to a `WinAnsi` byte. Defined
 /// as "WS-1A's transcoder accepts the one-char string". Kept private —
 /// callers outside the splitter should go through the transcoder
-/// directly so the WinAnsi spec lives in exactly one place.
+/// directly so the `WinAnsi` spec lives in exactly one place.
 fn char_is_winansi(ch: char) -> bool {
     let mut buf = [0u8; 4];
     let s = ch.encode_utf8(&mut buf);
@@ -319,18 +319,18 @@ pub(crate) struct RegisteredFont {
     pub(crate) name: String, // e.g. "Custom-0" or "__pdfun_fallback"
 }
 
-/// Internal name reserved for the bundled DejaVu Sans fallback face. A
-/// run hits this face only when WS-1A's WinAnsi transcoder rejects a
+/// Internal name reserved for the bundled `DejaVu` Sans fallback face. A
+/// run hits this face only when WS-1A's `WinAnsi` transcoder rejects a
 /// codepoint and WS-1B promotes that codepoint onto a Unicode-capable
 /// font. Treated like `Custom-N` everywhere — same Type0/CIDFont2
-/// Identity-H plumbing, same `ToUnicode` CMap pipeline.
+/// Identity-H plumbing, same `ToUnicode` `CMap` pipeline.
 pub(crate) const FALLBACK_FONT_NAME: &str = "__pdfun_fallback";
 
 /// Family name advertised on the `@font-face` registry for the bundled
 /// fallback. Lower-cased internally to match cascade lookup behaviour.
 pub(crate) const FALLBACK_FONT_FAMILY: &str = "__pdfun_fallback";
 
-/// Bundled DejaVu Sans font bytes. Kept inside a Cargo feature gate so
+/// Bundled `DejaVu` Sans font bytes. Kept inside a Cargo feature gate so
 /// users who ship their own `@font-face` can drop the ~750 KB.
 #[cfg(feature = "bundled-fallback-font")]
 pub(crate) const FALLBACK_FONT_BYTES: &[u8] =

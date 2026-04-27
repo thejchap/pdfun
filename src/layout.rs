@@ -11,19 +11,19 @@ use crate::{BUILTIN_FONTS, PageContent, PdfDocument, PdfOp, RegisteredFont};
 /// Push the right sequence of ops to render `text` at `font_size` using
 /// `font_name` as the active face. For embedded faces (`Custom-*`,
 /// `__pdfun_fallback`) this is a single `ShowGlyphs`. For built-in
-/// (Type1, WinAnsi-encoded) faces, runs whose every codepoint is in the
-/// WinAnsi repertoire emit a `ShowText` with the transcoded bytes.
+/// (Type1, `WinAnsi`-encoded) faces, runs whose every codepoint is in the
+/// `WinAnsi` repertoire emit a `ShowText` with the transcoded bytes.
 ///
 /// Mixed runs (e.g. `"Café ☑ done"` on Helvetica) are split via
-/// [`crate::split_at_non_winansi`] and the non-WinAnsi chunks promoted
+/// [`crate::split_at_non_winansi`] and the non-`WinAnsi` chunks promoted
 /// onto the bundled `__pdfun_fallback` Identity-H face — emitting an
 /// in-line `Tf` switch + `ShowGlyphs` then switching back. WS-1B
 /// guarantees the surrounding `BeginText`/`EndText` brackets stay
 /// intact; PDF allows `Tf` inside a text object.
 ///
-/// When the `bundled-fallback-font` feature is disabled, non-WinAnsi
+/// When the `bundled-fallback-font` feature is disabled, non-`WinAnsi`
 /// chunks fall back to per-char '?' substitution (the WS-1A bound).
-fn push_show_text(page: &mut PageContent, font_name: &str, font_size: f32, text: String) {
+fn push_show_text(page: &mut PageContent, font_name: &str, font_size: f32, text: &str) {
     if crate::is_embedded_font(font_name) {
         page.operations.push(PdfOp::ShowGlyphs(text.chars().collect()));
         return;
@@ -31,7 +31,7 @@ fn push_show_text(page: &mut PageContent, font_name: &str, font_size: f32, text:
     // Built-in path: split into alternating WinAnsi / non-WinAnsi
     // chunks. A pure-WinAnsi run (the common case) collapses into a
     // single chunk and emits exactly one `ShowText`.
-    let chunks = crate::split_at_non_winansi(&text);
+    let chunks = crate::split_at_non_winansi(text);
     if chunks.is_empty() {
         return;
     }
@@ -43,7 +43,7 @@ fn push_show_text(page: &mut PageContent, font_name: &str, font_size: f32, text:
         // WS-1A transcoder. `transcode_with_fallback` is idempotent
         // here because every char is mappable.
         page.operations
-            .push(PdfOp::ShowText(crate::transcode_with_fallback(&text)));
+            .push(PdfOp::ShowText(crate::transcode_with_fallback(text)));
         return;
     }
     // Mixed run. Lazy-register the fallback name on this page's
@@ -2167,7 +2167,7 @@ impl LayoutInner {
                     &mut page,
                     &marker.font_name,
                     marker.font_size,
-                    marker.text.clone(),
+                    &marker.text,
                 );
                 page.operations.push(PdfOp::EndText);
             }
@@ -2288,7 +2288,7 @@ impl LayoutInner {
                     &mut page,
                     &segment.font_name,
                     segment.font_size,
-                    segment.text.clone(),
+                    &segment.text,
                 );
                 page.operations.push(PdfOp::EndText);
 
@@ -2587,7 +2587,7 @@ impl LayoutInner {
             size: font_size,
         });
         page.operations.push(PdfOp::SetTextPosition { x, y });
-        push_show_text(page, &font_name, font_size, text);
+        push_show_text(page, &font_name, font_size, &text);
         page.operations.push(PdfOp::EndText);
         // Restore default fill color to black so later ops (if any) see
         // a predictable state. Since margin boxes are stamped last, this
@@ -2924,7 +2924,7 @@ impl LayoutInner {
                             &mut page,
                             &segment.font_name,
                             segment.font_size,
-                            segment.text.clone(),
+                            &segment.text,
                         );
                         page.operations.push(PdfOp::EndText);
                         x += segment.width;
