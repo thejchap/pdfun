@@ -1064,6 +1064,55 @@ with describe("HtmlDocument - WS-1B fallback font"):
             f"text layer still shows '?' substitute: {extracted!r}"
         )
 
+    @test
+    def cobra_check_marks_render():
+        """Integration: the COBRA-notice fixture relies on `&#9745;`
+        (ballot box ☑) rendering inline with surrounding Latin text.
+        This is the canonical WS-1B acceptance scenario — Rung 5 of
+        the workstream's bottom-up TDD ladder. The PDF must
+        (a) declare both Helvetica AND `__pdfun_fallback` in its font
+        resource dictionary, and (b) round-trip the ballot box and
+        Spanish text together via the PDF text layer."""
+        import fitz
+
+        # Mirrors the COBRA fixture pattern: bullet list with a checked
+        # ballot box, plus Latin-1 chars that exercise the WinAnsi
+        # path on Helvetica.
+        html = (
+            "<ul>"
+            "<li>&#9745; Inscripci&oacute;n confirmada</li>"
+            "<li>&#9745; Caf&eacute; incluido</li>"
+            "<li>&#9745; &Uacute;ltima p&aacute;gina</li>"
+            "</ul>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+
+        # Both faces must appear in the resource dict — Helvetica for
+        # the Latin runs and __pdfun_fallback for the ballot boxes.
+        assert b"/Helvetica" in data, (
+            "Helvetica missing from font resource dict"
+        )
+        assert b"/__pdfun_fallback" in data, (
+            "__pdfun_fallback missing from font resource dict"
+        )
+
+        # Text-layer round-trip: every line must extract intact.
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        for needle in (
+            "☑",
+            "Inscripción confirmada",
+            "Café incluido",
+            "Última página",
+        ):
+            assert needle in extracted, (
+                f"COBRA round-trip lost {needle!r}; got: {extracted!r}"
+            )
+
 
 with describe("HtmlDocument - nesting"):
 
