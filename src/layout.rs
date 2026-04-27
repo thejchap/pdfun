@@ -3445,6 +3445,27 @@ mod tests {
     }
 
     #[test]
+    fn explicit_length_widths_are_honored() {
+        // `<col style="width: 100pt">` resolves to 100pt regardless of
+        // the table's container width — only `%` is container-relative.
+        let cs = vec![
+            css::ColStyle {
+                width: Some(css::CssLength::Pt(100.0)),
+                ..Default::default()
+            },
+            css::ColStyle {
+                width: Some(css::CssLength::Px(100.0)), // 100 CSS px = 75 PDF pt
+                ..Default::default()
+            },
+            css::ColStyle::default(),
+        ];
+        let hints = resolve_col_hints(&cs, 600.0);
+        assert!((hints[0].unwrap() - 100.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 75.0).abs() < 1e-3);
+        assert!(hints[2].is_none());
+    }
+
+    #[test]
     fn unspecified_columns_share_remainder() {
         // Auto layout, hints = [Some(50%=300pt), None, None] in a 600pt
         // table. Column 0 takes 300pt; the remaining 300pt is shared
