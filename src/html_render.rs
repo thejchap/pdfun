@@ -2721,6 +2721,22 @@ mod tests {
     }
 
     #[test]
+    fn missing_colgroup_produces_default_styles() {
+        // A table without a <colgroup>/<col> declaration produces an empty
+        // Vec<ColStyle> — the layout pass falls through to the existing
+        // intrinsic algorithm.
+        let html = "<table><tr><td>a</td><td>b</td></tr></table>";
+        with_first_table(html, |table| {
+            let cols = extract_col_styles(table);
+            assert!(
+                cols.is_empty(),
+                "expected zero col styles when no <colgroup>; got {} entries",
+                cols.len()
+            );
+        });
+    }
+
+    #[test]
     fn col_span_replicates_style() {
         // `background-color` (longhand) — the `background` shorthand isn't
         // parsed by `parse_inline_style` yet (a separate workstream).
