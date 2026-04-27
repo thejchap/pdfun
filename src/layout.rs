@@ -3605,6 +3605,92 @@ impl Layout {
 mod tests {
     use super::*;
 
+    // ── WS-2 Rung 3-4: leaf composition + group predicate ─────
+
+    #[test]
+    fn leaf_opacity_times_color_alpha() {
+        // Pure-fn: an `opacity: 0.5` block whose only paint is an
+        // `rgba(0,0,0,0.8)` background composes to α = 0.4 at the single
+        // ExtGState gate. Valid only for *leaf* boxes — see
+        // `needs_transparency_group` for the descendant case.
+        let alpha = effective_leaf_alpha(0.5, 0.8);
+        assert!((alpha - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn leaf_alpha_clamps_to_unit_range() {
+        // Out-of-range inputs (e.g. a buggy upstream computation) are
+        // clamped — paint never goes "more than opaque".
+        assert!((effective_leaf_alpha(2.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((effective_leaf_alpha(1.0, -0.5) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn opacity_one_means_no_group() {
+        // opacity=1.0: never wrap in a Form XObject regardless of
+        // descendant draws — the "fast path" stays fast.
+        assert!(!needs_transparency_group(1.0, true));
+        assert!(!needs_transparency_group(1.0, false));
+    }
+
+    #[test]
+    fn opacity_with_descendants_requires_group() {
+        // opacity<1 + has descendants drawn in the same pass: the
+        // subtree must render through a Transparency Group XObject so
+        // overlapping translucent children composite correctly per CSS
+        // Compositing & Blending L1 §4.
+        assert!(needs_transparency_group(0.5, true));
+    }
+
+    #[test]
+    fn opacity_without_descendants_uses_leaf_path() {
+        // opacity<1 but no descendants: the leaf path
+        // (`opacity * color_alpha` at the single fill/stroke op) is
+        // correct and cheaper than allocating a Form XObject.
+        assert!(!needs_transparency_group(0.5, false));
+    }
+
+    #[test]
+    fn split_rgba_separates_alpha() {
+        // Helper: drop the 4-tuple into the (rgb, alpha) shape consumed
+        // by `SetFillColor` / `SetStrokeColor` ops.
+        let ((r, g, b), a) = split_rgba((0.1, 0.2, 0.3, 0.4));
+        assert!((r - 0.1).abs() < 1e-6);
+        assert!((g - 0.2).abs() < 1e-6);
+        assert!((b - 0.3).abs() < 1e-6);
+        assert!((a - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rgb_only4_drops_alpha() {
+        let (r, g, b) = rgb_only4((0.1, 0.2, 0.3, 0.5));
+        assert!((r - 0.1).abs() < 1e-6);
+        assert!((g - 0.2).abs() < 1e-6);
+        assert!((b - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_alpha_skips_when_opaque() {
+        // α = 1.0 → no SetAlpha op is appended; the existing fill/stroke
+        // path takes over directly. Avoids spurious /Gs<N> gs noise.
+        let mut ops: Vec<PdfOp> = Vec::new();
+        push_alpha_if_translucent(&mut ops, 1.0);
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn push_alpha_emits_when_translucent() {
+        // α < 1.0 → a SetAlpha op is appended so the next color op is
+        // gated by the corresponding ExtGState entry.
+        let mut ops: Vec<PdfOp> = Vec::new();
+        push_alpha_if_translucent(&mut ops, 0.5);
+        assert_eq!(ops.len(), 1);
+        match ops[0] {
+            PdfOp::SetAlpha { alpha } => assert!((alpha - 0.5).abs() < 1e-6),
+            _ => panic!("expected SetAlpha op"),
+        }
+    }
+
     #[test]
     fn wrap_text_empty_input_returns_empty() {
         let lines = wrap_text_impl("", 100.0, "Helvetica", 12.0).unwrap();
