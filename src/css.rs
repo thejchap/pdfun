@@ -5421,6 +5421,70 @@ mod tests {
     }
 
     #[test]
+    fn first_matches_only_page_one() {
+        let sel = parse_page_selector_text(":first");
+        assert!(sel.matches(1, 5));
+        assert!(!sel.matches(2, 5));
+        assert!(!sel.matches(5, 5));
+    }
+
+    #[test]
+    fn left_matches_even_pages_in_ltr() {
+        // LTR: page 1 is right-hand, page 2 is left-hand, etc.
+        let sel = parse_page_selector_text(":left");
+        assert!(!sel.matches(1, 6));
+        assert!(sel.matches(2, 6));
+        assert!(!sel.matches(3, 6));
+        assert!(sel.matches(4, 6));
+    }
+
+    #[test]
+    fn right_matches_odd_pages_in_ltr() {
+        let sel = parse_page_selector_text(":right");
+        assert!(sel.matches(1, 6));
+        assert!(!sel.matches(2, 6));
+        assert!(sel.matches(3, 6));
+        assert!(sel.matches(5, 6));
+    }
+
+    #[test]
+    fn nth_matches_literal_index() {
+        let sel = parse_page_selector_text(":nth(3)");
+        assert!(!sel.matches(1, 10));
+        assert!(!sel.matches(2, 10));
+        assert!(sel.matches(3, 10));
+        assert!(!sel.matches(4, 10));
+    }
+
+    #[test]
+    fn first_right_matches_only_page_one_in_ltr() {
+        // Page 1 is right-hand AND first → matches.
+        let sel = parse_page_selector_text(":first:right");
+        assert!(sel.matches(1, 5));
+        // Page 3 is right-hand but not first → must not match.
+        assert!(!sel.matches(3, 5));
+        // Page 2 is first-disqualified → must not match.
+        assert!(!sel.matches(2, 5));
+    }
+
+    #[test]
+    fn blank_never_matches_in_v1() {
+        // pdfun's pagination doesn't yet expose forced-empty pages, so
+        // `:blank` is parsed-but-never-matched. Documented v1 cut.
+        let sel = parse_page_selector_text(":blank");
+        for n in 1..=10 {
+            assert!(!sel.matches(n, 10));
+        }
+    }
+
+    #[test]
+    fn universal_selector_matches_every_page() {
+        let sel = parse_page_selector_text("");
+        assert!(sel.matches(1, 1));
+        assert!(sel.matches(7, 99));
+    }
+
+    #[test]
     fn specificity_tuple_orders_correctly() {
         // Per CSS Paged Media L3 §4.4 the specificity tuple is sorted
         // lexicographically (f, g, h). `:first:left` `(0,1,1)` beats both
