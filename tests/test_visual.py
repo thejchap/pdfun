@@ -106,6 +106,16 @@ with describe("visual regression"):
         _check_visual("opacity")
 
     @test
+    def rgba_overlap():
+        # WS-2 rung 9 + 11: two overlapping translucent panels
+        # composited through the page-level Transparency Group. The
+        # PNG snapshot is captured via MuPDF (fitz) — same backend
+        # the rest of the suite uses, so a cross-viewer Adobe / Foxit
+        # diff is out of scope here. The actionable proxy lives in
+        # `test_html.py::page_group_entry_present_when_translucent`.
+        _check_visual("rgba_overlap")
+
+    @test
     def padding_border():
         _check_visual("padding_border")
 
