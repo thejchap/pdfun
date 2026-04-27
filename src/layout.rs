@@ -2376,11 +2376,11 @@ impl LayoutInner {
         // `self.margin_boxes`/`self.render_margin_box`.
         let resolved: Vec<css::MarginBoxes> = (1..=total_pages)
             .map(|page_num| {
-                if !self.page_rules.is_empty() {
+                if self.page_rules.is_empty() {
+                    self.margin_boxes.clone()
+                } else {
                     self.resolve_page_style_for(page_num, total_pages)
                         .margin_boxes
-                } else {
-                    self.margin_boxes.clone()
                 }
             })
             .collect();
@@ -2966,8 +2966,8 @@ impl LayoutInner {
     /// style (CSS Paged Media L3 §4.4) so margins, page size, and
     /// margin-box content can vary across pages (e.g. `:first` shrinks
     /// page 1's margins, `:left`/`:right` flip mirror gutters). The
-    /// caller's column-relative cursor / col_width state is updated in
-    /// place to reflect the freshly resolved geometry.
+    /// caller's column-relative cursor / `col_width` state is updated
+    /// in place to reflect the freshly resolved geometry.
     #[allow(clippy::too_many_arguments)]
     fn advance_column_or_page(
         &mut self,
