@@ -439,11 +439,13 @@ with describe("HtmlDocument - lists"):
 
     @test
     def ul_has_bullet_marker():
-        """<ul><li> has a disc bullet marker (rendered as ASCII '*')."""
+        """<ul><li> emits a disc bullet marker as WinAnsi byte 0x95
+        (the PDF-spec bullet • slot). Pre-WS-1A this rendered as the
+        ASCII '*' substitute."""
         doc = HtmlDocument(string="<ul><li>Item</li></ul>")
         data = doc.to_bytes()
         content = content_stream(data)
-        expect(content).to_contain(b"(*)")
+        expect(content).to_contain(b"<95>")
 
     @test
     def ul_multiple_items():
@@ -504,8 +506,9 @@ with describe("HtmlDocument - lists"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         content = content_stream(data)
-        # depth 0 = disc ('*'), depth 1 = circle ('o')
-        expect(content).to_contain(b"(*)")
+        # depth 0 = disc (WinAnsi byte 0x95 -> hex `<95>`),
+        # depth 1 = circle (ASCII 'o' -> literal `(o)`).
+        expect(content).to_contain(b"<95>")
         expect(content).to_contain(b"(o)")
 
     @test
@@ -715,29 +718,44 @@ with describe("HtmlDocument - unicode"):
 
     @test
     def unicode_text():
-        """Unicode characters pass through without crashing."""
+        """Unicode characters land in the content stream as their
+        PDF-WinAnsi bytes (post WS-1A), not the original UTF-8.
+        `Héllo wörld` becomes `48 E9 6C 6C 6F 20 77 F6 72 6C 64`."""
         doc = HtmlDocument(string="<p>Héllo wörld</p>")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(data).to_contain("Héllo wörld".encode().hex().upper().encode())
+        # WinAnsi bytes (uppercase hex form chosen by pdf-writer when
+        # the literal contains non-ASCII): 0xE9 = é, 0xF6 = ö.
+        expect(content).to_contain(b"48E96C6C6F2077F6726C64")
 
     @test
     def numeric_entity():
-        """Numeric character reference &#169; is decoded."""
+        """Numeric character reference &#169; (©) is decoded and
+        emitted as the WinAnsi byte 0xA9 — pre WS-1A this test
+        asserted the UTF-8 hex `C2A9`, which was the latent encoding
+        bug we are fixing."""
         doc = HtmlDocument(string="<p>&#169; 2024</p>")
         data = doc.to_bytes()
         content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(content).to_contain(b"C2A9")
+        # © in WinAnsi is byte 0xA9, then space (0x20), then "2024" =
+        # 0x32 0x30 0x32 0x34 — assert the full WinAnsi hex sequence.
+        expect(content).to_contain(b"A92032303234")
 
     @test
     def hex_entity():
-        """Hex character reference &#x2603; is decoded."""
+        """Hex character reference &#x2603; (☃) is outside the WinAnsi
+        repertoire — on a built-in font WS-1A falls back to '?' per
+        char (WS-1B will promote to a Unicode-capable face). Pre
+        WS-1A this test asserted the UTF-8 hex `E29883`, which never
+        actually rendered as a snowman."""
         doc = HtmlDocument(string="<p>&#x2603;</p>")
         data = doc.to_bytes()
         content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(content).to_contain(b"E29883")
+        # '?' = 0x3F; pdf-writer uses literal form for ASCII-only.
+        expect(content).to_contain(b"(?)")
 
     @test
     def multiple_named_entities():
@@ -746,6 +764,143 @@ with describe("HtmlDocument - unicode"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b'<tag> & "quotes"')
+
+
+with describe("HtmlDocument - WinAnsi text encoding (WS-1A)"):
+    # spec: ISO 32000-1 Annex D.2; behaviors: text-encoding-winansi
+    @test
+    def winansi_chars_in_text_op():
+        """Built-in PDF fonts speak WinAnsi: a string with a Latin-1
+        codepoint must land in the content stream as the WinAnsi byte
+        (`Caf\\xe9`), not the raw UTF-8 (`Caf\\xc3\\xa9`).
+
+        Note: `pdf-writer` switches Tj string literals to hex form
+        (`<436166E9>`) whenever the buffer contains a non-ASCII byte,
+        so we accept either the parenthesized literal (`(Caf\\xe9)`)
+        or its uppercase-hex equivalent."""
+        doc = HtmlDocument(string="<p>Café</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Either form is a correct PDF representation of the bytes
+        # 43 61 66 E9 ("Café" in WinAnsi):
+        assert b"(Caf\xe9)" in content or b"<436166E9>" in content, (
+            f"expected WinAnsi 'Café' (literal or <436166E9>), got: {content!r}"
+        )
+        # Negative: the UTF-8 byte sequence must NOT show up in the
+        # content stream — that's the defect we're fixing.
+        assert b"\xc3\xa9" not in content, (
+            "UTF-8 bytes leaked into content stream — WinAnsi transcode missing"
+        )
+        assert b"C3A9" not in content, (
+            "UTF-8 bytes (hex form) leaked into content stream — "
+            "WinAnsi transcode missing"
+        )
+
+    @test
+    def winansi_handles_em_dash_and_smart_quotes():
+        """Em-dash (U+2014) and smart quotes (U+2018/U+2019) live in
+        the 0x80-0x9F WinAnsi override window — not in Latin-1.
+        Verify they emit the PDF-spec bytes (em-dash 0x97,
+        left-quote 0x93, right-quote 0x94). pdf-writer hex-encodes
+        non-ASCII literals so we look for the uppercase hex digits."""
+        doc = HtmlDocument(string="<p>he said—“hi”</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # The hex string between < > carries every byte uppercase-hex:
+        # so 0x97 em-dash appears as "97", 0x93 as "93", 0x94 as "94".
+        assert b"<" in content
+        assert b">" in content
+        # Find the hex-string segment for our text and assert the
+        # expected bytes are present.
+        import re
+
+        found_run = False
+        for m in re.finditer(rb"<([0-9A-Fa-f]+)>", content):
+            hexbytes = bytes.fromhex(m.group(1).decode())
+            if b"he said" in hexbytes:
+                assert b"\x97" in hexbytes, "em-dash 0x97 missing"
+                assert b"\x93" in hexbytes, "left-quote 0x93 missing"
+                assert b"\x94" in hexbytes, "right-quote 0x94 missing"
+                found_run = True
+                break
+        assert found_run, "text run with 'he said' not found"
+
+    @test
+    def disc_marker_is_bullet():
+        """The list `Disc` marker emits the WinAnsi bullet byte (0x95),
+        not an ASCII asterisk substitute. pdf-writer hex-encodes
+        non-ASCII Tj literals — so we look for `<95>` (the marker
+        emitted by itself) or `95` inside a hex run."""
+        doc = HtmlDocument(string="<ul><li>x</li></ul>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Negative: the asterisk substitute is gone.
+        assert b"(*)" not in content, (
+            "list disc marker still emits ASCII '*' instead of WinAnsi bullet 0x95"
+        )
+        # Positive: a Tj of just byte 0x95 — pdf-writer renders
+        # non-ASCII byte strings as `<95>`.
+        assert b"<95>" in content, f"expected `<95> Tj` for bullet, got: {content!r}"
+
+    @test
+    def spanish_text_extracts_via_text_layer():
+        """A built-in font emitting WinAnsi bytes must declare
+        `/Encoding /WinAnsiEncoding` on the font dict so PDF readers
+        (and `pymupdf.Page.get_text`) can map bytes back to Unicode.
+        Without this, byte 0xE9 is interpreted via StandardEncoding
+        and the extracted text mangles to `Caf\\xd8`."""
+        import fitz
+
+        spanish = "¿Hablas español? Última página."
+        doc = HtmlDocument(string=f"<p>{spanish}</p>")
+        data = doc.to_bytes()
+        # The font dict must carry /Encoding /WinAnsiEncoding so that
+        # readers know how to decode the WinAnsi bytes we emit.
+        assert b"/Encoding /WinAnsiEncoding" in data, (
+            "Type1 font dict missing /Encoding /WinAnsiEncoding — "
+            "viewers will mis-decode WinAnsi bytes via StandardEncoding"
+        )
+        # Confirm the PDF text layer round-trips back to the original
+        # string. (PyMuPDF honors WinAnsiEncoding when present.)
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert spanish in extracted, (
+            f"text layer extraction expected to contain {spanish!r}, got {extracted!r}"
+        )
+
+    @test
+    def spanish_text_round_trip():
+        """Integration: render Spanish text with Latin-1 codepoints
+        plus the inverted question/exclamation marks, then byte-compare
+        the extracted text against the original input. Rung 8 of the
+        WS-1A acceptance gate — this is the "Café español" defect
+        the workstream exists to fix."""
+        import fitz
+
+        original = "¿Hablas español? Instrucciones en la última página."
+        doc = HtmlDocument(string=f"<p>{original}</p>")
+        data = doc.to_bytes()
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf).strip()
+        finally:
+            pdf.close()
+        assert extracted == original, (
+            f"round-trip mismatch:\n  expected: {original!r}\n  got: {extracted!r}"
+        )
+
+    @test
+    def winansi_non_mappable_falls_back_to_question_mark():
+        """A codepoint outside WinAnsi (e.g. U+2611 ballot box) falls
+        back to '?' on built-in fonts (WS-1A bound). WS-1B will
+        replace this fallback with a Unicode-capable font."""
+        doc = HtmlDocument(string="<p>ok ☑ done</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"ok ? done")
 
 
 with describe("HtmlDocument - nesting"):
@@ -3078,13 +3233,15 @@ with describe("list-style-type"):
 
     @test
     def disc_marker_explicit():
-        """list-style-type: disc produces '*' ASCII marker."""
+        """list-style-type: disc produces WinAnsi bullet byte 0x95
+        (rendered as `<95>` in the content stream by pdf-writer when
+        the literal contains non-ASCII)."""
         doc = HtmlDocument(
             string='<ul style="list-style-type: disc"><li>Item</li></ul>'
         )
         data = doc.to_bytes()
         content = content_stream(data)
-        expect(content).to_contain(b"(*)")
+        expect(content).to_contain(b"<95>")
 
     @test
     def square_marker():
@@ -3110,9 +3267,10 @@ with describe("list-style-type"):
         # Both contain "Item" but the "none" variant has no marker
         expect(data_with_content).to_contain(b"Item")
         expect(data_none_content).to_contain(b"Item")
-        # The marker ShowText call is absent in the "none" version
-        assert b"(*)" in data_with_content
-        assert b"(*)" not in data_none_content
+        # The marker ShowText call is absent in the "none" version.
+        # Disc renders as WinAnsi bullet byte 0x95 (`<95>` hex form).
+        assert b"<95>" in data_with_content
+        assert b"<95>" not in data_none_content
 
     @test
     def decimal_via_stylesheet():
@@ -3152,7 +3310,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
     @test
     def inside_renders_marker_and_text():
@@ -3163,7 +3322,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
     # spec: CSS Lists 3 §3; behaviors: lists-style-position
     @test
@@ -3191,7 +3351,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
 
 with describe("definition lists and figures"):
