@@ -2439,8 +2439,11 @@ pub fn render_dom_to_layout(
     // its src list, extract measurement metrics, and stash the lookup on
     // the renderer plus the bytes on `LayoutInner` so the embed pipeline
     // picks them up at PDF write time.
-    let (registered, lookup, mut face_warnings) =
-        font_face::build_font_face_registry(&stylesheet.font_faces, base_dir);
+    let (registered, lookup, mut face_warnings) = font_face::build_font_face_registry(
+        &stylesheet.font_faces,
+        base_dir,
+        &crate::url_fetcher::DefaultFetcher,
+    );
     let mut metrics_map: std::collections::BTreeMap<
         String,
         crate::font_metrics::CustomFontMetrics,
