@@ -328,9 +328,8 @@ mod tests {
             None,
             &crate::url_fetcher::DefaultFetcher,
         );
-        let err = match res {
-            Err(e) => e,
-            Ok(_) => panic!("expected an error, got Ok"),
+        let Err(err) = res else {
+            panic!("expected an error, got Ok");
         };
         assert!(
             err.contains("http-fetch feature not enabled"),

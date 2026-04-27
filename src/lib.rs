@@ -373,6 +373,7 @@ pub(crate) const FALLBACK_FONT_NAME: &str = "__pdfun_fallback";
 
 /// Family name advertised on the `@font-face` registry for the bundled
 /// fallback. Lower-cased internally to match cascade lookup behaviour.
+#[cfg(feature = "bundled-fallback-font")]
 pub(crate) const FALLBACK_FONT_FAMILY: &str = "__pdfun_fallback";
 
 /// Bundled `DejaVu` Sans font bytes. Kept inside a Cargo feature gate so
@@ -456,22 +457,25 @@ mod fallback_tests {
         // (under the default-on `bundled-fallback-font` feature). With
         // the feature off this returns Ok(None) and registers nothing.
         let first = register_fallback_if_needed(&mut registered).expect("ok");
-        if cfg!(feature = "bundled-fallback-font") {
+
+        #[cfg(feature = "bundled-fallback-font")]
+        {
             assert_eq!(first, Some(FALLBACK_FONT_NAME.to_string()));
             assert_eq!(registered.len(), 1);
             assert_eq!(registered[0].name, FALLBACK_FONT_NAME);
             assert_eq!(registered[0].family, FALLBACK_FONT_FAMILY);
             assert!(!registered[0].data.is_empty());
-        } else {
+
+            // Second call: idempotent — no new entry, returns the same name.
+            let second = register_fallback_if_needed(&mut registered).expect("ok");
+            assert_eq!(second, Some(FALLBACK_FONT_NAME.to_string()));
+            assert_eq!(registered.len(), 1);
+        }
+        #[cfg(not(feature = "bundled-fallback-font"))]
+        {
             assert_eq!(first, None);
             assert!(registered.is_empty());
-            return;
         }
-
-        // Second call: idempotent — no new entry, returns the same name.
-        let second = register_fallback_if_needed(&mut registered).expect("ok");
-        assert_eq!(second, Some(FALLBACK_FONT_NAME.to_string()));
-        assert_eq!(registered.len(), 1);
     }
 
     #[cfg(feature = "bundled-fallback-font")]
