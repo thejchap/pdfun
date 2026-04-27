@@ -826,8 +826,16 @@ fn write_font_objects(
             pdf.stream(tounicode_ref, &compressed_cmap)
                 .filter(Filter::FlateDecode);
         } else {
-            pdf.type1_font(fr.type0_ref)
-                .base_font(Name(fr.name.as_bytes()));
+            // Built-in Type1 fonts: declare `/Encoding /WinAnsiEncoding`
+            // so viewers (and text-extraction tools) decode the bytes
+            // we emit per ISO 32000-1 Annex D.2 instead of the default
+            // StandardEncoding. ZapfDingbats and Symbol use their own
+            // built-in encodings and must NOT carry a WinAnsi override.
+            let mut t1 = pdf.type1_font(fr.type0_ref);
+            t1.base_font(Name(fr.name.as_bytes()));
+            if fr.name != "Symbol" && fr.name != "ZapfDingbats" {
+                t1.encoding_predefined(Name(b"WinAnsiEncoding"));
+            }
         }
     }
 }

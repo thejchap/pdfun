@@ -841,6 +841,36 @@ with describe("HtmlDocument - WinAnsi text encoding (WS-1A)"):
         assert b"<95>" in content, f"expected `<95> Tj` for bullet, got: {content!r}"
 
     @test
+    def spanish_text_extracts_via_text_layer():
+        """A built-in font emitting WinAnsi bytes must declare
+        `/Encoding /WinAnsiEncoding` on the font dict so PDF readers
+        (and `pymupdf.Page.get_text`) can map bytes back to Unicode.
+        Without this, byte 0xE9 is interpreted via StandardEncoding
+        and the extracted text mangles to `Caf\\xd8`."""
+        import fitz
+
+        spanish = "¿Hablas español? Última página."
+        doc = HtmlDocument(string=f"<p>{spanish}</p>")
+        data = doc.to_bytes()
+        # The font dict must carry /Encoding /WinAnsiEncoding so that
+        # readers know how to decode the WinAnsi bytes we emit.
+        assert b"/Encoding /WinAnsiEncoding" in data, (
+            "Type1 font dict missing /Encoding /WinAnsiEncoding — "
+            "viewers will mis-decode WinAnsi bytes via StandardEncoding"
+        )
+        # Confirm the PDF text layer round-trips back to the original
+        # string. (PyMuPDF honors WinAnsiEncoding when present.)
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert spanish in extracted, (
+            f"text layer extraction expected to contain {spanish!r}, "
+            f"got {extracted!r}"
+        )
+
+    @test
     def winansi_non_mappable_falls_back_to_question_mark():
         """A codepoint outside WinAnsi (e.g. U+2611 ballot box) falls
         back to '?' on built-in fonts (WS-1A bound). WS-1B will
