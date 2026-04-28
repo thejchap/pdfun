@@ -4329,6 +4329,23 @@ with describe("images"):
             expect(data).to_contain(b"/Subtype /Image")
 
     @test
+    def img_absolute_from_root_resolves_against_base_url():
+        """T1.2: ``<img src="/assets/foo.png">`` with ``base_url=tmpdir``
+        resolves to ``tmpdir/assets/foo.png`` rather than the system
+        root, matching browser + WeasyPrint behavior."""
+        png = _make_png(1, 1, bytes([200, 100, 50]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets = Path(tmpdir) / "assets"
+            assets.mkdir()
+            (assets / "foo.png").write_bytes(png)
+            doc = HtmlDocument(
+                string='<img src="/assets/foo.png">',
+                base_url=tmpdir,
+            )
+            data = doc.to_bytes()
+            expect(data).to_contain(b"/Subtype /Image")
+
+    @test
     def multiple_images_get_distinct_names():
         """Multiple images in one document get /Im0 and /Im1."""
         png1 = _make_png(1, 1, bytes([255, 0, 0]))
@@ -6302,6 +6319,24 @@ with describe("@font-face"):
             font_path = Path(tmpdir) / "myfont.ttf"
             font_path.write_bytes(_FIXTURE_TTF_PATH.read_bytes())
             css = '@font-face { font-family: MyFont; src: url("myfont.ttf"); }'
+            html = f"<style>{css}</style><p style='font-family: MyFont'>x</p>"
+            doc = HtmlDocument(string=html, base_url=tmpdir)
+            data = doc.to_bytes()
+            expect(doc.warnings()).to_equal([])
+            assert b"/Subtype /Type0" in data
+
+    @test
+    def absolute_from_root_path_resolves_against_base_url():
+        """T1.2: ``url("/assets/font.ttf")`` is treated as
+        ``base_url``-relative — matching browser + WeasyPrint URL-join
+        semantics where ``base_url`` is the document root for
+        ``/``-rooted refs. Before T1.2 this failed with "no such file
+        or directory" against the system root."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets_dir = Path(tmpdir) / "assets"
+            assets_dir.mkdir()
+            (assets_dir / "myfont.ttf").write_bytes(_FIXTURE_TTF_PATH.read_bytes())
+            css = "@font-face { font-family: MyFont; src: url(/assets/myfont.ttf); }"
             html = f"<style>{css}</style><p style='font-family: MyFont'>x</p>"
             doc = HtmlDocument(string=html, base_url=tmpdir)
             data = doc.to_bytes()
