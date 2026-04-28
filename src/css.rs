@@ -3193,6 +3193,28 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
     }
 }
 
+// ── User-agent stylesheet ─────────────────────────────────
+
+/// User-agent default stylesheet rules applied before any author CSS.
+///
+/// This mirrors the small subset of the CSS 2.1 §A.5 / HTML Living
+/// Standard "rendering" defaults that pdfun cares about for paged
+/// output. Browsers (Chromium, Firefox) and `WeasyPrint` all ship
+/// equivalents of these declarations through their own UA sheets;
+/// without them, `<a href>` text inherits the surrounding color and
+/// is visually indistinguishable from non-link prose.
+///
+/// The constant is exposed so `html_render` can prepend it to the
+/// concatenated `<style>` block CSS at parse time. Because rules are
+/// resolved in source order on equal specificity (see
+/// `match_rules_for`), author rules parsed afterwards win — preserving
+/// the standard CSS cascade origin precedence (UA < author).
+///
+/// `:visited`, `:hover`, `:focus`, and the `cursor` property are
+/// intentionally omitted: pdfun has no notion of visited state in
+/// paged output and does not parse those CSS features today.
+pub const USER_AGENT_STYLESHEET: &str = "a { color: #0000ee; text-decoration: underline; }\n";
+
 // ── Stylesheet parsing ────────────────────────────────────
 
 /// Parse a CSS stylesheet (from `<style>` blocks) into rules.
@@ -4832,6 +4854,65 @@ mod tests {
         let sheet = parse_stylesheet("[data-role=\"primary\"] { color: red }");
         let elem = test_elem("p", vec![], None, vec![("data-role", "primary")], vec![]);
         assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
+    }
+
+    // ── Tier 1.3: <a> user-agent defaults ─────────────────────
+
+    #[test]
+    fn ua_stylesheet_gives_anchor_blue_underline() {
+        // The UA stylesheet shipped with pdfun supplies the standard
+        // unvisited-link defaults. Parsing it on its own and matching
+        // an `<a>` element must yield the canonical Mosaic-blue color
+        // (#0000ee) and an `underline` text-decoration.
+        let sheet = parse_stylesheet(USER_AGENT_STYLESHEET);
+        let elem = test_elem("a", vec![], None, vec![("href", "x")], vec![]);
+        let style = match_rules(&elem, &sheet);
+        let (r, g, b) = style.color.expect("UA sheet must set <a> color");
+        assert!(r.abs() < 0.01, "red channel should be ~0, got {r}");
+        assert!(g.abs() < 0.01, "green channel should be ~0, got {g}");
+        assert!(
+            (b - 0xee as f32 / 255.0).abs() < 0.01,
+            "blue channel should be ~0.933, got {b}"
+        );
+        let dec = style
+            .text_decoration
+            .expect("UA sheet must set <a> text-decoration");
+        assert!(dec.underline, "UA <a> default must include underline");
+    }
+
+    #[test]
+    fn ua_stylesheet_does_not_target_non_anchors() {
+        // Sanity check: the UA `a` rule must not bleed onto `<p>` or
+        // any other type. If it did, we'd be turning every paragraph
+        // blue and underlined.
+        let sheet = parse_stylesheet(USER_AGENT_STYLESHEET);
+        let elem = test_elem("p", vec![], None, vec![], vec![]);
+        let style = match_rules(&elem, &sheet);
+        assert!(style.color.is_none());
+        assert!(style.text_decoration.is_none());
+    }
+
+    #[test]
+    fn author_a_color_overrides_ua_default() {
+        // The UA stylesheet must lose to author CSS at equal
+        // specificity (a vs. a, both 0,0,1). We simulate the
+        // production cascade by concatenating UA + author into a
+        // single stylesheet — that's exactly what
+        // `html_render::render_dom_to_layout` does at parse time.
+        let combined = format!("{USER_AGENT_STYLESHEET}a {{ color: red }}");
+        let sheet = parse_stylesheet(&combined);
+        let elem = test_elem("a", vec![], None, vec![("href", "x")], vec![]);
+        let style = match_rules(&elem, &sheet);
+        assert_eq!(
+            style.color,
+            Some((1.0, 0.0, 0.0)),
+            "author `a {{ color: red }}` must override UA blue"
+        );
+        // The UA underline still wins for text-decoration since the
+        // author rule didn't override it — confirms per-property
+        // cascade behavior.
+        let dec = style.text_decoration.expect("UA underline still applies");
+        assert!(dec.underline);
     }
 
     #[test]
