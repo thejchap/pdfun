@@ -3435,6 +3435,68 @@ with describe("clickable links"):
         expect(data).to_contain(b"/Link")
         expect(content).to_contain(b"styled link")
 
+    # Tier 1.3 — UA stylesheet supplies the unvisited-link defaults
+    # (color #0000ee, text-decoration: underline). These tests pin the
+    # cascade behavior end-to-end: the underline must appear under the
+    # link text only, the link text must be drawn in blue, and surrounding
+    # text must keep its inherited (default-black) color.
+    @test
+    def ua_default_paints_link_text_blue():
+        """`<a>` text gets the UA-default Mosaic blue (#0000ee)."""
+        doc = HtmlDocument(
+            string='<p>before <a href="https://example.com">link</a> after</p>'
+        )
+        content = content_stream(doc.to_bytes())
+        # 0xee / 255 ≈ 0.93333; pdfun emits PDF colors as rounded floats.
+        expect(content).to_contain(b"0 0 0.93333334 rg")
+        # The link's text must be present in the content stream.
+        expect(content).to_contain(b"link")
+
+    @test
+    def ua_default_underlines_link_text():
+        """`<a>` text gets a stroked underline directly under the link."""
+        doc = HtmlDocument(
+            string='<p>before <a href="https://example.com">link</a> after</p>'
+        )
+        content = content_stream(doc.to_bytes())
+        # Stroke color matches the fill (blue) and a stroke op `S` follows
+        # the move/line pair that draws the underline rule.
+        expect(content).to_contain(b"0 0 0.93333334 RG")
+        expect(content).to_contain(b" m\n")  # MoveTo for the underline
+        expect(content).to_contain(b" l\nS\n")  # LineTo + Stroke
+
+    @test
+    def ua_default_does_not_color_surrounding_text():
+        """Text adjacent to `<a>` keeps its default color (no leak)."""
+        doc = HtmlDocument(
+            string='<p>before <a href="https://example.com">link</a> after</p>'
+        )
+        content = content_stream(doc.to_bytes())
+        # The "before" run must NOT be preceded by a blue fill-color op:
+        # find the position of "(before)" and assert no `0 0 0.93333334 rg`
+        # appears between the start of the content stream and that text.
+        before_idx = content.index(b"(before)")
+        prefix = content[:before_idx]
+        assert b"0 0 0.93333334 rg" not in prefix, (
+            "UA <a> blue must not leak onto preceding text; "
+            f"found blue fill before 'before' at offset {before_idx}"
+        )
+
+    @test
+    def author_a_color_overrides_ua_default():
+        """An author `a { color: red }` rule beats the UA blue."""
+        html = (
+            "<html><head><style>a { color: red; }</style></head>"
+            '<body><p><a href="https://example.com">link</a></p></body></html>'
+        )
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        # Pure red (1.0, 0.0, 0.0) for the link text fill.
+        expect(content).to_contain(b"1 0 0 rg")
+        # And the UA blue should NOT appear as a fill color anywhere.
+        assert b"0 0 0.93333334 rg" not in content, (
+            "author `a { color: red }` must override the UA blue"
+        )
+
 
 with describe("list-style-type"):
 
