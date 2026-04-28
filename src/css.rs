@@ -5419,7 +5419,10 @@ mod tests {
             .text_decoration
             .expect("UA sheet must set <a> text-decoration");
         assert!(dec.underline, "UA <a> default must include underline");
-        assert!((a - 1.0).abs() < f32::EPSILON, "alpha must default to 1.0, got {a}");
+        assert!(
+            (a - 1.0).abs() < f32::EPSILON,
+            "alpha must default to 1.0, got {a}"
+        );
     }
 
     #[test]
