@@ -298,8 +298,7 @@ mod tests {
         let mut dir = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         dir.push(format!("pdfun-test-{}-{}", std::process::id(), nanos));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("font.bin");

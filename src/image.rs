@@ -298,8 +298,7 @@ mod tests {
         let mut path = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         path.push(format!(
             "pdfun-img-src-{}-{}.png",
             std::process::id(),
