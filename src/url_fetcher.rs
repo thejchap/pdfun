@@ -142,6 +142,13 @@ fn unrecognized_scheme(url: &str) -> Option<&str> {
 /// a local path, honoring `base_dir` for relatives, then read the bytes.
 /// Strips the `file://` prefix case-insensitively to match
 /// `parse_scheme`'s case handling per RFC 3986 §3.1.
+///
+/// When `base_dir` is `Some`, an absolute-from-root path like
+/// `/assets/foo.ttf` is treated as `base_dir`-relative — matching
+/// browser and `WeasyPrint` URL-join semantics where `base_url` acts
+/// as the document root for `/`-rooted refs. When `base_dir` is
+/// `None`, absolute paths fall through to the system root unchanged
+/// so direct uses of `read_local("/etc/hosts", None)` still work.
 fn read_local(url: &str, base_dir: Option<&Path>) -> Result<FetchedResource, String> {
     let path_str = if url.len() >= 7 && url[..7].eq_ignore_ascii_case("file://") {
         &url[7..]
@@ -149,10 +156,14 @@ fn read_local(url: &str, base_dir: Option<&Path>) -> Result<FetchedResource, Str
         url
     };
     let path = Path::new(path_str);
-    let resolved: PathBuf = if path.is_absolute() {
-        path.to_path_buf()
-    } else if let Some(base) = base_dir {
-        base.join(path)
+    let resolved: PathBuf = if let Some(base) = base_dir {
+        // Browser/`WeasyPrint` behavior: `/foo.png` against
+        // `base_url=/path/to/dir` resolves to `/path/to/dir/foo.png`.
+        // Strip the leading separator so `Path::join` doesn't replace
+        // `base` with the absolute path. Relative paths fall through
+        // unchanged.
+        let rel = path.strip_prefix("/").unwrap_or(path);
+        base.join(rel)
     } else {
         path.to_path_buf()
     };
@@ -630,6 +641,82 @@ mod tests {
         let res = DefaultFetcher.fetch(&url, None).unwrap();
         assert_eq!(res.bytes, b"ok");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Tier 1.2: with no `base_dir`, an absolute path still resolves
+    /// to the system root (existing behavior — direct uses of
+    /// `read_local("/etc/hosts", None)` must keep working). We can't
+    /// rely on `/etc/hosts` for hermetic tests, so we write a temp
+    /// file and confirm we can read it via its absolute path with no
+    /// base.
+    #[test]
+    fn read_local_absolute_path_without_base_dir_uses_system_root() {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        path.push(format!("pdfun-noBase-{}-{}.txt", std::process::id(), nanos));
+        std::fs::write(&path, b"sysroot").unwrap();
+        assert!(path.is_absolute(), "temp_dir gives absolute path");
+        let res = read_local(path.to_str().unwrap(), None).unwrap();
+        assert_eq!(res.bytes, b"sysroot");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Tier 1.2: with a `base_dir`, an absolute-from-root path is
+    /// treated as `base_dir`-relative (browser/`WeasyPrint` URL-join
+    /// semantics). `read_local("/assets/foo.txt", Some("/tmp/cobra"))`
+    /// reads `/tmp/cobra/assets/foo.txt`.
+    #[test]
+    fn read_local_absolute_path_with_base_dir_joins_against_base() {
+        let mut base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        base.push(format!("pdfun-base-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(base.join("assets")).unwrap();
+        let payload = b"join-against-base";
+        std::fs::write(base.join("assets").join("foo.txt"), payload).unwrap();
+        let res = read_local("/assets/foo.txt", Some(&base)).unwrap();
+        assert_eq!(res.bytes, payload);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Tier 1.2: relative paths still resolve against `base_dir`
+    /// (confirms the new branch didn't regress the existing path).
+    #[test]
+    fn read_local_relative_path_with_base_dir_unchanged() {
+        let mut base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        base.push(format!("pdfun-rel-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&base).unwrap();
+        let payload = b"relative-still-works";
+        std::fs::write(base.join("foo.txt"), payload).unwrap();
+        let res = read_local("foo.txt", Some(&base)).unwrap();
+        assert_eq!(res.bytes, payload);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Tier 1.2: end-to-end through `DefaultFetcher::fetch`.
+    /// `<img src="/assets/foo.png">` rendered with `base_url=base`
+    /// should resolve under `base_dir`.
+    #[test]
+    fn default_fetcher_absolute_path_resolves_under_base_dir() {
+        let mut base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        base.push(format!("pdfun-fetcher-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(base.join("assets")).unwrap();
+        let payload = b"\x89PNG\r\n\x1a\n";
+        std::fs::write(base.join("assets").join("foo.png"), payload).unwrap();
+        let res = DefaultFetcher
+            .fetch("/assets/foo.png", Some(&base))
+            .expect("absolute-from-root path resolves under base_dir");
+        assert_eq!(res.bytes, payload);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ── HTTP-feature tests ──────────────────────────────────────
