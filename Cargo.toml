@@ -16,7 +16,7 @@ default = ["bundled-fallback-font"]
 # Opt-in HTTP backend for the URL fetcher. Off by default so the library
 # stays pure-Rust with zero network capability — server callers who want
 # remote `<img>` / `@font-face` URLs enable this feature explicitly.
-http-fetch = ["dep:ureq"]
+http-fetch = ["dep:ureq", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
 # Bundle DejaVu Sans (~750 KB) as a built-in fallback face so non-WinAnsi
 # codepoints (e.g. ☑ U+2611) render even when the document doesn't ship
 # its own `@font-face`. Disable with `--no-default-features` to drop the
@@ -39,3 +39,11 @@ miniz_oxide = "0.8"
 # rustls + ring is the default in 3.x (no system OpenSSL); pure Rust
 # keeps the "no system deps" promise. Optional + opt-in via `http-fetch`.
 ureq = { version = "3", optional = true }
+# Explicit rustls + webpki-roots wiring for HttpFetcher's TLS config.
+# `ureq` already pulls these transitively, but listing them as direct
+# (optional, gated) deps lets HttpFetcher build a `RootCertStore` from
+# Mozilla's CA bundle and assert on it in tests, instead of relying on
+# `ureq`'s default `RootCerts::WebPki` magic.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"], optional = true }
+rustls-pki-types = { version = "1", optional = true }
+webpki-roots = { version = "1", optional = true }

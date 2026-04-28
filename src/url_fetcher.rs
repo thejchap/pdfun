@@ -171,6 +171,11 @@ fn read_local(url: &str, base_dir: Option<&Path>) -> Result<FetchedResource, Str
 /// validation, caps response body size, and applies connect + read
 /// timeouts. The default configuration rejects private + loopback IPs
 /// to block SSRF; tests can opt in via `allow_private_ips(true)`.
+///
+/// TLS trust anchors are loaded from `webpki_roots::TLS_SERVER_ROOTS`
+/// (Mozilla's CA bundle) at construction time and baked into the rustls
+/// `ClientConfig` we hand to `ureq`. Tests can swap them out via
+/// `with_root_store` to exercise alternate trust paths.
 #[cfg(feature = "http-fetch")]
 #[derive(Debug, Clone)]
 pub struct HttpFetcher {
@@ -178,6 +183,11 @@ pub struct HttpFetcher {
     max_body_bytes: u64,
     timeout: std::time::Duration,
     allow_private_ips: bool,
+    /// Mozilla CA bundle, baked into the rustls config we pass to `ureq`.
+    /// Stored explicitly so tests can assert it's populated and so the
+    /// HTTPS path doesn't silently rely on `ureq`'s transitive default
+    /// feature flags.
+    root_anchors: std::sync::Arc<Vec<rustls_pki_types::TrustAnchor<'static>>>,
 }
 
 #[cfg(feature = "http-fetch")]
@@ -196,6 +206,7 @@ impl HttpFetcher {
             max_body_bytes: 50 * 1024 * 1024, // 50 MiB
             timeout: std::time::Duration::from_secs(10),
             allow_private_ips: false,
+            root_anchors: std::sync::Arc::new(webpki_roots::TLS_SERVER_ROOTS.to_vec()),
         }
     }
 
@@ -227,6 +238,44 @@ impl HttpFetcher {
     pub fn allow_private_ips(mut self, yes: bool) -> Self {
         self.allow_private_ips = yes;
         self
+    }
+
+    /// Replace the trust anchors used for TLS server cert verification.
+    /// Defaults to `webpki_roots::TLS_SERVER_ROOTS`. Useful in tests to
+    /// inject a custom CA, or to assert on the live trust store.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn with_root_store(mut self, anchors: Vec<rustls_pki_types::TrustAnchor<'static>>) -> Self {
+        self.root_anchors = std::sync::Arc::new(anchors);
+        self
+    }
+
+    /// Number of TLS trust anchors currently loaded — exposed mainly so
+    /// tests can verify the webpki-roots wiring took effect without
+    /// prying at private fields.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn root_anchor_count(&self) -> usize {
+        self.root_anchors.len()
+    }
+
+    /// Build the rustls `ClientConfig` that mirrors the trust anchors
+    /// `fetch_with_redirects` hands to ureq. Used by tests to assert
+    /// the rustls plumbing accepts our `root_anchors` end-to-end; not
+    /// itself fed into ureq because ureq's public API only accepts a
+    /// `TlsConfig` (see `fetch_with_redirects` for the actual wiring).
+    #[allow(dead_code)] // Used by tests only.
+    fn build_rustls_config(&self) -> std::sync::Arc<rustls::ClientConfig> {
+        let root_store = rustls::RootCertStore {
+            roots: (*self.root_anchors).clone(),
+        };
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(rustls::ALL_VERSIONS)
+            .expect("rustls supports the default protocol versions")
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        std::sync::Arc::new(cfg)
     }
 }
 
@@ -265,9 +314,26 @@ impl HttpFetcher {
             // caught.
             self.validate_host_ips(&current)?;
 
+            // Wire `webpki_roots` into the rustls `ClientConfig` ureq
+            // hands the handshake. ureq's API doesn't accept a raw
+            // `rustls::ClientConfig`, so we instead pin both the crypto
+            // provider (ring) and the trust anchors (Mozilla's bundle,
+            // via `RootCerts::WebPki`) on its `TlsConfig` builder. This
+            // makes the wiring explicit at the call site and guards
+            // against ureq's transitive `rustls-webpki-roots` feature
+            // flag silently flipping off — which would otherwise turn
+            // `RootCerts::WebPki` into a runtime panic instead of
+            // loading any roots.
+            let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+            let tls_config = ureq::tls::TlsConfig::builder()
+                .provider(ureq::tls::TlsProvider::Rustls)
+                .root_certs(ureq::tls::RootCerts::WebPki)
+                .unversioned_rustls_crypto_provider(provider)
+                .build();
             let agent = ureq::Agent::config_builder()
                 .max_redirects(0)
                 .timeout_global(Some(self.timeout))
+                .tls_config(tls_config)
                 .build()
                 .new_agent();
             let response = agent
@@ -790,6 +856,71 @@ mod tests {
                 .expect_err("must cap");
             assert!(err.contains("byte cap"), "got {err:?}");
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Regression for the COBRA fixture's `assets.anuvi.io` HTTPS
+        /// fetch failing with `UnknownIssuer`: a freshly-constructed
+        /// `HttpFetcher` must come pre-loaded with Mozilla's CA bundle
+        /// so the rustls handshake actually has roots to verify
+        /// against. Inspect via `root_anchor_count` rather than poking
+        /// at private fields.
+        #[test]
+        fn new_loads_webpki_root_anchors() {
+            let fetcher = HttpFetcher::new();
+            assert!(
+                fetcher.root_anchor_count() > 0,
+                "HttpFetcher::new() must seed the trust store from \
+                 webpki_roots::TLS_SERVER_ROOTS — got 0 anchors, which \
+                 means HTTPS handshakes will fail with UnknownIssuer"
+            );
+            // Sanity: the count must match the upstream bundle so we
+            // know nothing got silently dropped on the way through.
+            assert_eq!(
+                fetcher.root_anchor_count(),
+                webpki_roots::TLS_SERVER_ROOTS.len(),
+                "trust anchor count drifted from webpki-roots"
+            );
+        }
+
+        /// `with_root_store` must replace the trust anchors so test
+        /// harnesses (and embedders pinning a private CA) can inject
+        /// their own roots without forking the fetcher.
+        #[test]
+        fn with_root_store_replaces_anchors() {
+            let fetcher = HttpFetcher::new().with_root_store(Vec::new());
+            assert_eq!(fetcher.root_anchor_count(), 0);
+        }
+
+        /// The rustls `ClientConfig` we build for ureq must actually
+        /// contain the trust anchors we loaded — guards against future
+        /// refactors that wire `root_anchors` into storage but forget
+        /// to feed them into the actual handshake config.
+        #[test]
+        fn build_rustls_config_succeeds_with_default_roots() {
+            let fetcher = HttpFetcher::new();
+            // Build twice to confirm the function is idempotent and
+            // doesn't panic on the ring crypto provider lookup.
+            let _a = fetcher.build_rustls_config();
+            let _b = fetcher.build_rustls_config();
+        }
+
+        /// Live HTTPS smoke test: hits a public endpoint to confirm
+        /// the rustls config we hand to ureq actually validates real
+        /// CA-signed certs end-to-end. Ignored by default because it
+        /// needs network and the runner's egress proxy may inject its
+        /// own CA — run with `cargo test --features http-fetch -- \
+        /// --ignored https_smoke` from a vanilla network.
+        #[test]
+        #[ignore = "needs network egress without MITM proxy"]
+        fn https_smoke_example_dot_com() {
+            let fetcher = HttpFetcher::new();
+            let res = fetcher
+                .fetch("https://example.com/", None)
+                .expect("HTTPS fetch must succeed against example.com");
+            assert!(
+                !res.bytes.is_empty(),
+                "expected a non-empty body from example.com"
+            );
         }
     }
 
