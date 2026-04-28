@@ -1121,6 +1121,14 @@ impl<'a> HtmlRenderer<'a> {
                     return;
                 }
 
+                // Flush any pending inline text BEFORE this element's
+                // style joins the inherit stack — otherwise text that
+                // accumulated in the parent's flow (e.g. "before " in
+                // `<p>before <a>link</a></p>`) would inherit this
+                // element's color via the cascade, which leaks the
+                // UA-default `<a>` blue back onto the surrounding text.
+                self.flush_run();
+
                 // Push inherited style for this element's subtree
                 let parent = self.inherit_stack.last().cloned().unwrap_or_default();
                 let inherited = parent.inherit_into(merged_style.as_ref());
@@ -2431,7 +2439,15 @@ pub fn render_dom_to_layout(
     layout: &mut LayoutInner,
     base_dir: Option<&std::path::Path>,
 ) -> RenderOutcome {
-    let css_text = extract_style_blocks(document);
+    let author_css = extract_style_blocks(document);
+    // Prepend the user-agent stylesheet (CSS Cascading 4 §6.2: UA
+    // origin is consulted before author origin). Concatenating into a
+    // single parse keeps the existing cascade engine simple — UA rules
+    // end up earlier in source order, so author rules at equal
+    // specificity win the source-order tiebreak in `match_rules_for`.
+    let mut css_text = String::with_capacity(css::USER_AGENT_STYLESHEET.len() + author_css.len());
+    css_text.push_str(css::USER_AGENT_STYLESHEET);
+    css_text.push_str(&author_css);
     let stylesheet = css::parse_stylesheet(&css_text);
     let page_style = stylesheet.page_style.clone();
 
