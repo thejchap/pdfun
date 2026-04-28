@@ -5408,7 +5408,7 @@ mod tests {
         let sheet = parse_stylesheet(USER_AGENT_STYLESHEET);
         let elem = test_elem("a", vec![], None, vec![("href", "x")], vec![]);
         let style = match_rules(&elem, &sheet);
-        let (r, g, b) = style.color.expect("UA sheet must set <a> color");
+        let (r, g, b, a) = style.color.expect("UA sheet must set <a> color");
         assert!(r.abs() < 0.01, "red channel should be ~0, got {r}");
         assert!(g.abs() < 0.01, "green channel should be ~0, got {g}");
         assert!(
@@ -5419,6 +5419,7 @@ mod tests {
             .text_decoration
             .expect("UA sheet must set <a> text-decoration");
         assert!(dec.underline, "UA <a> default must include underline");
+        assert!((a - 1.0).abs() < f32::EPSILON, "alpha must default to 1.0, got {a}");
     }
 
     #[test]
@@ -5446,7 +5447,7 @@ mod tests {
         let style = match_rules(&elem, &sheet);
         assert_eq!(
             style.color,
-            Some((1.0, 0.0, 0.0)),
+            Some((1.0, 0.0, 0.0, 1.0)),
             "author `a {{ color: red }}` must override UA blue"
         );
         // The UA underline still wins for text-decoration since the
