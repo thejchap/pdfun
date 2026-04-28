@@ -129,3 +129,28 @@ with describe("pluggable URL fetcher"):
         doc = HtmlDocument(string=html)
         warnings = doc.warnings()
         expect(any("missing.png" in w for w in warnings)).to_be(True)
+
+    @test("<img style='display: inline-block'> still routes through the fetcher")
+    def inline_block_img_still_fetches():
+        # Regression: an <img> with `display: inline-block` (or any
+        # combination thereof, e.g. `display: inline-block;
+        # position: absolute`, as used by the COBRA cover-page logo)
+        # used to be swallowed by the generic inline-block container
+        # path in walk_node, which flattened it to empty text and
+        # never reached `build_and_push_image`. The dedicated <img>
+        # branch must win regardless of CSS `display`.
+        seen: list[str] = []
+
+        def fetcher(url: str) -> bytes | None:
+            seen.append(url)
+            return None
+
+        html = (
+            "<html><body>"
+            '<img style="display: inline-block; position: absolute"'
+            ' src="http://example.test/logo.png">'
+            "</body></html>"
+        )
+        doc = HtmlDocument(string=html, url_fetcher=fetcher)
+        doc.to_bytes()
+        expect(seen).to_contain("http://example.test/logo.png")

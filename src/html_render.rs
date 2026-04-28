@@ -1132,8 +1132,18 @@ impl<'a> HtmlRenderer<'a> {
                 // background/border. This is the minimal-but-real form:
                 // inline-blocks flow inline, own their background and
                 // border, and never split across lines.
+                //
+                // `<img>` is excluded: it has its own dedicated handler
+                // (`build_and_push_image`, below) which loads the bitmap
+                // through the URL fetcher and resolves intrinsic /
+                // declared dimensions. Falling into the generic
+                // inline-block atom path here would flatten the void
+                // element to empty text and silently drop the image —
+                // the bug behind the COBRA cover-page logo never
+                // reaching the fetcher.
                 if let Some(ref style) = merged_style
                     && style.display == Some(css::DisplayValue::InlineBlock)
+                    && tag != "img"
                 {
                     let parent = self.inherit_stack.last().cloned().unwrap_or_default();
                     let inherited = parent.inherit_into(merged_style.as_ref());
