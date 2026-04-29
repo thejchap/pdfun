@@ -3805,6 +3805,37 @@ mod tests {
         assert!((resolved - 808.0).abs() < 1e-6, "got {resolved}");
     }
 
+    #[test]
+    fn explicit_height_clamped_by_max_height() {
+        // CSS 2.1 §10.7: `max-height` clamps any computed height,
+        // including one set by an explicit `height` declaration. With
+        // height: 1000, max-height: 500 the resolved padding-box
+        // collapses to max-height (no padding here so the math is
+        // direct).
+        let style = BlockStyle {
+            height: Some(1000.0),
+            max_height: Some(500.0),
+            ..BlockStyle::default()
+        };
+        let resolved = resolve_box_height(&style, 24.0);
+        assert!((resolved - 500.0).abs() < 1e-6, "got {resolved}");
+    }
+
+    #[test]
+    fn explicit_height_extended_by_min_height() {
+        // CSS 2.1 §10.7: `min-height` lifts any computed height that
+        // is below it, including a too-small explicit `height`. With
+        // height: 100, min-height: 200 the resolved padding-box is
+        // 200.
+        let style = BlockStyle {
+            height: Some(100.0),
+            min_height: Some(200.0),
+            ..BlockStyle::default()
+        };
+        let resolved = resolve_box_height(&style, 24.0);
+        assert!((resolved - 200.0).abs() < 1e-6, "got {resolved}");
+    }
+
     // ── WS-2 Rung 3-4: leaf composition + group predicate ─────
 
     #[test]
