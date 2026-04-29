@@ -291,6 +291,7 @@ pub enum BorderStyle {
     Solid,
     Dashed,
     Dotted,
+    Double,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1939,6 +1940,7 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     "solid" => self.style.border_style = Some(BorderStyle::Solid),
                     "dashed" => self.style.border_style = Some(BorderStyle::Dashed),
                     "dotted" => self.style.border_style = Some(BorderStyle::Dotted),
+                    "double" => self.style.border_style = Some(BorderStyle::Double),
                     _ => return Err(location.new_custom_error(())),
                 }
             }
@@ -1958,6 +1960,7 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                             "solid" => Ok::<_, ParseError<'i, ()>>(BorderStyle::Solid),
                             "dashed" => Ok(BorderStyle::Dashed),
                             "dotted" => Ok(BorderStyle::Dotted),
+                            "double" => Ok(BorderStyle::Double),
                             "none" | "hidden" => Ok(BorderStyle::None),
                             _ => Err(i.new_custom_error(())),
                         }

@@ -109,7 +109,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 |----------|:------:|:----------:|:-----:|:-------|
 | margin (shorthand + four sides) | 8.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::margin_top_renders` |
 | padding (shorthand + four sides) | 8.4 | ✅ | ✅ | ✅ (3) `tests/visual/padding_border.html`, `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::ul_padding_left_shifts_bullet_rightward` |
-| border / border-width / border-color / border-style | 8.5 | ✅ | ✅ | ✅ (1) `tests/visual/padding_border.html` |
+| border / border-width / border-color / border-style | 8.5 | ✅ | ✅ | ✅ (2) `tests/visual/padding_border.html`, `tests/test_html.py::inline_border_double_paints_two_lines` |
 | Margin collapse: adjacent siblings | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/margin_collapse_siblings.html` |
 | Margin collapse: parent / first child | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/margin_collapse_parent_child.html` |
 | Margin collapse: empty blocks | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::empty_block_self_collapses` |
