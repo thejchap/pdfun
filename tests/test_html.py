@@ -4949,7 +4949,7 @@ with describe("min-height and max-height"):
 
 
 with describe("explicit height triggers vertical fragmentation"):
-    # spec: CSS 2.1 §10.5 + §13.3.3; behaviors: vfmd-height frag-page
+    # spec: CSS 2.1 §10.5; behaviors: vfmd-height, paged-page-break-inside
     @test
     def length_height_pushes_next_sibling_to_new_page():
         """A block whose explicit `height` exceeds the remaining space on

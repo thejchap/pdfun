@@ -136,7 +136,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
 | width / min-width / max-width | 10.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::img_width_preserves_aspect_ratio` |
-| height / min-height / max-height | 10.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::min_height_expands_short_block` |
+| height / min-height / max-height | 10.5 | ✅ | ✅ | ✅ (2) `tests/test_html.py::min_height_expands_short_block`, `tests/test_html.py::length_height_pushes_next_sibling_to_new_page` |
 | box-sizing (content-box, border-box) | 10.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::border_box_vs_content_box_differ` |
 | line-height | 10.8 | ✅ | ✅ | ✅ (1) `tests/test_html.py::line_height_inherits_through_div` |
 | vertical-align (table cells: top, middle, bottom) | 10.8 | ✅ | ✅ | ✅ (1) `tests/test_html.py::vertical_align_top_matches_default` |
@@ -153,7 +153,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 |----------|:------:|:----------:|:-----:|:-------|
 | @page (size, margins) | 13.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::at_page_size_letter` |
 | page-break-before / page-break-after | 13.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/page_break.html` |
-| page-break-inside | 13.3.1 | ✅ | ✅ | ✅ (3) `tests/test_html.py::page_break_inside_avoid_parses`, `tests/test_html.py::break_inside_avoid_alias_accepted`, `tests/test_html.py::page_break_inside_avoid_pushes_overflow_to_next_page` |
+| page-break-inside | 13.3.1 | ✅ | ✅ | ✅ (4) `tests/test_html.py::page_break_inside_avoid_parses`, `tests/test_html.py::break_inside_avoid_alias_accepted`, `tests/test_html.py::page_break_inside_avoid_pushes_overflow_to_next_page`, `tests/test_html.py::length_height_pushes_next_sibling_to_new_page` |
 | orphans / widows | 13.3.2 | ✅ | ✅ | ✅ (3) `tests/test_html.py::orphans_integer_parses`, `tests/test_html.py::widows_integer_parses`, `tests/test_html.py::orphans_and_widows_via_stylesheet` |
 
 ## CSS 2.1 §14 — Colors and backgrounds
