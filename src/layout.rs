@@ -1987,10 +1987,9 @@ impl LayoutInner {
         // can enforce an explicit `height` if the container's children
         // didn't fill it. Pushed unconditionally — the exit reads the
         // value only when `bb.style.height.is_some()`.
-        state.container_size_stack.push((
-            state.cursor_y,
-            doc.pages.len(),
-        ));
+        state
+            .container_size_stack
+            .push((state.cursor_y, doc.pages.len()));
 
         // WS-2: an `opacity < 1` container with drawn descendants
         // renders through a Form XObject Transparency Group (CSS
