@@ -1969,15 +1969,24 @@ impl<'a> HtmlRenderer<'a> {
     /// the right reference for top-level block children; nested blocks
     /// with a narrower parent currently see the same value (a known
     /// limitation addressed when we add real parent-chain tracking).
+    /// `container_height` defaults to the page's content height, which
+    /// is the initial containing block's height per CSS 2.1 §10.1 — so
+    /// `height: 100%` on a top-level block resolves to the full content
+    /// area. Nested children with an `auto` parent height fall back to
+    /// the spec's "percent of auto = auto" rule once we plumb a real
+    /// parent height through.
     fn length_context(&self) -> css::LengthContext {
         let container =
             (self.layout.page_width - self.layout.margin_left - self.layout.margin_right).max(0.0);
+        let container_height =
+            (self.layout.page_height - self.layout.margin_top - self.layout.margin_bottom).max(0.0);
         css::LengthContext {
             em: self.resolve_em_base(),
             rem: css::LengthContext::DEFAULT_EM,
             vw: self.layout.page_width,
             vh: self.layout.page_height,
             container,
+            container_height: Some(container_height),
         }
     }
 
@@ -2082,20 +2091,26 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(len) = style.width {
                 block_style.width = Some(resolve(len));
             }
-            if let Some(len) = style.height {
-                block_style.height = Some(resolve(len));
+            if let Some(len) = style.height
+                && let Some(v) = len.resolve_height_ctx(&ctx)
+            {
+                block_style.height = Some(v);
             }
             if let Some(len) = style.min_width {
                 block_style.min_width = Some(resolve(len));
             }
-            if let Some(len) = style.min_height {
-                block_style.min_height = Some(resolve(len));
+            if let Some(len) = style.min_height
+                && let Some(v) = len.resolve_height_ctx(&ctx)
+            {
+                block_style.min_height = Some(v);
             }
             if let Some(len) = style.max_width {
                 block_style.max_width = Some(resolve(len));
             }
-            if let Some(len) = style.max_height {
-                block_style.max_height = Some(resolve(len));
+            if let Some(len) = style.max_height
+                && let Some(v) = len.resolve_height_ctx(&ctx)
+            {
+                block_style.max_height = Some(v);
             }
             if let Some(len) = style.letter_spacing {
                 block_style.letter_spacing = resolve(len);

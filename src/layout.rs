@@ -1013,6 +1013,7 @@ fn resolve_col_hint(hint: Option<css::CssLength>, container: f32) -> Option<f32>
         vw: css::LengthContext::DEFAULT_VW,
         vh: css::LengthContext::DEFAULT_VH,
         container,
+        container_height: None,
     };
     Some(len.resolve_ctx(&ctx))
 }

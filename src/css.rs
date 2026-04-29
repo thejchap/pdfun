@@ -80,12 +80,19 @@ pub struct LengthContext {
     pub vw: f32,
     /// Viewport (page) height in points (for `vh`).
     pub vh: f32,
-    /// Containing-block reference value for percentages. Default is the
-    /// containing block's content width (the usual choice — margins,
-    /// paddings, and widths all resolve against width per CSS spec).
-    /// Callers resolving height-related percents should build a second
-    /// context with `container` set to the containing height.
+    /// Containing-block reference value for percentages on horizontal
+    /// properties (margins, paddings, widths). Per CSS 2.1 §10.3, all
+    /// of those resolve against the containing block's content width,
+    /// so this is the normal `container`.
     pub container: f32,
+    /// Containing-block content height for percentages on vertical
+    /// properties (`height`, `min-height`, `max-height`, vertical
+    /// margins/paddings when CSS would resolve them against height).
+    /// `None` means the containing block is `height: auto` — per CSS
+    /// 2.1 §10.5 a percent height in that situation computes to
+    /// `auto`, so callers should treat the property as unset rather
+    /// than resolve to a number.
+    pub container_height: Option<f32>,
 }
 
 impl LengthContext {
@@ -102,6 +109,7 @@ impl LengthContext {
             vw: Self::DEFAULT_VW,
             vh: Self::DEFAULT_VH,
             container: Self::DEFAULT_VW,
+            container_height: None,
         }
     }
 }
@@ -117,6 +125,7 @@ impl CssLength {
             vw: LengthContext::DEFAULT_VW,
             vh: LengthContext::DEFAULT_VH,
             container: LengthContext::DEFAULT_VW,
+            container_height: None,
         })
     }
 
@@ -138,6 +147,20 @@ impl CssLength {
                 CalcOp::Mul(a, n) => a.resolve_ctx(ctx) * n,
                 CalcOp::Div(a, n) => a.resolve_ctx(ctx) / n,
             },
+        }
+    }
+
+    /// Resolve a length used for a vertical sizing property (`height`,
+    /// `min-height`, `max-height`). Differs from [`resolve_ctx`] only
+    /// for `Pct`: percent heights resolve against
+    /// `LengthContext::container_height` rather than `container`
+    /// (which is a width-like value). Returns `None` when the value
+    /// is a percent and the containing block height is `auto`
+    /// (CSS 2.1 §10.5: percent of auto computes to auto).
+    pub fn resolve_height_ctx(self, ctx: &LengthContext) -> Option<f32> {
+        match self {
+            CssLength::Pct(v) => ctx.container_height.map(|h| v * h / 100.0),
+            other => Some(other.resolve_ctx(ctx)),
         }
     }
 }
@@ -4949,6 +4972,7 @@ mod tests {
             vw: 612.0,
             vh: 792.0,
             container: 500.0,
+            container_height: None,
         };
         assert!((CssLength::Rem(2.0).resolve_ctx(&ctx) - 24.0).abs() < 0.001);
         assert!((CssLength::Em(2.0).resolve_ctx(&ctx) - 48.0).abs() < 0.001);
@@ -4962,6 +4986,7 @@ mod tests {
             vw: 600.0,
             vh: 800.0,
             container: 500.0,
+            container_height: None,
         };
         assert!((CssLength::Vw(50.0).resolve_ctx(&ctx) - 300.0).abs() < 0.001);
         assert!((CssLength::Vh(25.0).resolve_ctx(&ctx) - 200.0).abs() < 0.001);
@@ -4978,8 +5003,49 @@ mod tests {
             vw: 612.0,
             vh: 792.0,
             container: 400.0,
+            container_height: None,
         };
         assert!((CssLength::Pct(50.0).resolve_ctx(&ctx) - 200.0).abs() < 0.001);
+    }
+
+    // ── T3 Rung 2: percent heights resolve against container_height ──
+
+    #[test]
+    fn percent_height_resolves_against_container_height() {
+        // CSS 2.1 §10.5: percent on `height` resolves against the
+        // containing block's content height, not its width. The
+        // dedicated `resolve_height_ctx` path uses
+        // `container_height` so width and height percents stay
+        // independent.
+        let ctx = LengthContext {
+            em: 12.0,
+            rem: 12.0,
+            vw: 612.0,
+            vh: 792.0,
+            container: 612.0,
+            container_height: Some(400.0),
+        };
+        let resolved = CssLength::Pct(50.0).resolve_height_ctx(&ctx);
+        assert!(matches!(resolved, Some(v) if (v - 200.0).abs() < 0.001));
+    }
+
+    #[test]
+    fn non_percent_height_resolves_normally() {
+        // Absolute / em / vh / etc. lengths don't depend on the
+        // containing block, so `resolve_height_ctx` returns the same
+        // value `resolve_ctx` does — wrapped in `Some`.
+        let ctx = LengthContext {
+            em: 16.0,
+            rem: 16.0,
+            vw: 612.0,
+            vh: 792.0,
+            container: 500.0,
+            container_height: None,
+        };
+        let resolved = CssLength::Pt(100.0).resolve_height_ctx(&ctx);
+        assert!(matches!(resolved, Some(v) if (v - 100.0).abs() < 0.001));
+        let vh = CssLength::Vh(50.0).resolve_height_ctx(&ctx);
+        assert!(matches!(vh, Some(v) if (v - 396.0).abs() < 0.001));
     }
 
     #[test]
