@@ -1143,6 +1143,18 @@ impl<'a> HtmlRenderer<'a> {
                     return;
                 }
 
+                // Images. Handled before the generic `display: inline-block`
+                // path because an `<img style="display: inline-block">` would
+                // otherwise be treated as a (text-only) inline-block atom
+                // and silently dropped — `push_inline_block` flattens the
+                // subtree to text, and `<img>` has none. We route to the
+                // image emitter directly so the bitmap actually paints.
+                if tag == "img" {
+                    self.flush();
+                    self.build_and_push_image(handle, merged_style.as_ref());
+                    return;
+                }
+
                 // display: inline-block — collect the subtree's text as a
                 // single unbreakable atom with a fixed width and optional
                 // background/border. This is the minimal-but-real form:
@@ -1184,14 +1196,6 @@ impl<'a> HtmlRenderer<'a> {
                 if tag == "table" {
                     self.flush();
                     self.build_and_push_table(handle, merged_style.as_ref());
-                    self.inherit_stack.pop();
-                    return;
-                }
-
-                // Images
-                if tag == "img" {
-                    self.flush();
-                    self.build_and_push_image(handle, merged_style.as_ref());
                     self.inherit_stack.pop();
                     return;
                 }
@@ -2013,6 +2017,25 @@ impl<'a> HtmlRenderer<'a> {
             }
             if let Some(len) = s.margin_left {
                 style.margin_left = len.resolve_ctx(&ctx);
+            }
+            // Position info is consumed at paint time by `render_image`
+            // for absolute / fixed images and to apply relative offsets.
+            // Percent values resolve against the page content width here
+            // (the same simplification used for block elements).
+            if let Some(pos) = s.position {
+                style.position = pos;
+            }
+            if let Some(len) = s.top {
+                style.position_top = Some(len.resolve_ctx(&ctx));
+            }
+            if let Some(len) = s.left {
+                style.position_left = Some(len.resolve_ctx(&ctx));
+            }
+            if let Some(len) = s.right {
+                style.position_right = Some(len.resolve_ctx(&ctx));
+            }
+            if let Some(len) = s.bottom {
+                style.position_bottom = Some(len.resolve_ctx(&ctx));
             }
         }
 

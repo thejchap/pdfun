@@ -5659,6 +5659,41 @@ with describe("position: relative"):
         content = content_stream(data)
         expect(b"1 0 0 1 0 0 cm" in content).to_equal(False)
 
+    # spec: CSS 2.1 §9.4.3; behaviors: vfm-position-relative, vfm-offsets
+    @test
+    def relative_left_pt_offsets_against_resolved_value():
+        """`position: relative; left: 50pt` translates the painted box
+        right by exactly 50pt — the offset is resolved literally and the
+        in-flow position is unchanged."""
+        html = "<div style='position: relative; left: 50pt;'>X</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 50 0 cm")
+
+    # spec: CSS 2.1 §9.4.3; behaviors: vfm-position-relative, vfm-offsets
+    @test
+    def relative_left_percent_resolves_against_container_width():
+        """`position: relative; left: 10%` resolves the percentage against
+        the page's content width. Letter (612pt) with default 72pt margins
+        gives a 468pt content width → 46.8pt translate."""
+        html = "<div style='position: relative; left: 10%;'>X</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 46.8 0 cm")
+
+    # spec: CSS 2.1 §9.4.3; behaviors: vfm-position-relative, vfm-offsets
+    @test
+    def relative_right_falls_back_when_left_absent():
+        """`position: relative; right: 12pt` shifts the painted box left by
+        12pt when no `left` is set (CSS 2.1 §9.4.3)."""
+        html = "<div style='position: relative; right: 12pt;'>X</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 -12 0 cm")
+
 
 with describe("position: absolute"):
     # spec: CSS 2.1 §9.6; behaviors: vfm-position-absolute, vfm-offsets
@@ -5725,6 +5760,93 @@ with describe("position: absolute"):
         # Default page width is 612pt. Box's left edge = 612 - 20 - 50 = 542.
         # We don't assert the exact translate delta (depends on natural
         # flow origin) but the PDF should still render without error.
+
+    # spec: CSS 2.1 §9.6; behaviors: vfm-position-absolute, vfm-offsets
+    @test
+    def absolute_img_with_right_lands_at_page_edge():
+        """`<img position: absolute; right: 0pt>` paints flush against the
+        page's right edge: image x = page_width - right - img_width."""
+        png = _make_png(2, 2, bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = Path(f.name).as_posix()
+        try:
+            html = (
+                f'<img src="{path}" width="50" height="50" '
+                "style='position: absolute; top: 0pt; right: 0pt;'>"
+            )
+            data = HtmlDocument(string=html).to_bytes()
+            content = content_stream(data)
+            # Default page width is 612pt; img width = 50pt -> x = 562.
+            # Image CTM is "<w> 0 0 <h> <x> <y> cm".
+            expect(content).to_contain(b"50 0 0 50 562 ")
+            expect(content).to_contain(b"/Im0 Do")
+        finally:
+            Path(path).unlink()
+
+    # spec: CSS 2.1 §9.6; behaviors: vfm-position-absolute, vfm-offsets
+    @test
+    def absolute_img_is_removed_from_normal_flow():
+        """A `<img position: absolute>` does not advance the in-flow cursor
+        — a sibling paragraph following it renders at the same baseline as
+        if the image were not there."""
+        png = _make_png(1, 1, bytes([128, 128, 128]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = Path(f.name).as_posix()
+        try:
+            with_abs = HtmlDocument(
+                string=(
+                    "<p>BEFORE</p>"
+                    f'<img src="{path}" width="50" height="50" '
+                    "style='position: absolute; top: 100pt; left: 200pt;'>"
+                    "<p>AFTER</p>"
+                )
+            ).to_bytes()
+            without_abs = HtmlDocument(string="<p>BEFORE</p><p>AFTER</p>").to_bytes()
+            cs_with = content_stream(with_abs)
+            cs_without = content_stream(without_abs)
+            import re as _re
+
+            def baseline_of(content: bytes, text: bytes) -> bytes | None:
+                idx = content.find(text)
+                if idx == -1:
+                    return None
+                prefix = content[:idx]
+                matches = _re.findall(rb"([\-\d\.]+ [\-\d\.]+) Td", prefix)
+                return matches[-1] if matches else None
+
+            expect(baseline_of(cs_with, b"(AFTER)")).to_equal(
+                baseline_of(cs_without, b"(AFTER)")
+            )
+        finally:
+            Path(path).unlink()
+
+    # spec: HTML; CSS 2.1 §9.6; behaviors: vfm-position-absolute, html-img-png
+    @test
+    def inline_block_img_still_paints_when_absolutely_positioned():
+        """An `<img>` carrying both `display: inline-block` and
+        `position: absolute` (the COBRA cover pattern) routes to the image
+        emitter — the bitmap is painted, not silently swallowed by the
+        inline-block atom path."""
+        png = _make_png(1, 1, bytes([0, 64, 255]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = Path(f.name).as_posix()
+        try:
+            html = (
+                f'<img src="{path}" width="50" height="50" '
+                "style='display: inline-block; position: absolute; "
+                "top: 5pt; right: 5pt;'>"
+            )
+            data = HtmlDocument(string=html).to_bytes()
+            content = content_stream(data)
+            expect(data).to_contain(b"/Subtype /Image")
+            expect(content).to_contain(b"/Im0 Do")
+            # x = 612 - 5 - 50 = 557. The image CTM begins with "50 0 0 50 557".
+            expect(content).to_contain(b"50 0 0 50 557 ")
+        finally:
+            Path(path).unlink()
 
 
 with describe("position: fixed"):

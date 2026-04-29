@@ -126,10 +126,10 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | float: right with text wrap | 9.5.1 | ✅ | ✅ | ✅ (1) `tests/visual/float_right.html` |
 | clear property | 9.5.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::clear_both_drops_below_floats` |
 | position: static | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::position_static_ignores_offsets` |
-| position: relative | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::relative_top_shifts_box_down` |
-| position: absolute | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page` |
+| position: relative | 9.3.1 | ✅ | ✅ | ✅ (4) `tests/test_html.py::relative_top_shifts_box_down`, `tests/test_html.py::relative_left_pt_offsets_against_resolved_value`, `tests/test_html.py::relative_left_percent_resolves_against_container_width`, `tests/test_html.py::relative_right_falls_back_when_left_absent` |
+| position: absolute | 9.3.1 | ✅ | ✅ | ✅ (3) `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page`, `tests/test_html.py::absolute_img_with_right_lands_at_page_edge`, `tests/test_html.py::absolute_img_is_removed_from_normal_flow` |
 | position: fixed | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::fixed_paints_on_every_page` |
-| top / right / bottom / left offsets | 9.3.2 | ✅ | ✅ | ✅ (3) `tests/test_html.py::relative_top_shifts_box_down`, `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page`, `tests/test_html.py::fixed_paints_on_every_page` |
+| top / right / bottom / left offsets | 9.3.2 | ✅ | ✅ | ✅ (8) `tests/test_html.py::relative_top_shifts_box_down`, `tests/test_html.py::relative_left_pt_offsets_against_resolved_value`, `tests/test_html.py::relative_left_percent_resolves_against_container_width`, `tests/test_html.py::relative_right_falls_back_when_left_absent`, `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page`, `tests/test_html.py::absolute_img_with_right_lands_at_page_edge`, `tests/test_html.py::absolute_img_is_removed_from_normal_flow`, `tests/test_html.py::fixed_paints_on_every_page` |
 
 ## CSS 2.1 §10 — Visual formatting model details
 
