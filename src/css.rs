@@ -5030,6 +5030,25 @@ mod tests {
     }
 
     #[test]
+    fn percent_height_against_auto_containing_block_is_none() {
+        // CSS 2.1 §10.5: when the containing block's height is `auto`
+        // (i.e. depends on its content) a child's percent height also
+        // computes to `auto`. We model "auto" as
+        // `container_height: None`, and `resolve_height_ctx` returns
+        // `None` so the cascade can leave `block_style.height` unset.
+        let ctx = LengthContext {
+            em: 12.0,
+            rem: 12.0,
+            vw: 612.0,
+            vh: 792.0,
+            container: 400.0,
+            container_height: None,
+        };
+        assert!(CssLength::Pct(50.0).resolve_height_ctx(&ctx).is_none());
+        assert!(CssLength::Pct(100.0).resolve_height_ctx(&ctx).is_none());
+    }
+
+    #[test]
     fn non_percent_height_resolves_normally() {
         // Absolute / em / vh / etc. lengths don't depend on the
         // containing block, so `resolve_height_ctx` returns the same
