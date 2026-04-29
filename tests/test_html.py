@@ -7,7 +7,7 @@ from pathlib import Path
 from tryke import describe, expect, test
 
 from pdfun import HtmlDocument
-from tests._pdf_helpers import content_stream
+from tests._pdf_helpers import content_stream, page_texts
 
 _FIXTURE_TTF_PATH = Path(__file__).parent / "fixtures" / "font.ttf"
 
@@ -4946,6 +4946,56 @@ with describe("min-height and max-height"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"0 0 1 rg")
+
+
+with describe("explicit height triggers vertical fragmentation"):
+    # spec: CSS 2.1 §10.5 + §13.3.3; behaviors: vfmd-height frag-page
+    @test
+    def length_height_pushes_next_sibling_to_new_page():
+        """A block whose explicit `height` exceeds the remaining space on
+        the current page consumes that space and forces the next sibling
+        to start on a fresh page. Without this, an 11in cover div was
+        leaving the cursor at the natural text height and the body
+        rendered on the same page (the COBRA notice regression)."""
+        html = "<div style='height: 11in'>cover</div><div>body</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        pages = page_texts(data)
+        expect(len(pages)).to_be_greater_than_or_equal(2)
+        expect(pages[0]).to_contain("cover")
+        expect(pages[1]).to_contain("body")
+
+    @test
+    def percent_height_against_page_consumes_full_content_area():
+        """`height: 100%` on a top-level block resolves against the
+        page's content area (the initial containing block). With nothing
+        left after the cover, the next sibling renders on page 2."""
+        html = "<div style='height: 100%'>cover</div><div>body</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        pages = page_texts(data)
+        expect(len(pages)).to_be_greater_than_or_equal(2)
+        expect(pages[0]).to_contain("cover")
+        expect(pages[1]).to_contain("body")
+
+    @test
+    def page_break_inside_avoid_still_pushes_whole_block():
+        """The default `page-break-inside: avoid` should send the cover
+        whole — not split it — when its explicit height won't fit in the
+        remaining space. The cover lands on page 1 in one piece, and any
+        siblings move to page 2."""
+        html = (
+            "<div>preamble</div>"
+            "<div style='height: 10in; page-break-inside: avoid'>cover</div>"
+            "<div>body</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        pages = page_texts(data)
+        expect(len(pages)).to_be_greater_than_or_equal(2)
+        # The cover is whole on a single page (not split across pages).
+        cover_pages = [i for i, p in enumerate(pages) if "cover" in p]
+        expect(len(cover_pages)).to_equal(1)
 
 
 with describe("per-corner border-radius"):
