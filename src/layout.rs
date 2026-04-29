@@ -509,6 +509,29 @@ fn collapsed_top_delta(pending: f32, curr_top: f32) -> f32 {
     collapse_margins(pending, curr_top) - pending
 }
 
+/// Compute the `(dx, dy)` translation a `position: relative` box should
+/// apply to itself per CSS 2.1 § 9.4.3.
+///
+/// `dx` is `+left` if `left` is set, otherwise `-right` if `right` is set,
+/// else 0. `dy` (in PDF coords, where positive is up) is `-top` if `top` is
+/// set, otherwise `+bottom` if `bottom` is set, else 0. The percent
+/// resolution against the containing block has already happened upstream
+/// (see `html_render::length_context`) so the offsets arrive as resolved
+/// `Option<f32>` points.
+pub(crate) fn relative_offset(style: &BlockStyle) -> (f32, f32) {
+    let dx = if let Some(l) = style.position_left {
+        l
+    } else {
+        -style.position_right.unwrap_or(0.0)
+    };
+    let dy = if let Some(t) = style.position_top {
+        -t
+    } else {
+        style.position_bottom.unwrap_or(0.0)
+    };
+    (dx, dy)
+}
+
 /// Extra per-line spacing applied during wrapping. `letter_spacing` is
 /// added after every glyph, `word_spacing` after every space.
 #[derive(Clone, Copy, Default)]
@@ -1728,7 +1751,10 @@ impl LayoutInner {
         }
 
         let is_relative_positioned = style.position == css::Position::Relative
-            && (style.position_top.is_some() || style.position_left.is_some());
+            && (style.position_top.is_some()
+                || style.position_left.is_some()
+                || style.position_right.is_some()
+                || style.position_bottom.is_some());
         let is_absolute_or_fixed = matches!(
             style.position,
             css::Position::Absolute | css::Position::Fixed
@@ -1794,8 +1820,7 @@ impl LayoutInner {
             // by (+left, -top) without disturbing flow. Emit the translation
             // inside the save/restore so siblings are unaffected.
             if is_relative_positioned {
-                let dx = style.position_left.unwrap_or(0.0);
-                let dy = -style.position_top.unwrap_or(0.0);
+                let (dx, dy) = relative_offset(style);
                 if dx != 0.0 || dy != 0.0 {
                     page.operations.push(PdfOp::Translate { dx, dy });
                 }
@@ -2780,6 +2805,57 @@ impl LayoutInner {
     ) {
         let col_x_for = |col: u32| -> f32 { self.margin_left + col as f32 * (col_width + col_gap) };
 
+        let is_absolute_or_fixed = matches!(
+            img.style.position,
+            css::Position::Absolute | css::Position::Fixed
+        );
+
+        // CSS 2.1 §9.6: absolutely-positioned images paint at coordinates
+        // computed from the page (initial containing block). We use the
+        // raw natural width/height — no column shrink-to-fit, no margin
+        // collapsing, and the in-flow cursor is left untouched so siblings
+        // don't shift.
+        //
+        // Scope (matches the current div/abs implementation): containing
+        // block = page; `right` resolves against the page's right edge,
+        // not "nearest positioned ancestor". This is sufficient for the
+        // COBRA cover image (`right: 0.02in`) but does not cover the full
+        // CSS 2.1 §10.3.7 abs-pos sizing algorithm yet.
+        if is_absolute_or_fixed {
+            let draw_w = img.width;
+            let draw_h = img.height;
+            let target_left_x = if let Some(l) = img.style.position_left {
+                l + img.style.margin_left
+            } else if let Some(r) = img.style.position_right {
+                self.page_width - r - draw_w - img.style.margin_right
+            } else {
+                col_x_for(*current_col) + img.style.margin_left
+            };
+            let target_top_y = if let Some(t) = img.style.position_top {
+                self.page_height - t - img.style.margin_top
+            } else if let Some(b) = img.style.position_bottom {
+                b + draw_h + img.style.margin_bottom
+            } else {
+                *cursor_y
+            };
+            let y_bottom = target_top_y - draw_h;
+
+            let mut page = current_page.lock().unwrap();
+            if !page.images_used.contains(&img.image_index) {
+                page.images_used.push(img.image_index);
+            }
+            page.operations.push(PdfOp::DrawImage {
+                index: img.image_index,
+                x: target_left_x,
+                y: y_bottom,
+                width: draw_w,
+                height: draw_h,
+            });
+            // Don't advance `cursor_y` or update `pending_bottom` —
+            // out-of-flow images leave the in-flow geometry alone.
+            return;
+        }
+
         // Scale down if wider than column content width
         let box_width = col_width - img.style.margin_left - img.style.margin_right;
         let (draw_w, draw_h) = if img.width > box_width && img.width > 0.0 {
@@ -2811,14 +2887,23 @@ impl LayoutInner {
         let x = col_x_for(*current_col) + img.style.margin_left;
         let y_bottom = *cursor_y - draw_h;
 
+        // CSS 2.1 §9.4.3: `position: relative` shifts the painted image
+        // by `relative_offset(...)` without disturbing the cursor. The
+        // shift is applied only to the emitted DrawImage coordinates.
+        let (rel_dx, rel_dy) = if img.style.position == css::Position::Relative {
+            relative_offset(&img.style)
+        } else {
+            (0.0, 0.0)
+        };
+
         let mut page = current_page.lock().unwrap();
         if !page.images_used.contains(&img.image_index) {
             page.images_used.push(img.image_index);
         }
         page.operations.push(PdfOp::DrawImage {
             index: img.image_index,
-            x,
-            y: y_bottom,
+            x: x + rel_dx,
+            y: y_bottom + rel_dy,
             width: draw_w,
             height: draw_h,
         });
@@ -3133,5 +3218,70 @@ mod tests {
     fn collapsed_top_delta_handles_negatives() {
         // Prior -5 spent, new top 3 -> effective -2, need -2-(-5)=+3 more.
         assert!((collapsed_top_delta(-5.0, 3.0) - 3.0).abs() < 1e-6);
+    }
+
+    // ── relative_offset (CSS 2.1 § 9.4.3) ────────────────────
+    #[test]
+    fn relative_offset_zero_when_no_offsets_set() {
+        let style = BlockStyle::default();
+        let (dx, dy) = relative_offset(&style);
+        assert!(dx.abs() < 1e-6);
+        assert!(dy.abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_left_positive_dx() {
+        let style = BlockStyle {
+            position_left: Some(15.0),
+            ..Default::default()
+        };
+        let (dx, dy) = relative_offset(&style);
+        assert!((dx - 15.0).abs() < 1e-6);
+        assert!(dy.abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_top_negative_dy_for_pdf_axis() {
+        // CSS top grows downward; PDF y grows upward — invert the sign.
+        let style = BlockStyle {
+            position_top: Some(10.0),
+            ..Default::default()
+        };
+        let (dx, dy) = relative_offset(&style);
+        assert!(dx.abs() < 1e-6);
+        assert!((dy + 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_right_falls_back_when_left_absent() {
+        // `right: 5pt` with no `left` shifts the box left by 5pt.
+        let style = BlockStyle {
+            position_right: Some(5.0),
+            ..Default::default()
+        };
+        let (dx, _) = relative_offset(&style);
+        assert!((dx + 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_left_wins_over_right() {
+        // When both are set, `left` wins (CSS 2.1 §9.4.3 LTR rule).
+        let style = BlockStyle {
+            position_left: Some(7.0),
+            position_right: Some(99.0),
+            ..Default::default()
+        };
+        let (dx, _) = relative_offset(&style);
+        assert!((dx - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_bottom_falls_back_when_top_absent() {
+        let style = BlockStyle {
+            position_bottom: Some(8.0),
+            ..Default::default()
+        };
+        let (_, dy) = relative_offset(&style);
+        assert!((dy - 8.0).abs() < 1e-6);
     }
 }
