@@ -587,6 +587,13 @@ struct RenderState {
     /// capture's ops, NOT the real page stream. Pop on container exit
     /// to fold the captured ops into a `FormXObjectData`.
     transparency_captures: Vec<TransparencyCapture>,
+    /// Stack of `(start_cursor_y, start_page_count)` snapshots, one per
+    /// open container. Used by `exit_container_node` to enforce a
+    /// container's explicit `height`: if the container's children
+    /// consumed less vertical space than `height` and stayed on the
+    /// same page, the cursor advances by the difference so the
+    /// container reserves its full extent.
+    container_size_stack: Vec<(f32, usize)>,
 }
 
 /// A float currently affecting the layout in a block formatting context.
@@ -1691,6 +1698,7 @@ impl LayoutInner {
             pending_container_top: 0.0,
             active_floats: Vec::new(),
             transparency_captures: Vec::new(),
+            container_size_stack: Vec::new(),
         };
 
         let tree = crate::box_tree::unflatten_blocks(blocks);
@@ -1975,6 +1983,14 @@ impl LayoutInner {
         }
         state.pending_container_top =
             collapse_margins(state.pending_container_top, bb.style.margin_top);
+        // Snapshot the cursor and page count so `exit_container_node`
+        // can enforce an explicit `height` if the container's children
+        // didn't fill it. Pushed unconditionally — the exit reads the
+        // value only when `bb.style.height.is_some()`.
+        state.container_size_stack.push((
+            state.cursor_y,
+            doc.pages.len(),
+        ));
 
         // WS-2: an `opacity < 1` container with drawn descendants
         // renders through a Form XObject Transparency Group (CSS
@@ -2006,6 +2022,44 @@ impl LayoutInner {
         child_rendered: bool,
         state: &mut RenderState,
     ) {
+        // Pop the size snapshot pushed in `enter_container_node`. If the
+        // container has an explicit `height` and didn't cross a page
+        // boundary, advance the cursor so the container reserves its
+        // full height — matching `render_paragraph_block`'s leaf-level
+        // behavior. When a page break did happen mid-container, we
+        // don't try to enforce: the natural-vs-explicit comparison
+        // would need a per-page running total we don't keep.
+        if let Some((start_y, start_pages)) = state.container_size_stack.pop()
+            && let Some(height) = bb.style.height
+            && doc.pages.len() == start_pages
+        {
+            let consumed = (start_y - state.cursor_y).max(0.0);
+            let remaining = height - consumed;
+            if remaining > 0.0 {
+                let available = state.cursor_y - self.margin_bottom;
+                if remaining <= available {
+                    state.cursor_y -= remaining;
+                } else {
+                    // The container's leftover height would push past
+                    // the bottom margin; flip to a fresh page so the
+                    // next sibling lands cleanly. We deliberately drop
+                    // the residual extra (paged media is finite — a
+                    // 20in `height` on a Letter page caps at the page).
+                    self.advance_column_or_page(
+                        &mut state.current_page,
+                        doc,
+                        &mut state.cursor_y,
+                        &mut state.current_col,
+                        state.col_count,
+                        &mut state.col_width,
+                        &mut state.col_gap,
+                        &mut state.content_top,
+                    );
+                    state.pending_bottom = 0.0;
+                    state.pending_container_top = 0.0;
+                }
+            }
+        }
         // Pair with `enter_container_node`'s capture: fold the diverted
         // ops into a `FormXObjectData`, restore the saved page stream,
         // and append `gs + DrawFormXObject` so the group composites at

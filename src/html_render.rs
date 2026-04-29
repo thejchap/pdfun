@@ -1666,6 +1666,26 @@ impl<'a> HtmlRenderer<'a> {
 
         // Apply CSS block properties
         self.apply_block_css(&mut block_style);
+        // When `flush()` runs for an anonymous wrapper inside a
+        // container (e.g. text/inline-block atoms appearing before
+        // the container's first block-level child), the container's
+        // CSS lives in `self.block_style` and got copied into
+        // `block_style` above. Most duplication is benign — margin
+        // collapse is idempotent on max, and width has only one
+        // sensible interpretation — but `height` is not: applying
+        // the container's `height: 11in` to the wrapper paragraph
+        // reserves a full page of vertical space and pushes every
+        // following block to the next page. The container's own
+        // ContainerStart sentinel carries the height (enforced in
+        // `exit_container_node`), so the wrapper should sit at its
+        // natural intrinsic height instead.
+        if let Some(t) = tag
+            && CONTAINER_ELEMENTS.contains(&t)
+        {
+            block_style.height = None;
+            block_style.min_height = None;
+            block_style.max_height = None;
+        }
 
         let paragraph_tag = tag.and_then(static_paragraph_tag);
 
