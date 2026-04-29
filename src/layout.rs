@@ -326,6 +326,40 @@ impl Default for BlockStyle {
     }
 }
 
+/// Resolve a block's outer (padding-box) height after applying CSS
+/// `height`, `min-height`, and `max-height`. `natural` is the height
+/// the block would occupy with `height: auto` — i.e.
+/// `padding_top + content_height + padding_bottom`.
+///
+/// When `height` is set it replaces the content portion. With
+/// `box-sizing: content-box` (CSS default) the resolved padding-box
+/// height is `padding_top + height + padding_bottom`; with
+/// `border-box`, `height` already covers padding and border, so the
+/// padding-box height is `height - 2 * border_width`. `min-height`
+/// extends and `max-height` clamps the result, with `max-height`
+/// winning over `min-height` when they conflict (CSS 2.1 §10.7).
+pub(crate) fn resolve_box_height(style: &BlockStyle, natural: f32) -> f32 {
+    let mut box_height = if let Some(h) = style.height {
+        match style.box_sizing {
+            css::BoxSizing::ContentBox => style.padding_top + h + style.padding_bottom,
+            css::BoxSizing::BorderBox => (h - 2.0 * style.border_width).max(0.0),
+        }
+    } else {
+        natural
+    };
+    if let Some(min_h) = style.min_height
+        && box_height < min_h
+    {
+        box_height = min_h;
+    }
+    if let Some(max_h) = style.max_height
+        && box_height > max_h
+    {
+        box_height = max_h;
+    }
+    box_height
+}
+
 impl BlockStyle {
     fn has_any_styling(&self) -> bool {
         self.color.is_some()
@@ -2194,23 +2228,13 @@ impl LayoutInner {
 
         let block_text_height = wrapped_lines.len() as f32 * line_height;
         let natural_box_height = style.padding_top + block_text_height + style.padding_bottom;
-        // Clamp to min/max-height. The content still top-aligns inside the
-        // padded box — min-height extends the background/border rect down
-        // but does not shift the text. (CSS actually lets height: auto
-        // grow to content, so only min-height ever extends downward; we
-        // still honor max-height by clipping the drawn rect — any text
-        // that would have hung below the clamped edge just spills out.)
-        let mut box_height = natural_box_height;
-        if let Some(min_h) = style.min_height
-            && box_height < min_h
-        {
-            box_height = min_h;
-        }
-        if let Some(max_h) = style.max_height
-            && box_height > max_h
-        {
-            box_height = max_h;
-        }
+        // Honor explicit `height` and clamp to `min-height` / `max-height`.
+        // Content still top-aligns inside the padded box — these properties
+        // resize the background/border rect but do not shift text.
+        // Overflow is `visible` by default (CSS 2.1 §11.1.1) so any line
+        // that would have hung below the clamped edge spills out, matching
+        // Blink/WebKit/Gecko behavior.
+        let box_height = resolve_box_height(style, natural_box_height);
         let top_delta = collapsed_top_delta(state.pending_bottom, style.margin_top);
         let block_total_height = top_delta + box_height + style.margin_bottom;
 
@@ -3760,6 +3784,25 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── T3 Rung 1: explicit `height` consumes vertical space ─────
+
+    #[test]
+    fn explicit_height_adds_padding_to_padding_box() {
+        // `height` is the content-area length under the default
+        // `box-sizing: content-box`, so the padding-box height returned
+        // by `resolve_box_height` is `padding_top + height + padding_bottom`.
+        // The natural value (the height the block would have at
+        // `height: auto`) is ignored when an explicit height is set.
+        let style = BlockStyle {
+            height: Some(792.0),
+            padding_top: 8.0,
+            padding_bottom: 8.0,
+            ..BlockStyle::default()
+        };
+        let resolved = resolve_box_height(&style, 24.0);
+        assert!((resolved - 808.0).abs() < 1e-6, "got {resolved}");
+    }
 
     // ── WS-2 Rung 3-4: leaf composition + group predicate ─────
 
