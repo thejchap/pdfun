@@ -586,6 +586,46 @@ with describe("HtmlDocument - lists"):
         content = content_stream(data)
         expect(content).to_contain(b"Orphan")
 
+    # spec: CSS 2.1 §14.2.1 + §8.4; behaviors: box-padding, color-rgba, html-ul
+    @test
+    def ul_translucent_background_paints_behind_items():
+        """A translucent `background-color` set directly on a `<ul>`
+        should render — `<ul>` itself doesn't emit a generic block
+        container box, but the per-item paint path now carries the
+        list's fill so the panel still appears. The rgba alpha 0.85
+        produces an `/Gs1 gs` external-graphics-state ref plus an
+        opaque `1 1 1 rg` fill (alpha lives on the gs, not the rg).
+        """
+        html = (
+            '<ul style="background-color: rgba(255,255,255,.85)">'
+            "<li>one</li><li>two</li></ul>"
+        )
+        doc = HtmlDocument(string=html)
+        content = content_stream(doc.to_bytes())
+        expect(content).to_contain(b"1 1 1 rg")
+        # `0.85` shows up as the `/CA`+`/ca` alpha entry on the
+        # ExtGState referenced by the `/Gs1 gs` op.
+        expect(doc.to_bytes()).to_contain(b"0.85")
+
+    # spec: CSS 2.1 §10.5.1; behaviors: box-padding, html-ul
+    @test
+    def ul_padding_left_shifts_bullet_rightward():
+        """`padding-left` on a `<ul>` indents its bullets/text. Without
+        the cascade fix the value is dropped and the bullet sits at the
+        body left margin (depth-only `LIST_INDENT`). The `cm` repro
+        below pins both the parsing fix (cm → pt) and the
+        list-entry-carries-padding fix at once: 2cm ≈ 56.69 pt, so the
+        bullet must appear notably to the right of the no-padding
+        baseline."""
+        baseline = HtmlDocument(string="<ul><li>x</li></ul>")
+        padded = HtmlDocument(string='<ul style="padding-left: 2cm"><li>x</li></ul>')
+        baseline_x = _find_text_x(content_stream(baseline.to_bytes()), b"<95>")
+        padded_x = _find_text_x(content_stream(padded.to_bytes()), b"<95>")
+        assert baseline_x is not None
+        assert padded_x is not None
+        # 2cm = 56.69pt; allow generous tolerance for rendering jitter.
+        expect(padded_x - baseline_x).to_be_greater_than(50.0)
+
 
 with describe("HtmlDocument - malformed HTML"):
 

@@ -494,6 +494,22 @@ struct ListEntry {
     counter: usize,
     style_override: Option<css::ListStyleType>,
     position_override: Option<css::ListStylePosition>,
+    /// Resolved `padding-left` set on the `<ul>`/`<ol>` element itself.
+    /// Each child `<li>` adds this to its own indent so author-set
+    /// padding shifts the bullets/text inward, matching how a real
+    /// container would (`<ul>` is rendered as a list, not a generic
+    /// block container, so this carries the value forward by hand).
+    extra_padding_left: f32,
+    /// Resolved `padding-right` on the `<ul>`/`<ol>`. Subtracted from
+    /// each child `<li>`'s available width so wrapping respects the
+    /// list's right inset.
+    extra_padding_right: f32,
+    /// `background-color` set on the `<ul>`/`<ol>`. Painted behind each
+    /// child `<li>` so the list panel renders even though `<ul>` doesn't
+    /// emit a true container box. The list's items each carry the same
+    /// fill, producing a stripe-per-item that lines up flush with
+    /// neighbouring items in the common case (no per-item margins).
+    background_color: Option<(f32, f32, f32, f32)>,
 }
 
 // ── Style block extraction ──────────────────────────────────
@@ -1230,11 +1246,32 @@ impl<'a> HtmlRenderer<'a> {
             };
             let style_override = inline_style.as_ref().and_then(|s| s.list_style_type);
             let position_override = inline_style.as_ref().and_then(|s| s.list_style_position);
+            // `<ul>`/`<ol>` is not in `CONTAINER_ELEMENTS` (it has its
+            // own bullet/numbering paint path), so its inline `padding`
+            // and `background-color` would otherwise be dropped on the
+            // floor. Capture them onto the list entry instead — child
+            // `<li>` flushes consult the entry to extend their indent
+            // and paint a per-item background stripe in the list's
+            // colour. No new container box is introduced; the cascade
+            // and box model for `<li>` itself stay unchanged.
+            let ctx = self.length_context();
+            let extra_padding_left = inline_style
+                .as_ref()
+                .and_then(|s| s.padding_left)
+                .map_or(0.0, |len| len.resolve_ctx(&ctx));
+            let extra_padding_right = inline_style
+                .as_ref()
+                .and_then(|s| s.padding_right)
+                .map_or(0.0, |len| len.resolve_ctx(&ctx));
+            let background_color = inline_style.as_ref().and_then(|s| s.background_color);
             self.list_stack.push(ListEntry {
                 list_type,
                 counter: 0,
                 style_override,
                 position_override,
+                extra_padding_left,
+                extra_padding_right,
+                background_color,
             });
         } else if tag == "li" {
             self.flush();
@@ -1571,7 +1608,14 @@ impl<'a> HtmlRenderer<'a> {
         if tag == Some("li") {
             if let Some(entry) = self.list_stack.last() {
                 let depth = self.list_stack.len() - 1;
-                let padding_left = (depth as f32 + 1.0) * LIST_INDENT;
+                // Per CSS, the bullet sits inside the `<li>`'s box, which
+                // sits inside the `<ul>`'s padding box. We capture the
+                // `<ul>`'s `padding-left` onto the list entry so each
+                // child `<li>` adds it to its own indent — without this,
+                // an author-set `padding-left: 2cm` on `<ul>` is silently
+                // dropped because `<ul>` is rendered as a list rather
+                // than a generic container.
+                let padding_left = (depth as f32 + 1.0) * LIST_INDENT + entry.extra_padding_left;
 
                 // Resolve list-style-type: entry override → inherited → default
                 let inherited_lst = self.inherit_stack.last().and_then(|s| s.list_style_type);
@@ -1631,11 +1675,16 @@ impl<'a> HtmlRenderer<'a> {
 
                 let mut list_block_style = BlockStyle {
                     padding_left,
+                    padding_right: entry.extra_padding_right,
+                    background_color: entry.background_color,
                     list_style_position: resolved_pos,
                     ..BlockStyle::default()
                 };
 
-                // Apply CSS block properties from li's inline style
+                // Apply CSS block properties from li's inline style.
+                // Author CSS on the `<li>` itself still wins — this
+                // pre-fill only supplies the `<ul>` parent's geometry
+                // and background as a default for unset `<li>` props.
                 self.apply_block_css(&mut list_block_style);
 
                 self.layout.push_paragraph(Paragraph {

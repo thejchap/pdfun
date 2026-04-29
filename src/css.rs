@@ -1265,6 +1265,14 @@ fn parse_css_length<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseEr
                 Ok(CssLength::Rem(*value))
             } else if unit.eq_ignore_ascii_case("in") {
                 Ok(CssLength::In(*value))
+            } else if unit.eq_ignore_ascii_case("cm") {
+                // 1in = 2.54cm, 1in = 72pt → 1cm = 72/2.54 ≈ 28.3464567pt.
+                // Stored as `Pt` since the conversion is unit-only and
+                // doesn't need the resolution context.
+                Ok(CssLength::Pt(*value * 72.0 / 2.54))
+            } else if unit.eq_ignore_ascii_case("mm") {
+                // 1mm = 72/25.4 ≈ 2.83464567pt.
+                Ok(CssLength::Pt(*value * 72.0 / 25.4))
             } else if unit.eq_ignore_ascii_case("vw") {
                 Ok(CssLength::Vw(*value))
             } else if unit.eq_ignore_ascii_case("vh") {

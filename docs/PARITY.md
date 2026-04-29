@@ -43,7 +43,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| Unordered list (ul, li) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::ul_renders_item_text` |
+| Unordered list (ul, li) | — | ✅ | ✅ | ✅ (3) `tests/test_html.py::ul_renders_item_text`, `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::ul_padding_left_shifts_bullet_rightward` |
 | Ordered list (ol, li) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::ol_has_numbered_markers` |
 | Nested lists | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::nested_ul` |
 | Definition list (dl, dt, dd) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::dl_renders_term_and_definition` |
@@ -108,7 +108,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
 | margin (shorthand + four sides) | 8.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::margin_top_renders` |
-| padding (shorthand + four sides) | 8.4 | ✅ | ✅ | ✅ (1) `tests/visual/padding_border.html` |
+| padding (shorthand + four sides) | 8.4 | ✅ | ✅ | ✅ (3) `tests/visual/padding_border.html`, `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::ul_padding_left_shifts_bullet_rightward` |
 | border / border-width / border-color / border-style | 8.5 | ✅ | ✅ | ✅ (1) `tests/visual/padding_border.html` |
 | Margin collapse: adjacent siblings | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/margin_collapse_siblings.html` |
 | Margin collapse: parent / first child | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/margin_collapse_parent_child.html` |
@@ -209,7 +209,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| rgba() function | 4.2.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::rgba_accepts_alpha_component` |
+| rgba() function | 4.2.1 | ✅ | ✅ | ✅ (2) `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::rgba_accepts_alpha_component` |
 | hsl() function | 4.2.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::hsl_red_renders` |
 | hsla() function | 4.2.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::hsla_accepts_alpha_component` |
 | opacity property | 3.2 | ✅ | ✅ | ✅ (1) `tests/visual/opacity.html` |
