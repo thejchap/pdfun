@@ -30,6 +30,11 @@ pdfun = "pdfun:main"
 module-name = "pdfun._core"
 python-packages = ["pdfun"]
 python-source = "src"
+# Build the Python wheel with http-fetch on, so downstream consumers
+# can render documents whose <img> / background-image / @font-face
+# URLs are http(s). The Cargo-level default stays off — Rust crate
+# consumers still opt in explicitly.
+features = ["http-fetch"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
