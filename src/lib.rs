@@ -812,7 +812,7 @@ fn write_font_objects(
 #[pyclass]
 pub(crate) struct PdfDocument {
     pub(crate) pages: Vec<Arc<Mutex<PageContent>>>,
-    registered_fonts: Vec<RegisteredFont>,
+    pub(crate) registered_fonts: Vec<RegisteredFont>,
     pub(crate) images: Vec<image::ImageData>,
     pub(crate) title: Option<String>,
     pub(crate) author: Option<String>,

@@ -1864,36 +1864,76 @@ impl LayoutInner {
         if style.border_width > 0.0 && !matches!(style.border_style, Some(css::BorderStyle::None)) {
             let (r, g, b) = style.border_color.unwrap_or((0.0, 0.0, 0.0));
             page.operations.push(PdfOp::SetStrokeColor { r, g, b });
-            page.operations
-                .push(PdfOp::SetLineWidth(style.border_width));
 
-            match style.border_style {
-                Some(css::BorderStyle::Dashed) => {
-                    let dash = style.border_width * 3.0;
-                    let gap = style.border_width * 2.0;
-                    page.operations.push(PdfOp::SetDashPattern {
-                        array: vec![dash, gap],
-                        phase: 0.0,
-                    });
+            // CSS Backgrounds & Borders 3 §5.3: `double` paints two parallel
+            // lines with a gap between them, the sum of which equals
+            // `border-width`. We split the band into thirds: outer line / gap
+            // / inner line, each ~1/3 of the total width. Each line is drawn
+            // as a stroked rectangle whose stroke is centred on the mid-line
+            // of its third, so a stroke of width w/3 covers exactly that
+            // third.
+            if matches!(style.border_style, Some(css::BorderStyle::Double)) {
+                let bw = style.border_width;
+                let line_w = bw / 3.0;
+                page.operations.push(PdfOp::SetLineWidth(line_w));
+                // Outer rectangle: path mid-line is bw/6 inside the outer
+                // edge, so the stroke covers [0, bw/3] of the band.
+                let outer_inset = bw / 6.0;
+                emit_rect_path(
+                    &mut page.operations,
+                    box_x + outer_inset,
+                    cursor_y - box_height + outer_inset,
+                    (box_width - 2.0 * outer_inset).max(0.0),
+                    (box_height - 2.0 * outer_inset).max(0.0),
+                );
+                page.operations.push(PdfOp::Stroke);
+                // Inner rectangle: path mid-line is 5*bw/6 inside the outer
+                // edge, so the stroke covers [2*bw/3, bw] of the band.
+                let inner_inset = bw * 5.0 / 6.0;
+                let iw = (box_width - 2.0 * inner_inset).max(0.0);
+                let ih = (box_height - 2.0 * inner_inset).max(0.0);
+                if iw > 0.0 && ih > 0.0 {
+                    emit_rect_path(
+                        &mut page.operations,
+                        box_x + inner_inset,
+                        cursor_y - box_height + inner_inset,
+                        iw,
+                        ih,
+                    );
+                    page.operations.push(PdfOp::Stroke);
                 }
-                Some(css::BorderStyle::Dotted) => {
-                    let dot = style.border_width;
-                    page.operations.push(PdfOp::SetDashPattern {
-                        array: vec![dot, dot * 2.0],
-                        phase: 0.0,
-                    });
+            } else {
+                page.operations
+                    .push(PdfOp::SetLineWidth(style.border_width));
+
+                match style.border_style {
+                    Some(css::BorderStyle::Dashed) => {
+                        let dash = style.border_width * 3.0;
+                        let gap = style.border_width * 2.0;
+                        page.operations.push(PdfOp::SetDashPattern {
+                            array: vec![dash, gap],
+                            phase: 0.0,
+                        });
+                    }
+                    Some(css::BorderStyle::Dotted) => {
+                        let dot = style.border_width;
+                        page.operations.push(PdfOp::SetDashPattern {
+                            array: vec![dot, dot * 2.0],
+                            phase: 0.0,
+                        });
+                    }
+                    _ => {}
                 }
-                _ => {}
+
+                emit_rect_path(
+                    &mut page.operations,
+                    box_x,
+                    cursor_y - box_height,
+                    box_width,
+                    box_height,
+                );
+                page.operations.push(PdfOp::Stroke);
             }
-
-            emit_rect_path(
-                &mut page.operations,
-                box_x,
-                cursor_y - box_height,
-                box_width,
-                box_height,
-            );
-            page.operations.push(PdfOp::Stroke);
         }
 
         // CSS Backgrounds & Borders 3 §7: inset shadows paint inside the
@@ -3133,5 +3173,76 @@ mod tests {
     fn collapsed_top_delta_handles_negatives() {
         // Prior -5 spent, new top 3 -> effective -2, need -2-(-5)=+3 more.
         assert!((collapsed_top_delta(-5.0, 3.0) - 3.0).abs() < 1e-6);
+    }
+
+    // ── CSS Backgrounds & Borders 3 §5.3: `border-style: double` ───
+
+    /// Helper: render a single paragraph with the given border style and
+    /// return the count of `Stroke` ops emitted on the resulting page.
+    /// We inspect page operations directly (rather than the serialised
+    /// content stream) so the assertion is independent of low-level
+    /// content-stream formatting.
+    fn count_strokes_for_border_style(border_style: css::BorderStyle) -> usize {
+        let mut doc = PdfDocument {
+            pages: Vec::new(),
+            registered_fonts: Vec::new(),
+            images: Vec::new(),
+            title: None,
+            author: None,
+            subject: None,
+            keywords: None,
+            creator: None,
+            warnings: Vec::new(),
+            headings: Vec::new(),
+            anchors: std::collections::HashMap::new(),
+        };
+        let mut layout = LayoutInner::new(36.0, 36.0, 36.0, 36.0, 612.0, 792.0);
+        let style = BlockStyle {
+            border_width: 8.0,
+            border_color: Some((0.0, 0.0, 0.0)),
+            border_style: Some(border_style),
+            ..BlockStyle::default()
+        };
+        layout.push_paragraph(Paragraph {
+            runs: vec![TextRun {
+                text: "x".to_string(),
+                font_name: "Helvetica".to_string(),
+                font_size: 12.0,
+                ..TextRun::default()
+            }],
+            line_height: None,
+            spacing_after: 0.0,
+            style,
+            marker: None,
+            is_hr: false,
+            white_space: css::WhiteSpace::default(),
+            tag: None,
+            anchor_id: None,
+        });
+        layout.finish(&mut doc).expect("layout finish");
+        let page = doc.pages[0].lock().unwrap();
+        page.operations
+            .iter()
+            .filter(|op| matches!(op, PdfOp::Stroke))
+            .count()
+    }
+
+    #[test]
+    fn double_border_emits_two_strokes() {
+        // CSS BB3 §5.3: `border-style: double` paints two parallel lines
+        // separated by a gap. The renderer expresses this as two stroked
+        // rectangles, one for the outer line and one for the inner line.
+        // A `solid` border is the control: it emits exactly one Stroke
+        // op (single rectangle path).
+        let solid_strokes = count_strokes_for_border_style(css::BorderStyle::Solid);
+        let double_strokes = count_strokes_for_border_style(css::BorderStyle::Double);
+        assert_eq!(
+            solid_strokes, 1,
+            "solid border should emit exactly one stroke op (got {solid_strokes})"
+        );
+        assert_eq!(
+            double_strokes, 2,
+            "double border should emit exactly two stroke ops, one per parallel line (got {double_strokes})"
+        );
     }
 }

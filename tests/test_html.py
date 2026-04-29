@@ -1003,6 +1003,39 @@ with describe("HtmlDocument - inline styles"):
         content = content_stream(data)
         expect(content).to_contain(b"Bordered")
 
+    # spec: CSS Backgrounds & Borders 3 §5.3; behaviors: box-border-shorthand
+    @test
+    def inline_border_double_paints_two_lines():
+        """`border-style: double` paints two parallel stroked rectangles.
+
+        CSS Backgrounds & Borders 3 §5.3 specifies that `double` draws two
+        parallel lines whose total width (plus the gap between them) equals
+        `border-width`. The renderer realises this as two stroked rectangle
+        subpaths — one for the outer line, one for the inner line — sharing
+        a common stroke colour. A `solid` control with an identical
+        `border-width` emits exactly one stroked rectangle, so counting `S`
+        operator occurrences in the content stream cleanly distinguishes
+        the two styles.
+        """
+        double_doc = HtmlDocument(
+            string='<div style="border: 8px double black; padding: 12pt">x</div>'
+        )
+        solid_doc = HtmlDocument(
+            string='<div style="border: 8px solid black; padding: 12pt">x</div>'
+        )
+        double_content = content_stream(double_doc.to_bytes())
+        solid_content = content_stream(solid_doc.to_bytes())
+        # Each border line is a `re` (rect path) followed by `S` (stroke).
+        # `double` -> 2 strokes, `solid` -> 1 stroke. We assert the delta
+        # so the test is stable against unrelated stroke ops elsewhere on
+        # the page (none expected today, but defensive).
+        double_strokes = double_content.count(b"\nS\n")
+        solid_strokes = solid_content.count(b"\nS\n")
+        expect(double_strokes - solid_strokes).to_equal(1)
+        expect(double_strokes).to_be_greater_than(1)
+        # Sanity: both content streams contain rectangle paths for the box.
+        expect(double_content).to_contain(b" re\n")
+
     @test
     def inline_margin_bottom():
         """style='margin-bottom: 24pt' adjusts spacing after paragraph."""
