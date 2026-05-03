@@ -44,3 +44,7 @@ target
 
 # Claude Code harness state
 .claude/scheduled_tasks.lock
+
+# Visual regression report + WeasyPrint blesser cache
+/target/visual-report/
+/.cache/weasyprint/

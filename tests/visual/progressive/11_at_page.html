@@ -1,0 +1,18 @@
+<!-- spec: CSS Paged Media 3 §6; behaviors: at-page, css-page-margin-boxes -->
+<style>
+  @page {
+    size: A5 portrait;
+    margin: 18mm 14mm;
+    @top-center { content: "pdfun progressive corpus"; font-family: serif; font-size: 10pt; color: #555; }
+    @bottom-right { content: counter(page) " / " counter(pages); font-size: 9pt; color: #555; }
+  }
+  body { font-family: serif; font-size: 11pt; }
+  h2 { color: #0d6efd; margin-top: 0; }
+</style>
+<h2>@page margin boxes</h2>
+<p>This page is A5 with a header in <code>@top-center</code> and a page
+  number in <code>@bottom-right</code>. WeasyPrint supports these out of
+  the box; pdfun's parity for them is one of the things this test is
+  designed to surface.</p>
+<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do
+  eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>

@@ -1,0 +1,16 @@
+<!-- spec: CSS 2.1 §8.3; behaviors: margin-collapse-adjacent-siblings, margin-collapse-parent-child -->
+<style>
+  body { margin: 0; font-family: sans-serif; padding: 24px; background: #fff; }
+  .outer { background: #fde2e4; padding: 0; }
+  .outer > .inner { background: #cfe2ff; margin: 24px; padding: 12px; }
+  .siblings p { background: #d1e7dd; margin: 18px 0; padding: 8px; }
+</style>
+<section class="outer">
+  <div class="inner">Parent has zero padding, child has 24px margin —
+    margins should collapse with the parent's edges.</div>
+</section>
+<section class="siblings">
+  <p>Sibling A.</p>
+  <p>Sibling B — adjacent margins should collapse to one 18px gap, not 36.</p>
+  <p>Sibling C.</p>
+</section>

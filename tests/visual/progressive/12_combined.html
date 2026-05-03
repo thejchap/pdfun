@@ -1,0 +1,47 @@
+<!-- spec: composite; behaviors: integration-smoke -->
+<style>
+  @page { size: Letter; margin: 18mm; }
+  body { font-family: sans-serif; font-size: 12px; color: #222; }
+  header { border-bottom: 2px solid #0d6efd; padding-bottom: 6px; margin-bottom: 16px; }
+  header h1 { margin: 0; color: #0d6efd; }
+  .lead { font-style: italic; color: #555; }
+  aside {
+    float: right;
+    width: 180px;
+    margin: 0 0 12px 16px;
+    padding: 10px 12px;
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 6px;
+  }
+  table { border-collapse: collapse; margin: 12px 0; width: 100%; }
+  th, td { border: 1px solid #aaa; padding: 6px 8px; text-align: left; }
+  thead th { background: #e9ecef; }
+  footer { margin-top: 24px; font-size: 10px; color: #666; border-top: 1px solid #ddd; padding-top: 6px; }
+</style>
+<header>
+  <h1>Quarterly report</h1>
+  <p class="lead">A whirlwind tour of pdfun's CSS coverage in one page.</p>
+</header>
+<aside>
+  <strong>Sidebar</strong><br>
+  Floated right, padded, rounded, with its own background.
+</aside>
+<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do
+  eiusmod tempor incididunt ut labore et dolore magna aliqua. <strong>Bold</strong>
+  and <em>italic</em> mix inline, with the occasional
+  <span style="color:#dc3545">colored span</span>.</p>
+<ul>
+  <li>One</li>
+  <li>Two</li>
+  <li>Three with <em>emphasis</em></li>
+</ul>
+<table>
+  <thead><tr><th>Region</th><th>Q3</th><th>Q4</th></tr></thead>
+  <tbody>
+    <tr><td>North</td><td>$1.2M</td><td>$1.5M</td></tr>
+    <tr><td>South</td><td>$0.9M</td><td>$1.1M</td></tr>
+    <tr><td>West</td><td>$1.8M</td><td>$2.0M</td></tr>
+  </tbody>
+</table>
+<footer>Composite smoke test for the progressive corpus.</footer>

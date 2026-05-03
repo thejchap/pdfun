@@ -1,0 +1,15 @@
+<!-- spec: Selectors 4 §3.6; behaviors: sel-pseudo-element-before -->
+<style>
+  body { font-family: sans-serif; margin: 24px; font-size: 14px; }
+  .note::before {
+    content: "Note: ";
+    font-weight: bold;
+    color: #0d6efd;
+  }
+  .arrow::before {
+    content: "\2192  ";  /* rightwards arrow */
+    color: #198754;
+  }
+</style>
+<p class="note">Generated content from <code>::before</code> should appear inline before the text.</p>
+<p class="arrow">Each item gets a small arrow prepended.</p>

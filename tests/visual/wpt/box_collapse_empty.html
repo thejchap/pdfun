@@ -1,0 +1,10 @@
+<!-- spec: CSS 2.1 §8.3.1; behaviors: box-collapse-empty -->
+<style>
+  body { margin: 0; font-family: sans-serif; padding: 24px; }
+  .a { background: #cfe2ff; padding: 6px; }
+  .empty { margin: 20px 0; }            /* empty block, top+bottom collapse with each other */
+  .b { background: #d1e7dd; padding: 6px; }
+</style>
+<div class="a">Block A.</div>
+<div class="empty"></div>
+<div class="b">Block B. Should sit one 20px gap below A (collapsed empty block).</div>

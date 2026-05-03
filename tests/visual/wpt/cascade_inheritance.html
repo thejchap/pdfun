@@ -1,0 +1,11 @@
+<!-- spec: CSS 2.1 §6.2; behaviors: cascade-inheritance -->
+<style>
+  html { font-family: serif; color: #333; }      /* inherited */
+  .island { background: #fff8e1; padding: 12px; }
+  .override { font-family: sans-serif; color: #b00020; }
+</style>
+<div class="island">
+  <p>This paragraph inherits font-family and color from html.</p>
+  <p class="override">This one overrides both, and child elements inherit the override.</p>
+  <p class="override">Another override paragraph: same look as the previous line.</p>
+</div>

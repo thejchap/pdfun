@@ -1,0 +1,45 @@
+# Per-fixture pixel-diff tolerances for the visual regression suite.
+#
+# Values are the fraction of subsampled pixels allowed to differ
+# meaningfully (any RGB channel delta > 12) between pdfun and the
+# committed WeasyPrint reference. Fixtures not listed inherit the default.
+#
+# Ratchet down over time as parity improves. Open
+# target/visual-report/index.html after `uv run tryke test` to see the
+# current numbers per fixture.
+
+[defaults]
+pixel_diff_pct = 0.03
+
+[fixtures]
+# Layout-critical: tighten as soon as parity allows.
+padding_border = 0.02
+border_radius = 0.04
+nested_containers = 0.02
+margin_collapse_parent_child = 0.02
+margin_collapse_siblings = 0.02
+opacity = 0.04
+
+# Typography-dominated — text shape and hinting differ between renderers.
+heading_sizes = 0.08
+text_align = 0.10
+inline_styles = 0.08
+list_styles = 0.08
+
+# Tables: borders are tight, contents are typography.
+table_layout = 0.06
+
+# Float layout: layout-critical but text-heavy.
+float_left = 0.06
+float_right = 0.06
+
+# Multi-column is partially implemented in pdfun.
+columns = 0.20
+
+# Page break behavior inherently noisy because we hit page boundaries.
+page_break = 0.10
+
+# Real-world docs are stress tests, not unit tests.
+"realworld/mdn_article" = 0.15
+"realworld/arxiv_paper" = 0.15
+"realworld/github_readme" = 0.15

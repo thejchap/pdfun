@@ -1,0 +1,30 @@
+<!-- spec: CSS 2.1 §9.3; behaviors: position-relative, position-absolute -->
+<style>
+  body { margin: 24px; font-family: sans-serif; font-size: 12px; }
+  .stage {
+    position: relative;
+    height: 220px;
+    background: #f1f3f5;
+    border: 1px solid #ced4da;
+  }
+  .badge {
+    position: absolute;
+    padding: 4px 10px;
+    background: #0d6efd;
+    color: #fff;
+    border-radius: 4px;
+  }
+  .tl { top: 8px; left: 8px; }
+  .tr { top: 8px; right: 8px; background: #198754; }
+  .bl { bottom: 8px; left: 8px; background: #fd7e14; }
+  .br { bottom: 8px; right: 8px; background: #dc3545; }
+  .nudge { position: relative; left: 30px; top: 10px; background: #ffe9b5; padding: 4px; }
+</style>
+<div class="stage">
+  <span class="badge tl">top-left</span>
+  <span class="badge tr">top-right</span>
+  <span class="badge bl">bottom-left</span>
+  <span class="badge br">bottom-right</span>
+</div>
+<p>This sentence has an inline <span class="nudge">nudge</span> via
+  <code>position: relative</code>.</p>

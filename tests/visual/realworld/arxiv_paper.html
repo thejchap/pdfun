@@ -1,0 +1,69 @@
+<!-- spec: realworld; behaviors: integration-paper-style -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Notes on Greedy Coloring — pdfun realworld fixture</title>
+<style>
+  @page {
+    size: Letter; margin: 24mm 28mm;
+    @bottom-center { content: counter(page); font-family: serif; font-size: 10pt; }
+  }
+  body { font-family: Liberation Serif, serif; font-size: 11pt; line-height: 1.5; }
+  h1.title { font-size: 18pt; text-align: center; margin: 0 0 4pt; }
+  .authors { text-align: center; font-size: 11pt; margin-bottom: 4pt; }
+  .affiliation { text-align: center; font-style: italic; font-size: 10pt; color: #555; margin-bottom: 18pt; }
+  h2 { font-size: 13pt; margin: 16pt 0 6pt; }
+  h3 { font-size: 11pt; margin: 12pt 0 4pt; font-style: italic; }
+  p { margin: 0 0 6pt; text-align: justify; text-indent: 1.2em; }
+  p.first, h2 + p, h3 + p { text-indent: 0; }
+  .abstract {
+    margin: 0 36pt 18pt;
+    font-size: 10pt;
+    line-height: 1.45;
+  }
+  .abstract h2 { text-align: center; font-size: 11pt; margin: 0 0 4pt; font-variant: small-caps; }
+  .equation { text-align: center; margin: 8pt 0; font-style: italic; }
+  ol.refs { font-size: 10pt; padding-left: 18pt; }
+  ol.refs li { margin-bottom: 4pt; }
+</style>
+</head>
+<body>
+<h1 class="title">Notes on Greedy Coloring of Sparse Graphs</h1>
+<p class="authors">Jane Q. Researcher, John P. Coauthor</p>
+<p class="affiliation">Department of Theoretical Whatever, University of Somewhere</p>
+
+<div class="abstract">
+  <h2>Abstract</h2>
+  <p class="first">We present a brief survey of greedy coloring strategies
+    for sparse graphs and discuss bounds on chromatic number under
+    natural orderings. The treatment is informal and is intended for use
+    as a layout regression fixture only.</p>
+</div>
+
+<h2>1. Introduction</h2>
+<p class="first">Graph coloring assigns labels (colors) to vertices so that
+  adjacent vertices receive different labels. The minimum number of
+  colors required is the chromatic number, denoted <em>&chi;(G)</em>.</p>
+<p>Greedy algorithms process vertices in some order and assign each the
+  smallest color not used by an already-colored neighbor. The number of
+  colors used depends strongly on the chosen ordering.</p>
+
+<h2>2. Bounds</h2>
+<h3>2.1 Trivial bound</h3>
+<p class="first">Greedy coloring uses at most <em>&Delta;(G) + 1</em> colors,
+  where <em>&Delta;(G)</em> is the maximum degree.</p>
+<div class="equation">&chi;(G) &le; &Delta;(G) + 1.</div>
+<h3>2.2 Welsh–Powell ordering</h3>
+<p class="first">Sorting vertices by non-increasing degree improves the
+  bound on many natural inputs but does not change the worst-case
+  guarantee.</p>
+
+<h2>References</h2>
+<ol class="refs">
+  <li>Welsh, D. J. A.; Powell, M. B. (1967). <em>An upper bound for the chromatic number of a graph and its application to timetabling problems.</em></li>
+  <li>Brélaz, D. (1979). <em>New methods to color the vertices of a graph.</em></li>
+  <li>Diestel, R. (2017). <em>Graph Theory</em> (5th ed.).</li>
+</ol>
+</body>
+</html>

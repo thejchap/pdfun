@@ -43,7 +43,7 @@ exclude = ["tools/build_font_fixture.py"]
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = ["FBT", "D203", "D213", "COM812"]
-per-file-ignores = { "tests/*" = ["D", "ANN201", "PLR2004", "PLC0415", "S101", "ERA001"], "src/pdfun/html.py" = ["N802"], "tools/*" = ["T201", "INP001", "TRY003", "EM101", "EM102", "PLR2004"], "examples/*" = ["T201", "INP001", "E501"] }
+per-file-ignores = { "tests/*" = ["D", "ANN201", "PLR2004", "PLC0415", "S101", "ERA001", "PLR0913", "TC003"], "src/pdfun/html.py" = ["N802"], "tools/*" = ["T201", "INP001", "TRY003", "EM101", "EM102", "PLR2004", "S603", "S607"], "examples/*" = ["T201", "INP001", "E501"] }
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
