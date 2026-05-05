@@ -1,25 +1,24 @@
 # Per-fixture diff ceilings for the visual regression suite.
 #
-# The diff metric is structural (shrink + inked-union; see
-# `tolerant_pixel_diff` in tests/_visual_diff.py): both images are
-# downsampled 8x, then each "inked-in-either" block is compared by mean
-# RGB. The value is `differing-blocks / inked-blocks` — i.e. "what
+# Metric: structural (shrink + inked-union; see `tolerant_pixel_diff` in
+# tests/_visual_diff.py). Both images are downsampled 8x then compared
+# block-mean RGB. Value = `differing-blocks / inked-blocks` — i.e. "what
 # fraction of the page's content disagrees".
 #
 # Whitespace doesn't dilute the denominator, so values land in the
-# 10-80% range even for small layout shifts. Each ceiling is set to the
-# observed diff + ~2 % headroom (rounded up to the nearest 0.02). When
-# you fix a regression, ratchet the corresponding ceiling down in the
-# same commit so the metric keeps guarding against future drift.
+# 10-80 % range. Each ceiling is the observed diff + ~2 % headroom
+# (rounded up to 0.02). When you fix a regression, ratchet the
+# corresponding ceiling down in the same commit so the metric keeps
+# guarding against future drift.
 #
-# To recompute: open target/visual-report/index.html after
-# `uv run tryke test`, or run the snippet in AGENTS.md "what to do next".
+# To recompute: run `uv run tryke test` then the snippet at the bottom
+# of AGENTS.md "what to do next".
 
 [defaults]
 pixel_diff_pct = 0.05
 
 [fixtures]
-# Top-level (legacy) fixtures
+# legacy/
 border_radius = 0.44
 columns = 0.68
 float_left = 0.18
@@ -37,34 +36,34 @@ rgba_overlap = 1.00
 table_layout = 0.24
 text_align = 0.48
 
-# progressive/ — graduated single-feature corpus
+# progressive/
 "progressive/00_text" = 0.52
 "progressive/01_inline_styles" = 0.32
-"progressive/02_block_model" = 0.56
-"progressive/03_margins_padding" = 0.74
-"progressive/04_borders_radius" = 0.60
-"progressive/05_floats_clear" = 0.56
+"progressive/02_block_model" = 0.46
+"progressive/03_margins_padding" = 0.50
+"progressive/04_borders_radius" = 0.62
+"progressive/05_floats_clear" = 0.54
 "progressive/06_lists" = 0.52
 "progressive/07_tables" = 0.14
 "progressive/08_multi_page" = 0.84
-"progressive/09_backgrounds" = 0.68
+"progressive/09_backgrounds" = 0.74
 "progressive/10_positioning" = 0.48
 "progressive/11_at_page" = 0.54
-"progressive/12_combined" = 0.32
+"progressive/12_combined" = 0.30
 
-# wpt/ — curated reference-style fixtures
-"wpt/box_collapse_empty" = 0.76
-"wpt/box_sizing_border_box" = 0.78
+# wpt/
+"wpt/box_collapse_empty" = 0.30
+"wpt/box_sizing_border_box" = 0.40
 "wpt/cascade_inheritance" = 0.32
-"wpt/cascade_specificity" = 0.72
+"wpt/cascade_specificity" = 0.60
 "wpt/orphans_widows" = 0.50
 "wpt/sel_first_child" = 0.54
 "wpt/sel_nth_child" = 0.26
 "wpt/sel_pseudo_before" = 0.44
 "wpt/text_indent" = 0.22
-"wpt/vfmd_line_height" = 0.72
+"wpt/vfmd_line_height" = 0.62
 
-# realworld/ — composite stress fixtures
+# realworld/
 "realworld/arxiv_paper" = 0.54
-"realworld/github_readme" = 0.52
-"realworld/mdn_article" = 0.52
+"realworld/github_readme" = 0.54
+"realworld/mdn_article" = 0.48

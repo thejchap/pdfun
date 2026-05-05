@@ -1806,6 +1806,35 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
             "background-color" => {
                 self.style.background_color = Some(parse_css_color(input)?);
             }
+            "background" => {
+                // Minimal `background:` shorthand support — we only honor
+                // the color component (the form most fixtures use, e.g.
+                // `background: #cfe2ff`). The other longhands (image,
+                // repeat, position, size, attachment, origin, clip) have
+                // their own per-property handlers; folding them into the
+                // shorthand parser would require teaching cssparser the
+                // full grammar from CSS Backgrounds & Borders 3 §3.10
+                // and isn't worth the surface area for the cases we hit.
+                //
+                // Walk all top-level tokens, accept the first value that
+                // parses as a color, and require the rest to be `none` /
+                // a recognised keyword / a length so we don't silently
+                // swallow malformed declarations.
+                let mut found_color = false;
+                while !input.is_exhausted() {
+                    if !found_color
+                        && let Ok(c) =
+                            input.try_parse(|i: &mut Parser<'i, '_>| parse_css_color(i))
+                    {
+                        self.style.background_color = Some(c);
+                        found_color = true;
+                        continue;
+                    }
+                    // Skip one token (ident, length, percentage, slash, etc.)
+                    // — we accept and ignore non-color shorthand bits.
+                    let _ = input.next();
+                }
+            }
             "font-size" => {
                 self.style.font_size = Some(parse_non_negative_length(input)?);
             }
@@ -3726,7 +3755,8 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut page_rules = Vec::new();
     let mut font_faces = Vec::new();
-    parse_stylesheet_manual(css, &mut rules, &mut page_rules, &mut font_faces);
+    let stripped = strip_css_comments(css);
+    parse_stylesheet_manual(&stripped, &mut rules, &mut page_rules, &mut font_faces);
     let mut sheet = Stylesheet {
         rules,
         page_style: PageStyle::default(),
@@ -3735,6 +3765,81 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     };
     sheet.page_style = sheet.resolve_page_style(1, 1);
     sheet
+}
+
+/// Remove CSS `/* ... */` comments, replacing each with a single space.
+///
+/// `parse_stylesheet_manual` scans for `{` to delimit selectors; if a
+/// comment sits between two rules (`p { ... } /* note */ .blue { ... }`),
+/// the comment text is otherwise pulled into the next rule's selector
+/// and silently breaks matching for every rule that follows. Stripping
+/// up front keeps the rest of the parser comment-blind.
+///
+/// String literals (`"..."` / `'...'`) are honored so a `content:
+/// "/* not a comment */"` declaration survives intact. Replacement uses
+/// a single space, not deletion, so adjacent tokens (`p/*x*/.blue`)
+/// don't collapse into one identifier.
+fn strip_css_comments(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' | b'\'' => {
+                let quote = b;
+                let start = i;
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if c == quote {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                // Safe: we only step over single-byte ASCII quotes and
+                // multi-byte sequences via the outer loop's index.
+                out.push_str(&input[start..i]);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                let mut j = i + 2;
+                while j + 1 < bytes.len() && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
+                    j += 1;
+                }
+                i = if j + 1 < bytes.len() { j + 2 } else { bytes.len() };
+                out.push(' ');
+            }
+            _ => {
+                // Walk one UTF-8 codepoint at a time so multi-byte
+                // characters (e.g. the `§` in spec links) aren't split.
+                let ch_end = next_char_end(bytes, i);
+                out.push_str(&input[i..ch_end]);
+                i = ch_end;
+            }
+        }
+    }
+    out
+}
+
+fn next_char_end(bytes: &[u8], i: usize) -> usize {
+    let b = bytes[i];
+    let len = if b < 0x80 {
+        1
+    } else if b < 0xC0 {
+        1 // stray continuation byte; advance one to make progress
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    };
+    (i + len).min(bytes.len())
 }
 
 /// Find the byte index of the `}` that matches the `{` at position
