@@ -11,6 +11,19 @@ crate-type = ["cdylib"]
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
+[features]
+default = ["bundled-fallback-font"]
+# Opt-in HTTP backend for the URL fetcher. Off by default so the library
+# stays pure-Rust with zero network capability — server callers who want
+# remote `<img>` / `@font-face` URLs enable this feature explicitly.
+http-fetch = ["dep:ureq", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
+# Bundle DejaVu Sans (~750 KB) as a built-in fallback face so non-WinAnsi
+# codepoints (e.g. ☑ U+2611) render even when the document doesn't ship
+# its own `@font-face`. Disable with `--no-default-features` to drop the
+# embedded bytes from the binary; documents without `@font-face` will then
+# fall back to '?' substitution per WS-1A.
+bundled-fallback-font = []
+
 [dependencies]
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
@@ -23,3 +36,14 @@ html5ever = "0.38"
 cssparser = "0.37"
 png = "0.17"
 miniz_oxide = "0.8"
+# rustls + ring is the default in 3.x (no system OpenSSL); pure Rust
+# keeps the "no system deps" promise. Optional + opt-in via `http-fetch`.
+ureq = { version = "3", optional = true }
+# Explicit rustls + webpki-roots wiring for HttpFetcher's TLS config.
+# `ureq` already pulls these transitively, but listing them as direct
+# (optional, gated) deps lets HttpFetcher build a `RootCertStore` from
+# Mozilla's CA bundle and assert on it in tests, instead of relying on
+# `ureq`'s default `RootCerts::WebPki` magic.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"], optional = true }
+rustls-pki-types = { version = "1", optional = true }
+webpki-roots = { version = "1", optional = true }

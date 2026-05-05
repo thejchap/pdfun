@@ -278,7 +278,11 @@ pub fn resolve_builtin_variant(base_font: &str, bold: bool, italic: bool) -> Opt
 /// Python caller invoking `text_width` directly with a custom name) the
 /// lookup returns `None` like an unknown built-in.
 pub fn measure_str(text: &str, font_name: &str, font_size: f32) -> Option<f32> {
-    if font_name.starts_with("Custom-") {
+    // Embedded faces (`Custom-N` from `@font-face` and the bundled
+    // WS-1B `__pdfun_fallback`) all flow through the per-thread metrics
+    // map populated by `set_font_face_metrics`. `is_embedded_font`
+    // unifies the two prefix conventions.
+    if crate::is_embedded_font(font_name) {
         return FONT_FACE_METRICS.with(|cell| {
             cell.borrow()
                 .get(font_name)
@@ -286,9 +290,23 @@ pub fn measure_str(text: &str, font_name: &str, font_size: f32) -> Option<f32> {
         });
     }
     let metrics = get_builtin_metrics(font_name)?;
+    // Index the width array by transcoded PDF-WinAnsi byte, not by raw
+    // UTF-8 byte. Per-char so that a single non-WinAnsi codepoint in
+    // the middle of an otherwise-Latin string still contributes zero
+    // (instead of zeroing the whole measurement). WS-1B promotes those
+    // runs onto a fallback face that does have metrics for them.
     let width: u32 = text
-        .bytes()
-        .map(|b| u32::from(metrics.widths[b as usize]))
+        .chars()
+        .map(|c| {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            crate::winansi::transcode_to_pdf_winansi(s).map_or(0, |bytes| {
+                bytes
+                    .iter()
+                    .map(|&b| u32::from(metrics.widths[b as usize]))
+                    .sum()
+            })
+        })
         .sum();
     Some(width as f32 * font_size / 1000.0)
 }
@@ -579,6 +597,23 @@ mod tests {
         assert!((direct - dispatched).abs() < 1e-5);
         // After clear, the lookup misses and we get None.
         assert!(measure_str("A", "Custom-7", 12.0).is_none());
+    }
+
+    /// `measure_str` for built-in fonts must index the AFM width array
+    /// by the *transcoded* PDF-WinAnsi byte, not by the raw UTF-8
+    /// bytes. Today `é` is two UTF-8 bytes (0xC3 0xA9) and silently
+    /// over-measures by ~150% — fixing this is what unblocks correct
+    /// line-wrapping for Spanish/French text.
+    #[test]
+    fn measure_str_uses_winansi_widths() {
+        let metrics = get_builtin_metrics("Helvetica").expect("Helvetica is built-in");
+        let expected_units = u32::from(metrics.widths[0xE9]);
+        let expected = expected_units as f32 * 12.0 / 1000.0;
+        let measured = measure_str("é", "Helvetica", 12.0).expect("Helvetica resolves");
+        assert!(
+            (measured - expected).abs() < 1e-4,
+            "expected width {expected} for 'é' (WinAnsi byte 0xE9 -> {expected_units} units), got {measured}",
+        );
     }
 
     #[test]

@@ -71,3 +71,44 @@ Suggested loop when fixing a regression:
 
 Composites are only generated for `FAIL` rows (skipped for PASS and
 MISSING-REF). They're rebuilt every run, so don't edit them by hand.
+
+### what to do next (visual loop, WIP)
+
+The diff metric was changed mid-iteration to a structural one (shrink +
+inked-union; see `tolerant_pixel_diff` in `tests/_visual_diff.py`) and
+**`tests/visual/tolerances.toml` is not yet recalibrated for it**. The
+old tolerances assume `differing-pixels / total-pixels` (whitespace
+dominates), the new metric is `differing-blocks / inked-blocks` after
+8x downsample. Almost every fixture now reads in the 50–100% range
+under the new metric — these aren't 41 new regressions, they're honest
+parity gaps that the old metric was hiding.
+
+To finish the migration:
+
+1. **Pin tolerances to current state.** Run the suite, write each
+   fixture's observed diff (+ ~2% headroom) into `tolerances.toml` as
+   the new ceiling. Sample script:
+
+   ```bash
+   uv run python -c "import json, math; \
+   rows=[json.loads(l) for l in open('target/visual-report/results.jsonl') if l.strip()]; \
+   obs={}; \
+   [obs.update({r['name']: max(obs.get(r['name'],0), r.get('diff_pct') or 0)}) for r in rows if r['status']!='MISSING-REF']; \
+   [print(f'{n} = {min(1.0, math.ceil((d+0.02)*50)/50):.2f}') for n,d in sorted(obs.items())]"
+   ```
+
+2. **Ratchet down per fixture as parity improves.** Each rendering fix
+   should be paired with a tolerance drop in the same commit so the
+   ceiling doesn't silently stay loose.
+3. **Flip `@test.todo` back to `@test` in `tests/test_visual.py`** once
+   tolerances reflect a state we want CI to defend.
+4. **Re-bless `rgba_overlap`.** Master added it as
+   `tests/visual/ref/rgba_overlap.png`, but the multi-page convention
+   we standardised on is `<name>.page<N>.png`. Run
+   `uv run python tools/bless_visual_refs.py rgba_overlap` to refresh.
+
+The "obvious wrong" fixtures the user flagged (`columns` rendering 1
+column instead of 3, `wpt/cascade_specificity` rendering all-red text)
+are real pdfun bugs that the new metric correctly catches; they're
+worth tackling once tolerances are in a state where the metric guards
+against future drift.

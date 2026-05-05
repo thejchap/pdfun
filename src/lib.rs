@@ -31,6 +31,8 @@ mod font_metrics;
 mod html_render;
 mod image;
 mod layout;
+mod url_fetcher;
+mod winansi;
 
 // ── Built-in PDF fonts ─────────────────────────────────────────
 
@@ -65,7 +67,10 @@ pub(crate) enum PdfOp {
         x: f32,
         y: f32,
     },
-    ShowText(String),
+    /// Pre-transcoded PDF-WinAnsi byte string for the built-in font path.
+    /// Built by `show_text_for` via `winansi::transcode_to_pdf_winansi`;
+    /// emitted into the content stream wrapped in a PDF literal string.
+    ShowText(Vec<u8>),
     /// glyph ids are resolved lazily in `to_bytes()`; stores (char,) pairs
     ShowGlyphs(Vec<char>),
     // Graphics primitives
@@ -144,6 +149,16 @@ pub(crate) enum PdfOp {
         dx: f32,
         dy: f32,
     },
+    /// Invoke a captured Form `XObject` (Transparency Group) for an
+    /// `opacity < 1` container with drawn descendants. `index` indexes
+    /// into `PageContent::form_xobjects`. Emits the PDF `Do` operator
+    /// referencing `/Fm<index>` — the surrounding stream is expected
+    /// to have already applied a `gs` op for the parent's α (the
+    /// constant alpha lives on the outer stream so the group composites
+    /// at the correct opacity per CSS Compositing & Blending L1 §4).
+    DrawFormXObject {
+        index: usize,
+    },
 }
 
 pub(crate) struct LinkAnnotation {
@@ -165,6 +180,33 @@ pub(crate) struct HeadingEntry {
     pub(crate) y: f32,
 }
 
+/// A captured Form `XObject` built from a translucent block subtree
+/// (CSS Compositing & Blending L1 §4: an `opacity < 1` block with
+/// drawn descendants must render through a Transparency Group `XObject`
+/// per ISO 32000-1 §11.6.5). The captured ops were temporarily diverted
+/// from a `PageContent` while the subtree rendered; they're emitted as
+/// a `/Subtype /Form` indirect object with a `/Group << /S /Transparency
+/// /CS /DeviceRGB /I true /K false >>` dictionary, and the surrounding
+/// page stream emits a `gs + Do` pair to apply the parent's alpha.
+pub(crate) struct FormXObjectData {
+    pub(crate) bbox: [f32; 4],
+    pub(crate) operations: Vec<PdfOp>,
+    /// Stored for completeness; the page-level emission path
+    /// re-derives the font set from the captured ops via
+    /// `lib::write_ops`, so this field is documentation-only.
+    #[allow(dead_code)]
+    pub(crate) fonts_used: Vec<String>,
+    pub(crate) images_used: Vec<usize>,
+    /// Indices into the same `PageContent::form_xobjects` for nested
+    /// transparency groups (an `opacity:0.5` block inside another).
+    pub(crate) nested_xobjects: Vec<usize>,
+    /// Alphas referenced by `SetAlpha` ops inside this Form `XObject`'s
+    /// content stream. The page-level emission path re-derives this
+    /// via `collect_alphas_in_ops` so the field is documentation-only.
+    #[allow(dead_code)]
+    pub(crate) alphas: Vec<f32>,
+}
+
 pub(crate) struct PageContent {
     pub(crate) width: f64,
     pub(crate) height: f64,
@@ -175,6 +217,12 @@ pub(crate) struct PageContent {
     pub(crate) links: Vec<LinkAnnotation>,
     /// Indices into `PdfDocument::images` of images used on this page.
     pub(crate) images_used: Vec<usize>,
+    /// Captured Form `XObjects` (Transparency Groups) for `opacity < 1`
+    /// containers with drawn descendants. Each entry is rendered as an
+    /// indirect Form `XObject` and referenced from this page's `/Resources
+    /// /XObject` dict via `/Fm<idx>`. The page's `operations` Vec
+    /// references them through `PdfOp::DrawFormXObject { index }`.
+    pub(crate) form_xobjects: Vec<FormXObjectData>,
 }
 
 impl PageContent {
@@ -188,15 +236,116 @@ impl PageContent {
             current_font_size: None,
             links: Vec::new(),
             images_used: Vec::new(),
+            form_xobjects: Vec::new(),
         }
     }
 }
 
-/// Escape a string for PDF literal string encoding.
-/// Parentheses and backslashes must be escaped.
-fn pdf_escape(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len());
-    for &b in s.as_bytes() {
+/// Transcode `text` into PDF `WinAnsiEncoding` bytes, substituting `?`
+/// per-char for codepoints outside the `WinAnsi` repertoire. WS-1A treats
+/// non-mappable codepoints as unrenderable on built-in fonts; WS-1B
+/// will replace this fallback with a split-and-promote onto a Unicode
+/// face. The substitution is per-char so a single rogue codepoint in
+/// the middle of an otherwise-Latin string only loses that one glyph.
+pub(crate) fn transcode_with_fallback(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        match winansi::transcode_to_pdf_winansi(s) {
+            Ok(mut bytes) => out.append(&mut bytes),
+            Err(_) => out.push(b'?'),
+        }
+    }
+    out
+}
+
+/// One contiguous chunk of a text run, classified by whether the entire
+/// chunk lives in the PDF `WinAnsiEncoding` repertoire (WS-1A's
+/// `transcode_to_pdf_winansi` would accept it) or contains codepoints
+/// that need promotion onto a Unicode-capable face (WS-1B's job).
+///
+/// Sequencing: the slices produced by [`split_at_non_winansi`] always
+/// alternate `WinAnsi` and `NonWinAnsi`, never two of the same kind in
+/// a row — and never an empty slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunChunk<'a> {
+    /// Substring whose every codepoint maps cleanly to a `WinAnsi` byte.
+    /// Built-in Type1 fonts can render this directly.
+    WinAnsi(&'a str),
+    /// Substring whose every codepoint is *outside* the `WinAnsi`
+    /// repertoire. Layout will promote this onto the bundled fallback
+    /// face (or, with the feature off, leave it as '?' substitutes).
+    NonWinAnsi(&'a str),
+}
+
+/// Split a text run into alternating `WinAnsi` / `NonWinAnsi` chunks
+/// based on WS-1A's transcoder verdict per char. No allocation per
+/// chunk — slices borrow from the input.
+///
+/// `"Café ☑ done"` → `[WinAnsi("Café "), NonWinAnsi("☑"), WinAnsi(" done")]`.
+pub(crate) fn split_at_non_winansi(text: &str) -> Vec<RunChunk<'_>> {
+    let mut out: Vec<RunChunk<'_>> = Vec::new();
+    if text.is_empty() {
+        return out;
+    }
+    // We walk char_indices once, batching consecutive codepoints with
+    // the same WinAnsi-mappable verdict into a single slice. The
+    // verdict is computed by feeding each char through WS-1A's
+    // transcoder via `char_is_winansi`.
+    let mut chunk_start = 0usize;
+    let mut chunk_is_win: Option<bool> = None;
+    for (idx, ch) in text.char_indices() {
+        let is_win = char_is_winansi(ch);
+        match chunk_is_win {
+            None => {
+                chunk_is_win = Some(is_win);
+                chunk_start = idx;
+            }
+            Some(prev) if prev != is_win => {
+                let slice = &text[chunk_start..idx];
+                out.push(if prev {
+                    RunChunk::WinAnsi(slice)
+                } else {
+                    RunChunk::NonWinAnsi(slice)
+                });
+                chunk_start = idx;
+                chunk_is_win = Some(is_win);
+            }
+            _ => {}
+        }
+    }
+    // Trailing chunk: covers chunk_start..text.len().
+    if let Some(prev) = chunk_is_win {
+        let slice = &text[chunk_start..];
+        if !slice.is_empty() {
+            out.push(if prev {
+                RunChunk::WinAnsi(slice)
+            } else {
+                RunChunk::NonWinAnsi(slice)
+            });
+        }
+    }
+    out
+}
+
+/// Whether a single codepoint maps cleanly to a `WinAnsi` byte. Defined
+/// as "WS-1A's transcoder accepts the one-char string". Kept private —
+/// callers outside the splitter should go through the transcoder
+/// directly so the `WinAnsi` spec lives in exactly one place.
+fn char_is_winansi(ch: char) -> bool {
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+    winansi::transcode_to_pdf_winansi(s).is_ok()
+}
+
+/// Escape a byte buffer for PDF literal string encoding (`(...)`).
+/// Parentheses and backslashes must be escaped per ISO 32000-1 §7.3.4.2.
+/// Accepts arbitrary bytes — used after `WinAnsi` transcoding so the input
+/// is already in the encoding the built-in font expects.
+fn pdf_escape(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for &b in bytes {
         match b {
             b'(' => out.extend_from_slice(b"\\("),
             b')' => out.extend_from_slice(b"\\)"),
@@ -212,7 +361,192 @@ fn pdf_escape(s: &str) -> Vec<u8> {
 pub(crate) struct RegisteredFont {
     pub(crate) data: Vec<u8>,
     pub(crate) family: String,
-    pub(crate) name: String, // e.g. "Custom-0"
+    pub(crate) name: String, // e.g. "Custom-0" or "__pdfun_fallback"
+}
+
+/// Internal name reserved for the bundled `DejaVu` Sans fallback face. A
+/// run hits this face only when WS-1A's `WinAnsi` transcoder rejects a
+/// codepoint and WS-1B promotes that codepoint onto a Unicode-capable
+/// font. Treated like `Custom-N` everywhere — same Type0/CIDFont2
+/// Identity-H plumbing, same `ToUnicode` `CMap` pipeline.
+pub(crate) const FALLBACK_FONT_NAME: &str = "__pdfun_fallback";
+
+/// Family name advertised on the `@font-face` registry for the bundled
+/// fallback. Lower-cased internally to match cascade lookup behaviour.
+#[cfg(feature = "bundled-fallback-font")]
+pub(crate) const FALLBACK_FONT_FAMILY: &str = "__pdfun_fallback";
+
+/// Bundled `DejaVu` Sans font bytes. Kept inside a Cargo feature gate so
+/// users who ship their own `@font-face` can drop the ~750 KB.
+#[cfg(feature = "bundled-fallback-font")]
+pub(crate) const FALLBACK_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
+
+/// True if `name` refers to an embedded (subset+embed) face — either a
+/// user-registered `Custom-N` or the bundled `__pdfun_fallback`. All
+/// embedded faces flow through the same Type0/CIDFont2/Identity-H path
+/// at PDF write time.
+pub(crate) fn is_embedded_font(name: &str) -> bool {
+    name.starts_with("Custom-") || name == FALLBACK_FONT_NAME
+}
+
+/// Eagerly validate the bundled font bytes once; cache the validated
+/// view so subsequent calls are zero-cost. Returns `Err` only if the
+/// embedded TTF fails `ttf_parser::Face::parse` — which would indicate
+/// the asset committed alongside this source is corrupt.
+#[cfg(feature = "bundled-fallback-font")]
+fn fallback_font_bytes() -> Result<&'static [u8], String> {
+    use std::sync::OnceLock;
+    static VALIDATED: OnceLock<Result<(), String>> = OnceLock::new();
+    let parsed = VALIDATED.get_or_init(|| {
+        ttf_parser::Face::parse(FALLBACK_FONT_BYTES, 0)
+            .map(|_| ())
+            .map_err(|e| format!("bundled fallback font failed to parse: {e}"))
+    });
+    match parsed {
+        Ok(()) => Ok(FALLBACK_FONT_BYTES),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+/// Append a `RegisteredFont` for the bundled fallback face if the given
+/// vector does not already carry one. Returns the registered name on
+/// success, `Err(msg)` if the embedded bytes failed eager validation,
+/// and `Ok(None)` when the `bundled-fallback-font` feature is off (the
+/// caller is expected to fall back to '?' substitution).
+///
+/// Idempotent: calling it twice on the same vector yields the existing
+/// entry the second time. The first call is the only one that pays the
+/// `ttf_parser` parse cost.
+#[allow(dead_code)]
+pub(crate) fn register_fallback_if_needed(
+    registered: &mut Vec<RegisteredFont>,
+) -> Result<Option<String>, String> {
+    if registered.iter().any(|rf| rf.name == FALLBACK_FONT_NAME) {
+        return Ok(Some(FALLBACK_FONT_NAME.to_string()));
+    }
+
+    #[cfg(feature = "bundled-fallback-font")]
+    {
+        let bytes = fallback_font_bytes()?;
+        registered.push(RegisteredFont {
+            data: bytes.to_vec(),
+            family: FALLBACK_FONT_FAMILY.to_string(),
+            name: FALLBACK_FONT_NAME.to_string(),
+        });
+        Ok(Some(FALLBACK_FONT_NAME.to_string()))
+    }
+
+    #[cfg(not(feature = "bundled-fallback-font"))]
+    {
+        let _ = registered; // suppress unused-mut warning when feature is off
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_font_registers_lazily() {
+        // Empty registry: nothing has been registered yet.
+        let mut registered: Vec<RegisteredFont> = Vec::new();
+        assert!(registered.iter().all(|rf| rf.name != FALLBACK_FONT_NAME));
+
+        // First call: registers exactly one entry named __pdfun_fallback
+        // (under the default-on `bundled-fallback-font` feature). With
+        // the feature off this returns Ok(None) and registers nothing.
+        let first = register_fallback_if_needed(&mut registered).expect("ok");
+
+        #[cfg(feature = "bundled-fallback-font")]
+        {
+            assert_eq!(first, Some(FALLBACK_FONT_NAME.to_string()));
+            assert_eq!(registered.len(), 1);
+            assert_eq!(registered[0].name, FALLBACK_FONT_NAME);
+            assert_eq!(registered[0].family, FALLBACK_FONT_FAMILY);
+            assert!(!registered[0].data.is_empty());
+
+            // Second call: idempotent — no new entry, returns the same name.
+            let second = register_fallback_if_needed(&mut registered).expect("ok");
+            assert_eq!(second, Some(FALLBACK_FONT_NAME.to_string()));
+            assert_eq!(registered.len(), 1);
+        }
+        #[cfg(not(feature = "bundled-fallback-font"))]
+        {
+            assert_eq!(first, None);
+            assert!(registered.is_empty());
+        }
+    }
+
+    #[cfg(feature = "bundled-fallback-font")]
+    #[test]
+    fn fallback_font_bytes_parse_via_ttf_parser() {
+        // Eager validation: the embedded asset must round-trip through
+        // ttf_parser::Face::parse without error so we never produce a
+        // corrupt PDF embed.
+        let bytes = fallback_font_bytes().expect("bundled font parses");
+        ttf_parser::Face::parse(bytes, 0).expect("ttf_parser accepts bytes");
+    }
+
+    #[test]
+    fn embedded_font_classifier_accepts_fallback() {
+        assert!(is_embedded_font(FALLBACK_FONT_NAME));
+        assert!(is_embedded_font("Custom-0"));
+        assert!(is_embedded_font("Custom-42"));
+        assert!(!is_embedded_font("Helvetica"));
+        assert!(!is_embedded_font("Times-Roman"));
+    }
+
+    #[test]
+    fn split_run_at_non_winansi() {
+        // Mixed run from the COBRA fixture: a Latin-1 prefix, a single
+        // non-WinAnsi codepoint, then a Latin-1 suffix. The splitter
+        // must produce exactly three alternating chunks; no empty
+        // slices, no double-classification.
+        let chunks = split_at_non_winansi("Café ☑ done");
+        assert_eq!(
+            chunks,
+            vec![
+                RunChunk::WinAnsi("Café "),
+                RunChunk::NonWinAnsi("☑"),
+                RunChunk::WinAnsi(" done"),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_pure_winansi_run_is_single_chunk() {
+        let chunks = split_at_non_winansi("Café au lait");
+        assert_eq!(chunks, vec![RunChunk::WinAnsi("Café au lait")]);
+    }
+
+    #[test]
+    fn split_pure_non_winansi_run_is_single_chunk() {
+        let chunks = split_at_non_winansi("☑☐");
+        assert_eq!(chunks, vec![RunChunk::NonWinAnsi("☑☐")]);
+    }
+
+    #[test]
+    fn split_empty_run_yields_no_chunks() {
+        let chunks = split_at_non_winansi("");
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn split_consecutive_non_winansi_chars_collapse() {
+        // Two non-WinAnsi codepoints back-to-back must collapse into a
+        // single NonWinAnsi chunk — the layout-side promotion path is
+        // cheaper if it can emit one BeginText/EndText per chunk.
+        let chunks = split_at_non_winansi("a☑☐b");
+        assert_eq!(
+            chunks,
+            vec![
+                RunChunk::WinAnsi("a"),
+                RunChunk::NonWinAnsi("☑☐"),
+                RunChunk::WinAnsi("b"),
+            ]
+        );
+    }
 }
 
 // ── Indirect-ref allocator ─────────────────────────────────────
@@ -351,12 +685,14 @@ fn build_custom_font_data(
     Ok(out)
 }
 
-/// Collect the unique opacities referenced by `SetAlpha` ops on this page,
-/// returning them in first-seen order. The index in the returned `Vec` plus 1
-/// becomes the suffix of the `/GsN` `ExtGState` resource name.
-fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
+/// Collect the unique opacities referenced by `SetAlpha` ops in `ops`,
+/// returning them in first-seen order. The index in the returned `Vec`
+/// plus 1 becomes the suffix of the `/GsN` `ExtGState` resource name.
+/// Used both for top-level page content and for captured Form `XObject`
+/// content streams (each `XObject` carries its own resource dict).
+fn collect_alphas_in_ops(ops: &[PdfOp]) -> Vec<f32> {
     let mut out: Vec<f32> = Vec::new();
-    for op in &page.operations {
+    for op in ops {
         if let PdfOp::SetAlpha { alpha } = op
             && !out.iter().any(|a| (a - alpha).abs() < 1e-6)
         {
@@ -364,6 +700,10 @@ fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
         }
     }
     out
+}
+
+fn collect_page_alphas(page: &PageContent) -> Vec<f32> {
+    collect_alphas_in_ops(&page.operations)
 }
 
 /// Format a rounded-rectangle path into `content`. `radii` is
@@ -448,10 +788,19 @@ fn write_page_content_stream(
     custom_data: &BTreeMap<String, CustomFontData>,
     page_alphas: &[f32],
 ) -> Vec<u8> {
+    write_ops(&page.operations, font_refs, custom_data, page_alphas)
+}
+
+fn write_ops(
+    ops: &[PdfOp],
+    font_refs: &[FontRefs],
+    custom_data: &BTreeMap<String, CustomFontData>,
+    page_alphas: &[f32],
+) -> Vec<u8> {
     let mut content = Content::new();
     let mut current_font_name: Option<String> = None;
 
-    for op in &page.operations {
+    for op in ops {
         match op {
             PdfOp::BeginText => {
                 content.begin_text();
@@ -471,8 +820,8 @@ fn write_page_content_stream(
             PdfOp::SetTextPosition { x, y } => {
                 content.next_line(*x, *y);
             }
-            PdfOp::ShowText(text) => {
-                let escaped = pdf_escape(text);
+            PdfOp::ShowText(bytes) => {
+                let escaped = pdf_escape(bytes);
                 content.show(Str(&escaped));
             }
             PdfOp::ShowGlyphs(chars) => {
@@ -574,6 +923,15 @@ fn write_page_content_stream(
             }
             PdfOp::Translate { dx, dy } => {
                 content.transform([1.0, 0.0, 0.0, 1.0, *dx, *dy]);
+            }
+            PdfOp::DrawFormXObject { index } => {
+                // `/Fm<idx> Do` invokes the captured Transparency Group.
+                // Caller is expected to have applied a `gs` op for the
+                // parent's α before this point so the group composites
+                // at the correct opacity (CSS Compositing & Blending
+                // L1 §4 + ISO 32000-1 §11.6.5).
+                let resource_name = format!("Fm{index}");
+                content.x_object(Name(resource_name.as_bytes()));
             }
         }
     }
@@ -737,7 +1095,7 @@ fn write_font_objects(
     custom_data: &BTreeMap<String, CustomFontData>,
 ) {
     for fr in font_refs {
-        if fr.name.starts_with("Custom-") {
+        if is_embedded_font(&fr.name) {
             let Some(cfd) = custom_data.get(&fr.name) else {
                 continue;
             };
@@ -801,8 +1159,16 @@ fn write_font_objects(
             pdf.stream(tounicode_ref, &compressed_cmap)
                 .filter(Filter::FlateDecode);
         } else {
-            pdf.type1_font(fr.type0_ref)
-                .base_font(Name(fr.name.as_bytes()));
+            // Built-in Type1 fonts: declare `/Encoding /WinAnsiEncoding`
+            // so viewers (and text-extraction tools) decode the bytes
+            // we emit per ISO 32000-1 Annex D.2 instead of the default
+            // StandardEncoding. ZapfDingbats and Symbol use their own
+            // built-in encodings and must NOT carry a WinAnsi override.
+            let mut t1 = pdf.type1_font(fr.type0_ref);
+            t1.base_font(Name(fr.name.as_bytes()));
+            if fr.name != "Symbol" && fr.name != "ZapfDingbats" {
+                t1.encoding_predefined(Name(b"WinAnsiEncoding"));
+            }
         }
     }
 }
@@ -812,7 +1178,7 @@ fn write_font_objects(
 #[pyclass]
 pub(crate) struct PdfDocument {
     pub(crate) pages: Vec<Arc<Mutex<PageContent>>>,
-    registered_fonts: Vec<RegisteredFont>,
+    pub(crate) registered_fonts: Vec<RegisteredFont>,
     pub(crate) images: Vec<image::ImageData>,
     pub(crate) title: Option<String>,
     pub(crate) author: Option<String>,
@@ -911,7 +1277,7 @@ impl PdfDocument {
         let font_refs: Vec<FontRefs> = all_fonts
             .iter()
             .map(|name| {
-                let is_custom = name.starts_with("Custom-");
+                let is_custom = is_embedded_font(name);
                 FontRefs {
                     name: name.clone(),
                     type0_ref: allocator.alloc(),
@@ -997,9 +1363,28 @@ impl PdfDocument {
             // Allocate a Ref per unique alpha on this page.
             let alpha_refs: Vec<Ref> = page_alphas.iter().map(|_| allocator.alloc()).collect();
 
+            // Allocate a Ref per Form XObject (Transparency Group)
+            // captured on this page. The XObjects are emitted below;
+            // the page's /Resources /XObject dict references each as
+            // `/Fm<idx>`.
+            let form_xobject_refs: Vec<Ref> = page
+                .form_xobjects
+                .iter()
+                .map(|_| allocator.alloc())
+                .collect();
+
             let content_bytes =
                 write_page_content_stream(&page, &font_refs, &custom_data, &page_alphas);
             let annot_refs: Vec<Ref> = page.links.iter().map(|_| allocator.alloc()).collect();
+
+            // Page-level Transparency Group (ISO 32000-1 §11.6.6 +
+            // WeasyPrint issue #2723): whenever a page contains any
+            // `ca`/`CA != 1` we MUST set `/Group << /S /Transparency
+            // /CS /DeviceRGB /I true >>` on the page object. Without
+            // it, isolated/non-isolated semantics fall back to the
+            // page backdrop and viewers (Adobe vs Foxit vs Preview)
+            // diverge.
+            let needs_page_group = !page_alphas.is_empty();
 
             {
                 let mut page_writer = pdf.page(page_id);
@@ -1007,6 +1392,12 @@ impl PdfDocument {
                     .parent(page_tree_id)
                     .media_box(Rect::new(0.0, 0.0, page.width as f32, page.height as f32))
                     .contents(content_id);
+
+                if needs_page_group {
+                    let mut group = page_writer.group();
+                    group.transparency().isolated(true);
+                    group.color_space().device_rgb();
+                }
 
                 if !annot_refs.is_empty() {
                     page_writer.annotations(annot_refs.iter().copied());
@@ -1020,11 +1411,15 @@ impl PdfDocument {
                         fonts_dict.pair(Name(resource_name.as_bytes()), fr.type0_ref);
                     }
                 }
-                if !page.images_used.is_empty() {
+                if !page.images_used.is_empty() || !form_xobject_refs.is_empty() {
                     let mut xobjects = resources.x_objects();
                     for &img_idx in &page.images_used {
                         let resource_name = format!("Im{img_idx}");
                         xobjects.pair(Name(resource_name.as_bytes()), image_refs[img_idx].0);
+                    }
+                    for (fm_idx, fm_ref) in form_xobject_refs.iter().enumerate() {
+                        let resource_name = format!("Fm{fm_idx}");
+                        xobjects.pair(Name(resource_name.as_bytes()), *fm_ref);
                     }
                 }
                 if !alpha_refs.is_empty() {
@@ -1041,6 +1436,73 @@ impl PdfDocument {
                 pdf.ext_graphics(*alpha_ref)
                     .non_stroking_alpha(*alpha)
                     .stroking_alpha(*alpha);
+            }
+
+            // Emit the captured Form XObjects (Transparency Groups).
+            // Each carries its own resources (fonts/ExtGStates/images),
+            // /BBox to clip the group, and /Group dict to declare the
+            // transparency model. PDF 1.4+. ISO 32000-1 §11.6.5.
+            for (fm_data, fm_ref) in page.form_xobjects.iter().zip(form_xobject_refs.iter()) {
+                let fm_alphas = collect_alphas_in_ops(&fm_data.operations);
+                let fm_alpha_refs: Vec<Ref> = fm_alphas.iter().map(|_| allocator.alloc()).collect();
+                let fm_content =
+                    write_ops(&fm_data.operations, &font_refs, &custom_data, &fm_alphas);
+                let compressed_fm = image::compress(&fm_content);
+                {
+                    let mut form = pdf.form_xobject(*fm_ref, &compressed_fm);
+                    form.bbox(Rect::new(
+                        fm_data.bbox[0],
+                        fm_data.bbox[1],
+                        fm_data.bbox[2],
+                        fm_data.bbox[3],
+                    ));
+                    form.filter(Filter::FlateDecode);
+                    {
+                        let mut group = form.group();
+                        group.transparency().isolated(true).knockout(false);
+                        group.color_space().device_rgb();
+                    }
+                    {
+                        let mut resources = form.resources();
+                        {
+                            let mut fonts_dict = resources.fonts();
+                            for (idx, fr) in font_refs.iter().enumerate() {
+                                let resource_name = format!("F{}", idx + 1);
+                                fonts_dict.pair(Name(resource_name.as_bytes()), fr.type0_ref);
+                            }
+                        }
+                        if !fm_data.images_used.is_empty() || !fm_data.nested_xobjects.is_empty() {
+                            let mut xobjects = resources.x_objects();
+                            for &img_idx in &fm_data.images_used {
+                                let resource_name = format!("Im{img_idx}");
+                                xobjects
+                                    .pair(Name(resource_name.as_bytes()), image_refs[img_idx].0);
+                            }
+                            for &nested_idx in &fm_data.nested_xobjects {
+                                let resource_name = format!("Fm{nested_idx}");
+                                xobjects.pair(
+                                    Name(resource_name.as_bytes()),
+                                    form_xobject_refs[nested_idx],
+                                );
+                            }
+                        }
+                        if !fm_alpha_refs.is_empty() {
+                            let mut ext_g_states = resources.ext_g_states();
+                            for (idx, r) in fm_alpha_refs.iter().enumerate() {
+                                let resource_name = format!("Gs{}", idx + 1);
+                                ext_g_states.pair(Name(resource_name.as_bytes()), *r);
+                            }
+                        }
+                    }
+                }
+                // Per-XObject ExtGState dicts mirror the per-page
+                // emission — same `ca` + `CA` pair, just rebound to a
+                // local resource ref so the XObject is self-contained.
+                for (alpha, alpha_ref) in fm_alphas.iter().zip(fm_alpha_refs.iter()) {
+                    pdf.ext_graphics(*alpha_ref)
+                        .non_stroking_alpha(*alpha)
+                        .stroking_alpha(*alpha);
+                }
             }
 
             for (annot_ref, link) in annot_refs.iter().zip(page.links.iter()) {
@@ -1183,7 +1645,13 @@ impl Page {
             page.operations
                 .push(PdfOp::ShowGlyphs(text.chars().collect()));
         } else {
-            page.operations.push(PdfOp::ShowText(text.to_string()));
+            // Built-in PDF fonts speak WinAnsi: transcode the text now
+            // so the content-stream literal carries the bytes the
+            // viewer expects. Non-mappable codepoints fall back to '?'
+            // per char (the same defect today, but bounded — WS-1B
+            // will promote those runs to a Unicode-capable face).
+            let bytes = transcode_with_fallback(text);
+            page.operations.push(PdfOp::ShowText(bytes));
         }
         page.operations.push(PdfOp::EndText);
         Ok(())
@@ -1433,6 +1901,77 @@ impl FontDatabase {
     }
 }
 
+/// Adapter that turns a Python callable `(url: str) -> bytes | None`
+/// into a `UrlFetcher`. Returning `None` (or raising) signals a fetch
+/// failure that the renderer reports as a warning. The callable is held
+/// behind `Mutex` because `PyO3` needs the GIL for every invocation
+/// anyway, so contention is unavoidable.
+struct PythonFetcher {
+    callable: Mutex<Py<PyAny>>,
+}
+
+impl url_fetcher::UrlFetcher for PythonFetcher {
+    fn fetch(
+        &self,
+        url: &str,
+        _base_dir: Option<&std::path::Path>,
+    ) -> Result<url_fetcher::FetchedResource, String> {
+        Python::attach(|py| {
+            let callable = self
+                .callable
+                .lock()
+                .map_err(|e| format!("python fetcher poisoned: {e}"))?;
+            let result = callable
+                .bind(py)
+                .call1((url,))
+                .map_err(|e| format!("python fetcher raised: {e}"))?;
+            if result.is_none() {
+                return Err(format!("python fetcher returned None for {url}"));
+            }
+            let bytes: Vec<u8> = result
+                .extract()
+                .map_err(|e| format!("python fetcher returned non-bytes: {e}"))?;
+            Ok(url_fetcher::FetchedResource {
+                bytes,
+                mime: None,
+                redirected_url: None,
+            })
+        })
+    }
+}
+
+/// Default URL fetcher used by `html_to_pdf`. With the `http-fetch`
+/// feature enabled, HTTP(S) requests go through `HttpFetcher` (and the
+/// SSRF guards therein); otherwise this is a file-only fetcher and
+/// HTTP URLs surface the canonical "feature not enabled" warning.
+fn default_url_fetcher() -> Arc<dyn url_fetcher::UrlFetcher> {
+    #[cfg(feature = "http-fetch")]
+    {
+        // Wrap so HTTP(S) goes through HttpFetcher and everything else
+        // falls back to the file-only DefaultFetcher. Mirrors the
+        // free-function `net::fetch` dispatch.
+        struct Auto;
+        impl url_fetcher::UrlFetcher for Auto {
+            fn fetch(
+                &self,
+                url: &str,
+                base_dir: Option<&std::path::Path>,
+            ) -> Result<url_fetcher::FetchedResource, String> {
+                use url_fetcher::{Scheme, parse_scheme};
+                if matches!(parse_scheme(url), Scheme::Http | Scheme::Https) {
+                    return url_fetcher::HttpFetcher::default().fetch(url, base_dir);
+                }
+                url_fetcher::DefaultFetcher.fetch(url, base_dir)
+            }
+        }
+        Arc::new(Auto)
+    }
+    #[cfg(not(feature = "http-fetch"))]
+    {
+        Arc::new(url_fetcher::DefaultFetcher)
+    }
+}
+
 /// RAII guard that clears the per-thread `@font-face` measurement
 /// metrics installed by `html_render::render_dom_to_layout`. Ensures a
 /// panic during render still wipes the thread-local so a follow-on
@@ -1447,7 +1986,7 @@ impl Drop for FontFaceMetricsGuard {
 
 /// Render HTML to a PDF document (called from Python `HtmlDocument`).
 #[pyfunction]
-#[pyo3(signature = (html, margin_top=72.0, margin_right=72.0, margin_bottom=72.0, margin_left=72.0, page_width=612.0, page_height=792.0, base_url=None))]
+#[pyo3(signature = (html, margin_top=72.0, margin_right=72.0, margin_bottom=72.0, margin_left=72.0, page_width=612.0, page_height=792.0, base_url=None, url_fetcher=None))]
 #[allow(clippy::too_many_arguments)]
 fn html_to_pdf(
     html: &str,
@@ -1458,6 +1997,7 @@ fn html_to_pdf(
     page_width: f64,
     page_height: f64,
     base_url: Option<&str>,
+    url_fetcher: Option<Py<PyAny>>,
 ) -> PyResult<PdfDocument> {
     let _font_face_guard = FontFaceMetricsGuard;
     let parsed = dom::parse_html(html);
@@ -1484,31 +2024,59 @@ fn html_to_pdf(
         page_height as f32,
     );
     let base_path = base_url.map(std::path::PathBuf::from);
-    let outcome =
-        html_render::render_dom_to_layout(&parsed.document, &mut inner, base_path.as_deref());
-    let page_style = outcome.page_style;
+    let fetcher: Arc<dyn url_fetcher::UrlFetcher> = if let Some(callable) = url_fetcher {
+        Arc::new(PythonFetcher {
+            callable: Mutex::new(callable),
+        })
+    } else {
+        default_url_fetcher()
+    };
+    let outcome = html_render::render_dom_to_layout(
+        &parsed.document,
+        &mut inner,
+        base_path.as_deref(),
+        fetcher,
+    );
     doc.warnings.extend(outcome.warnings);
-
-    // Apply @page CSS overrides
-    if let Some(w) = page_style.width {
+    // Hand the parsed `@page` rules to the layout. `LayoutInner` will
+    // re-resolve them at every page boundary so per-page selectors
+    // (`:first`, `:left`, `:right`, `:nth(N)`) can vary margins, page
+    // size, and margin-box content from one page to the next per CSS
+    // Paged Media L3 §4.4.
+    inner.page_rules = outcome.page_rules;
+    // Pre-seat the layout's margins/size from the universal `@page`
+    // rule (specificity 0,0,0) so any code reading the inner before the
+    // first page opens still sees a sensible default. We deliberately
+    // skip pseudo-class rules here — those are applied per-page at
+    // `new_page` time so page 2+ don't accidentally inherit page 1's
+    // `:first` margins.
+    let mut base = css::PageStyle::default();
+    for rule in &inner.page_rules {
+        if rule.selector.specificity() == (0, 0, 0) {
+            css::merge_page_style_pub(&mut base, &rule.decls);
+        }
+    }
+    if let Some(w) = base.width {
         inner.page_width = w;
     }
-    if let Some(h) = page_style.height {
+    if let Some(h) = base.height {
         inner.page_height = h;
     }
-    if let Some(m) = page_style.margin_top {
+    if let Some(m) = base.margin_top {
         inner.margin_top = m;
     }
-    if let Some(m) = page_style.margin_right {
+    if let Some(m) = base.margin_right {
         inner.margin_right = m;
     }
-    if let Some(m) = page_style.margin_bottom {
+    if let Some(m) = base.margin_bottom {
         inner.margin_bottom = m;
     }
-    if let Some(m) = page_style.margin_left {
+    if let Some(m) = base.margin_left {
         inner.margin_left = m;
     }
-    inner.margin_boxes = page_style.margin_boxes;
+    // `inner.margin_boxes` is filled per-page by `stamp_margin_boxes`
+    // walking `page_rules`; leave it at its default empty value here.
+    let _ = outcome.page_style;
 
     inner.finish(&mut doc).map_err(PyValueError::new_err)?;
     // Transfer any images collected during rendering to the document

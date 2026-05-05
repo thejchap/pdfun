@@ -7,9 +7,34 @@ from pathlib import Path
 from tryke import describe, expect, test
 
 from pdfun import HtmlDocument
-from tests._pdf_helpers import content_stream
+from tests._pdf_helpers import content_stream, page_texts
 
 _FIXTURE_TTF_PATH = Path(__file__).parent / "fixtures" / "font.ttf"
+
+
+def _find_text_x(content: bytes, marker: bytes) -> float | None:
+    """Find the x-coordinate (operand 1) of the most recent `Td` operator
+    preceding `marker` in `content`. Returns `None` if no Td is found.
+
+    The PDF text operator `tx ty Td` carries the baseline position in
+    operands `tx ty`. The renderer emits text positions via `Td` (move
+    to next line), so this is the right hook for "where did cell text X
+    get drawn?" assertions.
+    """
+    idx = content.find(marker)
+    if idx < 0:
+        return None
+    td_idx = content.rfind(b" Td\n", 0, idx)
+    if td_idx < 0:
+        return None
+    line_start = max(content.rfind(b"\n", 0, td_idx), 0)
+    line = content[line_start + 1 : td_idx].split()
+    if len(line) < 2:
+        return None
+    try:
+        return float(line[0])
+    except ValueError:
+        return None
 
 
 def _font_data_uri(b: bytes | None = None) -> str:
@@ -439,11 +464,13 @@ with describe("HtmlDocument - lists"):
 
     @test
     def ul_has_bullet_marker():
-        """<ul><li> has a disc bullet marker (rendered as ASCII '*')."""
+        """<ul><li> emits a disc bullet marker as WinAnsi byte 0x95
+        (the PDF-spec bullet • slot). Pre-WS-1A this rendered as the
+        ASCII '*' substitute."""
         doc = HtmlDocument(string="<ul><li>Item</li></ul>")
         data = doc.to_bytes()
         content = content_stream(data)
-        expect(content).to_contain(b"(*)")
+        expect(content).to_contain(b"<95>")
 
     @test
     def ul_multiple_items():
@@ -504,8 +531,9 @@ with describe("HtmlDocument - lists"):
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         content = content_stream(data)
-        # depth 0 = disc ('*'), depth 1 = circle ('o')
-        expect(content).to_contain(b"(*)")
+        # depth 0 = disc (WinAnsi byte 0x95 -> hex `<95>`),
+        # depth 1 = circle (ASCII 'o' -> literal `(o)`).
+        expect(content).to_contain(b"<95>")
         expect(content).to_contain(b"(o)")
 
     @test
@@ -557,6 +585,46 @@ with describe("HtmlDocument - lists"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Orphan")
+
+    # spec: CSS 2.1 §14.2.1 + §8.4; behaviors: box-padding, color-rgba, html-ul
+    @test
+    def ul_translucent_background_paints_behind_items():
+        """A translucent `background-color` set directly on a `<ul>`
+        should render — `<ul>` itself doesn't emit a generic block
+        container box, but the per-item paint path now carries the
+        list's fill so the panel still appears. The rgba alpha 0.85
+        produces an `/Gs1 gs` external-graphics-state ref plus an
+        opaque `1 1 1 rg` fill (alpha lives on the gs, not the rg).
+        """
+        html = (
+            '<ul style="background-color: rgba(255,255,255,.85)">'
+            "<li>one</li><li>two</li></ul>"
+        )
+        doc = HtmlDocument(string=html)
+        content = content_stream(doc.to_bytes())
+        expect(content).to_contain(b"1 1 1 rg")
+        # `0.85` shows up as the `/CA`+`/ca` alpha entry on the
+        # ExtGState referenced by the `/Gs1 gs` op.
+        expect(doc.to_bytes()).to_contain(b"0.85")
+
+    # spec: CSS 2.1 §10.5.1; behaviors: box-padding, html-ul
+    @test
+    def ul_padding_left_shifts_bullet_rightward():
+        """`padding-left` on a `<ul>` indents its bullets/text. Without
+        the cascade fix the value is dropped and the bullet sits at the
+        body left margin (depth-only `LIST_INDENT`). The `cm` repro
+        below pins both the parsing fix (cm → pt) and the
+        list-entry-carries-padding fix at once: 2cm ≈ 56.69 pt, so the
+        bullet must appear notably to the right of the no-padding
+        baseline."""
+        baseline = HtmlDocument(string="<ul><li>x</li></ul>")
+        padded = HtmlDocument(string='<ul style="padding-left: 2cm"><li>x</li></ul>')
+        baseline_x = _find_text_x(content_stream(baseline.to_bytes()), b"<95>")
+        padded_x = _find_text_x(content_stream(padded.to_bytes()), b"<95>")
+        assert baseline_x is not None
+        assert padded_x is not None
+        # 2cm = 56.69pt; allow generous tolerance for rendering jitter.
+        expect(padded_x - baseline_x).to_be_greater_than(50.0)
 
 
 with describe("HtmlDocument - malformed HTML"):
@@ -715,29 +783,52 @@ with describe("HtmlDocument - unicode"):
 
     @test
     def unicode_text():
-        """Unicode characters pass through without crashing."""
+        """Unicode characters land in the content stream as their
+        PDF-WinAnsi bytes (post WS-1A), not the original UTF-8.
+        `Héllo wörld` becomes `48 E9 6C 6C 6F 20 77 F6 72 6C 64`."""
         doc = HtmlDocument(string="<p>Héllo wörld</p>")
         data = doc.to_bytes()
+        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(data).to_contain("Héllo wörld".encode().hex().upper().encode())
+        # WinAnsi bytes (uppercase hex form chosen by pdf-writer when
+        # the literal contains non-ASCII): 0xE9 = é, 0xF6 = ö.
+        expect(content).to_contain(b"48E96C6C6F2077F6726C64")
 
     @test
     def numeric_entity():
-        """Numeric character reference &#169; is decoded."""
+        """Numeric character reference &#169; (©) is decoded and
+        emitted as the WinAnsi byte 0xA9 — pre WS-1A this test
+        asserted the UTF-8 hex `C2A9`, which was the latent encoding
+        bug we are fixing."""
         doc = HtmlDocument(string="<p>&#169; 2024</p>")
         data = doc.to_bytes()
         content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(content).to_contain(b"C2A9")
+        # © in WinAnsi is byte 0xA9, then space (0x20), then "2024" =
+        # 0x32 0x30 0x32 0x34 — assert the full WinAnsi hex sequence.
+        expect(content).to_contain(b"A92032303234")
 
     @test
     def hex_entity():
-        """Hex character reference &#x2603; is decoded."""
+        """Hex character reference &#x2603; (☃) is outside the WinAnsi
+        repertoire. WS-1A bounded the damage by emitting '?'; WS-1B
+        promotes the run onto the bundled `__pdfun_fallback`
+        Identity-H face so the snowman actually renders. We assert the
+        PDF round-trips through the text layer (pymupdf decodes the
+        ToUnicode CMap)."""
+        import fitz
+
         doc = HtmlDocument(string="<p>&#x2603;</p>")
         data = doc.to_bytes()
-        content = content_stream(data)
         expect(data[:5]).to_equal(b"%PDF-")
-        expect(content).to_contain(b"E29883")
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert "☃" in extracted, (
+            f"snowman did not round-trip via fallback: {extracted!r}"
+        )
 
     @test
     def multiple_named_entities():
@@ -746,6 +837,364 @@ with describe("HtmlDocument - unicode"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b'<tag> & "quotes"')
+
+
+with describe("HtmlDocument - WinAnsi text encoding (WS-1A)"):
+    # spec: ISO 32000-1 Annex D.2; behaviors: text-encoding-winansi
+    @test
+    def winansi_chars_in_text_op():
+        """Built-in PDF fonts speak WinAnsi: a string with a Latin-1
+        codepoint must land in the content stream as the WinAnsi byte
+        (`Caf\\xe9`), not the raw UTF-8 (`Caf\\xc3\\xa9`).
+
+        Note: `pdf-writer` switches Tj string literals to hex form
+        (`<436166E9>`) whenever the buffer contains a non-ASCII byte,
+        so we accept either the parenthesized literal (`(Caf\\xe9)`)
+        or its uppercase-hex equivalent."""
+        doc = HtmlDocument(string="<p>Café</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Either form is a correct PDF representation of the bytes
+        # 43 61 66 E9 ("Café" in WinAnsi):
+        assert b"(Caf\xe9)" in content or b"<436166E9>" in content, (
+            f"expected WinAnsi 'Café' (literal or <436166E9>), got: {content!r}"
+        )
+        # Negative: the UTF-8 byte sequence must NOT show up in the
+        # content stream — that's the defect we're fixing.
+        assert b"\xc3\xa9" not in content, (
+            "UTF-8 bytes leaked into content stream — WinAnsi transcode missing"
+        )
+        assert b"C3A9" not in content, (
+            "UTF-8 bytes (hex form) leaked into content stream — "
+            "WinAnsi transcode missing"
+        )
+
+    @test
+    def winansi_handles_em_dash_and_smart_quotes():
+        """Em-dash (U+2014) and smart quotes (U+2018/U+2019) live in
+        the 0x80-0x9F WinAnsi override window — not in Latin-1.
+        Verify they emit the PDF-spec bytes (em-dash 0x97,
+        left-quote 0x93, right-quote 0x94). pdf-writer hex-encodes
+        non-ASCII literals so we look for the uppercase hex digits."""
+        doc = HtmlDocument(string="<p>he said—“hi”</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # The hex string between < > carries every byte uppercase-hex:
+        # so 0x97 em-dash appears as "97", 0x93 as "93", 0x94 as "94".
+        assert b"<" in content
+        assert b">" in content
+        # Find the hex-string segment for our text and assert the
+        # expected bytes are present.
+        import re
+
+        found_run = False
+        for m in re.finditer(rb"<([0-9A-Fa-f]+)>", content):
+            hexbytes = bytes.fromhex(m.group(1).decode())
+            if b"he said" in hexbytes:
+                assert b"\x97" in hexbytes, "em-dash 0x97 missing"
+                assert b"\x93" in hexbytes, "left-quote 0x93 missing"
+                assert b"\x94" in hexbytes, "right-quote 0x94 missing"
+                found_run = True
+                break
+        assert found_run, "text run with 'he said' not found"
+
+    @test
+    def disc_marker_is_bullet():
+        """The list `Disc` marker emits the WinAnsi bullet byte (0x95),
+        not an ASCII asterisk substitute. pdf-writer hex-encodes
+        non-ASCII Tj literals — so we look for `<95>` (the marker
+        emitted by itself) or `95` inside a hex run."""
+        doc = HtmlDocument(string="<ul><li>x</li></ul>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Negative: the asterisk substitute is gone.
+        assert b"(*)" not in content, (
+            "list disc marker still emits ASCII '*' instead of WinAnsi bullet 0x95"
+        )
+        # Positive: a Tj of just byte 0x95 — pdf-writer renders
+        # non-ASCII byte strings as `<95>`.
+        assert b"<95>" in content, f"expected `<95> Tj` for bullet, got: {content!r}"
+
+    @test
+    def spanish_text_extracts_via_text_layer():
+        """A built-in font emitting WinAnsi bytes must declare
+        `/Encoding /WinAnsiEncoding` on the font dict so PDF readers
+        (and `pymupdf.Page.get_text`) can map bytes back to Unicode.
+        Without this, byte 0xE9 is interpreted via StandardEncoding
+        and the extracted text mangles to `Caf\\xd8`."""
+        import fitz
+
+        spanish = "¿Hablas español? Última página."
+        doc = HtmlDocument(string=f"<p>{spanish}</p>")
+        data = doc.to_bytes()
+        # The font dict must carry /Encoding /WinAnsiEncoding so that
+        # readers know how to decode the WinAnsi bytes we emit.
+        assert b"/Encoding /WinAnsiEncoding" in data, (
+            "Type1 font dict missing /Encoding /WinAnsiEncoding — "
+            "viewers will mis-decode WinAnsi bytes via StandardEncoding"
+        )
+        # Confirm the PDF text layer round-trips back to the original
+        # string. (PyMuPDF honors WinAnsiEncoding when present.)
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert spanish in extracted, (
+            f"text layer extraction expected to contain {spanish!r}, got {extracted!r}"
+        )
+
+    @test
+    def spanish_text_round_trip():
+        """Integration: render Spanish text with Latin-1 codepoints
+        plus the inverted question/exclamation marks, then byte-compare
+        the extracted text against the original input. Rung 8 of the
+        WS-1A acceptance gate — this is the "Café español" defect
+        the workstream exists to fix."""
+        import fitz
+
+        original = "¿Hablas español? Instrucciones en la última página."
+        doc = HtmlDocument(string=f"<p>{original}</p>")
+        data = doc.to_bytes()
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf).strip()
+        finally:
+            pdf.close()
+        assert extracted == original, (
+            f"round-trip mismatch:\n  expected: {original!r}\n  got: {extracted!r}"
+        )
+
+    @test
+    def winansi_non_mappable_promotes_to_fallback():
+        """A codepoint outside WinAnsi (e.g. U+2611 ballot box) used to
+        fall back to '?' (WS-1A bound). WS-1B promotes such runs onto
+        the bundled `__pdfun_fallback` Identity-H face — so the WinAnsi
+        prefix and suffix still show as Tj literals on F1, but the
+        ballot box no longer mangles to '?'.
+
+        We assert (a) the prefix/suffix WinAnsi bytes still appear on
+        F1, (b) at least one Tf switch to F2 (the fallback face) is
+        emitted between them, and (c) no '?' substitute leaks in."""
+        doc = HtmlDocument(string="<p>ok ☑ done</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Prefix on F1 should still appear (either as a literal or as
+        # uppercase hex). "ok " contains only ASCII so the literal form
+        # is reliable.
+        assert b"(ok ) Tj" in content, (
+            f"expected `(ok ) Tj` on built-in font, got: {content!r}"
+        )
+        # Fallback face was activated at least once.
+        assert b"/F2" in content, (
+            f"expected fallback font /F2 in content stream, got: {content!r}"
+        )
+        # The non-WinAnsi run is no longer substituted with '?'.
+        assert b"ok ? done" not in content, (
+            "non-WinAnsi run still falls back to '?' instead of promoting"
+        )
+
+
+with describe("HtmlDocument - WS-1B fallback font"):
+    # spec: ISO 32000-1 Annex D.2 + bundled DejaVu Sans;
+    # behaviors: text-encoding-fallback-font
+
+    @test
+    def unicode_text_emits_two_fonts():
+        """Mixed run `Café ☑ done` must produce a content stream that
+        switches F1 → F2 → F1 inside the same `BT…ET` block. The
+        WinAnsi prefix/suffix go on F1 (Helvetica + WinAnsiEncoding),
+        the ballot box goes on F2 (the bundled fallback as Identity-H
+        Type0)."""
+        doc = HtmlDocument(string="<p>Café ☑ done</p>")
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # F1 (Helvetica) is set first, then F2 (fallback), then F1
+        # again. We assert by ordered substring match.
+        idx_f1 = content.find(b"/F1 12 Tf")
+        idx_f2 = content.find(b"/F2 12 Tf")
+        idx_f1_after = content.find(b"/F1 12 Tf", idx_f1 + 1)
+        assert idx_f1 != -1, f"F1 (Helvetica) not set, got: {content!r}"
+        assert idx_f2 != -1, f"F2 (fallback) not set, got: {content!r}"
+        assert idx_f1_after != -1, "fallback run did not switch back to F1"
+        assert idx_f1 < idx_f2 < idx_f1_after, (
+            f"font switches not ordered F1→F2→F1, got indices "
+            f"F1={idx_f1} F2={idx_f2} F1'={idx_f1_after}"
+        )
+        # The fallback content is a ShowGlyphs op — pdf-writer renders
+        # a Type0/Identity-H Tj as a (\xHH\xLL) literal pair.
+        # The "Café " prefix (with WinAnsi 0xE9) appears either as a
+        # parenthesised literal containing 0xE9 or as <Caf…> hex.
+        assert b"(Caf\xe9 ) Tj" in content or b"<436166E920>" in content, (
+            f"WinAnsi prefix `Café ` missing, got: {content!r}"
+        )
+
+    @test
+    def fallback_face_carries_identity_h_encoding():
+        """The bundled fallback face is embedded as Type0/Identity-H
+        with a CIDFontType2 descendant — same plumbing as
+        user-supplied `@font-face`. The font dict in the PDF body must
+        carry `/Encoding /Identity-H` so viewers know how to decode the
+        glyph IDs."""
+        doc = HtmlDocument(string="<p>Café ☑ done</p>")
+        data = doc.to_bytes()
+        # Identity-H is what we declare on the Type0 wrapper; the
+        # presence of *any* Identity-H font dict tells us the fallback
+        # was registered at PDF write time.
+        assert b"/Encoding /Identity-H" in data, (
+            "fallback face missing /Encoding /Identity-H — "
+            "subsetting/embedding pipeline not engaged"
+        )
+        assert b"/Subtype /CIDFontType2" in data, (
+            "fallback face missing CIDFontType2 descendant — "
+            "Type0 embed pipeline not engaged"
+        )
+
+    @test
+    def unknown_family_falls_back_to_pdfun_fallback():
+        """`font-family: Roboto` with no `@font-face` for Roboto and no
+        generic fallback in the family chain must use the bundled
+        `__pdfun_fallback` face — *not* silently swap to Helvetica.
+        Pre-WS-1B that swap caused unknown-family runs to lose
+        Unicode coverage; the fallback restores it."""
+        doc = HtmlDocument(string='<p style="font-family: Roboto">Café ☑</p>')
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # The whole run renders on the fallback face — no Helvetica
+        # WinAnsi prefix is emitted because Roboto resolves directly to
+        # __pdfun_fallback.
+        assert b"/F1 12 Tf" in content, (
+            f"expected an F1 Tf op for the fallback, got: {content!r}"
+        )
+        # Fallback is Identity-H Type0 — verify the descendant font
+        # entry is present in the PDF body.
+        assert b"/Subtype /CIDFontType2" in data, (
+            "fallback face missing CIDFontType2 descendant — "
+            "Roboto did not resolve to __pdfun_fallback"
+        )
+        # Both characters must round-trip through the text layer.
+        import fitz
+
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert "Café" in extracted, (
+            f"WinAnsi chars lost on fallback face: {extracted!r}"
+        )
+        assert "☑" in extracted, f"ballot box lost on fallback face: {extracted!r}"
+
+    @test
+    def known_generic_family_still_wins_over_fallback():
+        """If the CSS family list ends in a known generic
+        (`sans-serif`, `serif`, `monospace`), the generic still wins —
+        WS-1B only promotes when nothing in the list is recognised."""
+        html = '<p style="font-family: Roboto, sans-serif">hello</p>'
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        # F1 here should be Helvetica (the generic match), not the
+        # fallback. We can't trivially distinguish F1 across documents,
+        # but we can assert the Type0/CIDFontType2 (fallback) embed is
+        # *not* present — proving the fallback wasn't promoted.
+        assert b"/Subtype /CIDFontType2" not in data, (
+            "known-generic family should not engage the fallback face"
+        )
+
+    @test
+    def ballot_box_round_trips_through_text_layer():
+        """Acceptance gate: a U+2611 ballot box rendered with no
+        `@font-face` declared must round-trip through the PDF text
+        layer. WS-1A made this read as '?'; WS-1B promotes it onto the
+        bundled fallback so `pymupdf.Page.get_text` recovers the
+        original codepoint."""
+        import fitz
+
+        doc = HtmlDocument(string="<p>ok ☑ done</p>")
+        data = doc.to_bytes()
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        assert "☑" in extracted, (
+            f"ballot box did not round-trip through text layer: {extracted!r}"
+        )
+        assert "?" not in extracted, (
+            f"text layer still shows '?' substitute: {extracted!r}"
+        )
+
+    @test
+    def bundled_fallback_license_present():
+        """WS-1B Rung 6 (CI sanity): every TTF / OTF committed under
+        `assets/fonts/` must ship a sibling `<stem>-LICENSE` file. The
+        DejaVu / Bitstream Vera license is permissive but redistribution
+        still requires the copyright text. `tools/check_fallback_font_license.py`
+        runs the same check; we wrap it as a unit test so the harness
+        catches a missing license at PR time, not release time."""
+        import subprocess
+        import sys
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "tools" / "check_fallback_font_license.py"
+        assert script.exists(), f"missing {script}"
+        result = subprocess.run(  # noqa: S603 -- internal repo script, no untrusted input
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"license check failed (exit {result.returncode}):\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    @test
+    def cobra_check_marks_render():
+        """Integration: the COBRA-notice fixture relies on `&#9745;`
+        (ballot box ☑) rendering inline with surrounding Latin text.
+        This is the canonical WS-1B acceptance scenario — Rung 5 of
+        the workstream's bottom-up TDD ladder. The PDF must
+        (a) declare both Helvetica AND `__pdfun_fallback` in its font
+        resource dictionary, and (b) round-trip the ballot box and
+        Spanish text together via the PDF text layer."""
+        import fitz
+
+        # Mirrors the COBRA fixture pattern: bullet list with a checked
+        # ballot box, plus Latin-1 chars that exercise the WinAnsi
+        # path on Helvetica.
+        html = (
+            "<ul>"
+            "<li>&#9745; Inscripci&oacute;n confirmada</li>"
+            "<li>&#9745; Caf&eacute; incluido</li>"
+            "<li>&#9745; &Uacute;ltima p&aacute;gina</li>"
+            "</ul>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+
+        # Both faces must appear in the resource dict — Helvetica for
+        # the Latin runs and __pdfun_fallback for the ballot boxes.
+        assert b"/Helvetica" in data, "Helvetica missing from font resource dict"
+        assert b"/__pdfun_fallback" in data, (
+            "__pdfun_fallback missing from font resource dict"
+        )
+
+        # Text-layer round-trip: every line must extract intact.
+        pdf = fitz.open(stream=data, filetype="pdf")
+        try:
+            extracted = "".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+        for needle in (
+            "☑",
+            "Inscripción confirmada",
+            "Café incluido",
+            "Última página",
+        ):
+            assert needle in extracted, (
+                f"COBRA round-trip lost {needle!r}; got: {extracted!r}"
+            )
 
 
 with describe("HtmlDocument - nesting"):
@@ -1002,6 +1451,39 @@ with describe("HtmlDocument - inline styles"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Bordered")
+
+    # spec: CSS Backgrounds & Borders 3 §5.3; behaviors: box-border-shorthand
+    @test
+    def inline_border_double_paints_two_lines():
+        """`border-style: double` paints two parallel stroked rectangles.
+
+        CSS Backgrounds & Borders 3 §5.3 specifies that `double` draws two
+        parallel lines whose total width (plus the gap between them) equals
+        `border-width`. The renderer realises this as two stroked rectangle
+        subpaths — one for the outer line, one for the inner line — sharing
+        a common stroke colour. A `solid` control with an identical
+        `border-width` emits exactly one stroked rectangle, so counting `S`
+        operator occurrences in the content stream cleanly distinguishes
+        the two styles.
+        """
+        double_doc = HtmlDocument(
+            string='<div style="border: 8px double black; padding: 12pt">x</div>'
+        )
+        solid_doc = HtmlDocument(
+            string='<div style="border: 8px solid black; padding: 12pt">x</div>'
+        )
+        double_content = content_stream(double_doc.to_bytes())
+        solid_content = content_stream(solid_doc.to_bytes())
+        # Each border line is a `re` (rect path) followed by `S` (stroke).
+        # `double` -> 2 strokes, `solid` -> 1 stroke. We assert the delta
+        # so the test is stable against unrelated stroke ops elsewhere on
+        # the page (none expected today, but defensive).
+        double_strokes = double_content.count(b"\nS\n")
+        solid_strokes = solid_content.count(b"\nS\n")
+        expect(double_strokes - solid_strokes).to_equal(1)
+        expect(double_strokes).to_be_greater_than(1)
+        # Sanity: both content streams contain rectangle paths for the box.
+        expect(double_content).to_contain(b" re\n")
 
     @test
     def inline_margin_bottom():
@@ -1786,13 +2268,16 @@ with describe("body CSS inheritance"):
         expect(data).to_contain(b"/Times-Roman")
 
     @test
-    def font_family_all_unknown_falls_back_to_ua_default():
-        """If no family in the chain is available, the user-agent default
-        font is used. For <p>, that's the body default (Helvetica).
+    def font_family_all_unknown_falls_back_to_pdfun_fallback():
+        """If no family in the chain matches a known generic / built-in
+        and no `@font-face` rule catches them either, WS-1B promotes
+        the run onto the bundled `__pdfun_fallback` Identity-H face so
+        the document renders with full Unicode coverage. Pre-WS-1B this
+        silently swapped to Helvetica, which loses non-WinAnsi glyphs.
         spec:fonts3-fallback"""
         html = "<style>p { font-family: 'FakeA', 'FakeB', 'FakeC' }</style><p>Text</p>"
         data = HtmlDocument(string=html).to_bytes()
-        expect(data).to_contain(b"/Helvetica")
+        expect(data).to_contain(b"/__pdfun_fallback")
 
     @test
     def font_family_fallback_honors_bold_weight():
@@ -2158,6 +2643,161 @@ with describe("@page margin boxes"):
         expect(content).to_contain(b"(Header)")
 
 
+# ── @page pseudo-class selectors (WS-4) ──────────────────────────────
+# spec: CSS Paged Media L3 §4.4
+with describe("@page pseudo-classes"):
+
+    @test
+    def page_layout_uses_first_margin():
+        """`@page :first { margin: 0.25in }` shrinks page 1's margins.
+
+        Page 1 should use 18pt margins; page 2 should fall back to the
+        base `@page` declaration's 1in (72pt). The first text run on
+        each page lives at `(margin_left, page_height - margin_top - …)`,
+        so the per-page Td coordinate distinguishes them.
+        """
+        import fitz
+
+        html = """<style>
+            @page { size: letter; margin: 1in; }
+            @page :first { margin: 0.25in; }
+            .pb { page-break-after: always; }
+        </style>
+        <p class="pb">Page one body</p>
+        <p>Page two body</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            # First text on page 1: bbox.x0 should be ~18pt (0.25in).
+            # First text on page 2: bbox.x0 should be ~72pt (1in).
+            blocks_1 = pdf[0].get_text("blocks")
+            blocks_2 = pdf[1].get_text("blocks")
+            x0_p1 = blocks_1[0][0]
+            x0_p2 = blocks_2[0][0]
+        # Tight tolerance: 0.25in = 18pt, 1in = 72pt.
+        expect(abs(x0_p1 - 18.0) < 2.0).to_equal(True)
+        expect(abs(x0_p2 - 72.0) < 2.0).to_equal(True)
+
+    @test
+    def at_bottom_right_paints_on_first_page():
+        """`@bottom-right` content renders on page 1 even when `:first`
+        narrows the margins.
+
+        Reproduces the COBRA defect: with `@page :first { margin: 0.25in }`
+        and `@page { @bottom-right { content: "Page " counter(page) } }`,
+        the footer was previously clipped because the first page used
+        the wrong margin. Now both pages should carry "Page 1" and
+        "Page 2" respectively.
+        """
+        import fitz
+
+        html = """<style>
+            @page { size: letter; margin: 1in;
+                @bottom-right { content: "Page " counter(page); }
+            }
+            @page :first { margin: 0.25in; }
+            .pb { page-break-after: always; }
+        </style>
+        <p class="pb">Body 1</p>
+        <p>Body 2</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            page1_text = pdf[0].get_text()
+            page2_text = pdf[1].get_text()
+        expect("Page 1" in page1_text).to_equal(True)
+        expect("Page 2" in page2_text).to_equal(True)
+
+    @test
+    def first_right_beats_first_alone_on_page_one():
+        """When both `@page :first` and `@page :first:right` declare a
+        margin, the higher-specificity `:first:right` wins on page 1
+        (LTR — page 1 is right-hand)."""
+        import fitz
+
+        html = """<style>
+            @page { size: letter; margin: 1in; }
+            @page :first { margin-top: 0.5in; }
+            @page :first:right { margin-top: 0.25in; }
+        </style>
+        <p>Hello</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            blocks = pdf[0].get_text("blocks")
+            y0 = blocks[0][1]
+        # 0.25in = 18pt. fitz reports y0 from page top, so first text
+        # baseline should be just below 18pt.
+        expect(y0 < 30.0).to_equal(True)
+        expect(y0 > 10.0).to_equal(True)
+
+    @test
+    def universal_at_page_only_continues_to_apply():
+        """A bare `@page { margin: 1in }` (specificity 0,0,0) still
+        applies on every page when no pseudo rules are present."""
+        import fitz
+
+        html = """<style>
+            @page { size: letter; margin: 1in; }
+            .pb { page-break-after: always; }
+        </style>
+        <p class="pb">Body 1</p>
+        <p>Body 2</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            x0_p1 = pdf[0].get_text("blocks")[0][0]
+            x0_p2 = pdf[1].get_text("blocks")[0][0]
+        expect(abs(x0_p1 - 72.0) < 2.0).to_equal(True)
+        expect(abs(x0_p2 - 72.0) < 2.0).to_equal(True)
+
+    @test
+    def cobra_cover_page_margin_and_footer():
+        """Integration: simulate the COBRA cover-page scenario.
+
+        - `@page :first { margin: 0.25in }` shrinks page 1's margins so
+          the cover article (height: ~10.5in) fits without bleeding to
+          page 2.
+        - `@page { @bottom-right { content: "Page " counter(page)
+          " of " counter(pages) } }` paints a footer on every page.
+        - "IMPORTANT INFORMATION" lives in a body paragraph after a
+          forced page break, so it must begin on page 2.
+        - The footer should read "Page 1 of 2" on page 1 and
+          "Page 2 of 2" on page 2 — both within the resolved bottom
+          margin strip (so `:first`'s narrower margins didn't clip the
+          footer off page 1).
+        """
+        import fitz
+
+        html = """<style>
+            @page {
+                size: letter;
+                margin: 1in;
+                @bottom-right { content: "Page " counter(page) " of " counter(pages); }
+            }
+            @page :first { margin: 0.25in; }
+            .cover {
+                page-break-after: always;
+            }
+        </style>
+        <div class="cover">
+            <h1>COBRA Coverage Notice</h1>
+            <p>This is the cover page article that needs the
+               narrower margins to fit.</p>
+        </div>
+        <h2>IMPORTANT INFORMATION</h2>
+        <p>Body content begins on page 2.</p>"""
+        data = HtmlDocument(string=html).to_bytes()
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            page1 = pdf[0].get_text()
+            page2 = pdf[1].get_text()
+            # Page 1 starts within the narrow margin strip.
+            x0_p1 = pdf[0].get_text("blocks")[0][0]
+        expect(abs(x0_p1 - 18.0) < 2.0).to_equal(True)
+        # Footer present on each page, with correct counter values.
+        expect("Page 1 of 2" in page1).to_equal(True)
+        expect("Page 2 of 2" in page2).to_equal(True)
+        # Body article begins on page 2, not page 1.
+        expect("IMPORTANT INFORMATION" in page2).to_equal(True)
+        expect("IMPORTANT INFORMATION" in page1).to_equal(False)
+
+
 with describe("multi-column layout"):
 
     @test
@@ -2478,22 +3118,36 @@ with describe("hsl colors"):
     # spec: CSS Color 3 §4.2.4; behaviors: color-hsla
     @test
     def hsla_accepts_alpha_component():
-        """hsla() parses (alpha is currently ignored)."""
+        """hsla()'s 4th component flows through `WS-2`'s ExtGState gate:
+        a `/Gs<N> gs` op precedes the `rg` color op, and the document
+        carries an `/ExtGState` resource."""
         html = '<p style="color: hsla(240, 100%, 50%, 0.5)">blue</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         content = content_stream(data)
+        # Color is still emitted — RGB channels are unchanged.
         expect(content).to_contain(b"0 0 1 rg")
+        # And the alpha is now active: `gs` referenced before `rg`.
+        idx_gs = content.index(b"gs")
+        idx_rg = content.index(b"0 0 1 rg")
+        expect(idx_gs < idx_rg).to_equal(True)
+        expect(data).to_contain(b"/ExtGState")
 
     # spec: CSS Color 3 §4.2.1; behaviors: color-rgba
     @test
     def rgba_accepts_alpha_component():
-        """rgba() parses with an optional alpha (alpha is currently ignored)."""
+        """rgba()'s 4th component flows through `WS-2`'s ExtGState gate:
+        the `/Gs<N> gs` op precedes the foreground `rg` and the resource
+        dict references `/ExtGState`."""
         html = '<p style="color: rgba(255, 0, 0, 0.5)">red</p>'
         doc = HtmlDocument(string=html)
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"1 0 0 rg")
+        idx_gs = content.index(b"gs")
+        idx_rg = content.index(b"1 0 0 rg")
+        expect(idx_gs < idx_rg).to_equal(True)
+        expect(data).to_contain(b"/ExtGState")
 
 
 with describe("cmyk colors"):
@@ -2854,6 +3508,68 @@ with describe("clickable links"):
         expect(data).to_contain(b"/Link")
         expect(content).to_contain(b"styled link")
 
+    # Tier 1.3 — UA stylesheet supplies the unvisited-link defaults
+    # (color #0000ee, text-decoration: underline). These tests pin the
+    # cascade behavior end-to-end: the underline must appear under the
+    # link text only, the link text must be drawn in blue, and surrounding
+    # text must keep its inherited (default-black) color.
+    @test
+    def ua_default_paints_link_text_blue():
+        """`<a>` text gets the UA-default Mosaic blue (#0000ee)."""
+        doc = HtmlDocument(
+            string='<p>before <a href="https://example.com">link</a> after</p>'
+        )
+        content = content_stream(doc.to_bytes())
+        # 0xee / 255 ≈ 0.93333; pdfun emits PDF colors as rounded floats.
+        expect(content).to_contain(b"0 0 0.93333334 rg")
+        # The link's text must be present in the content stream.
+        expect(content).to_contain(b"link")
+
+    @test
+    def ua_default_underlines_link_text():
+        """`<a>` text gets a stroked underline directly under the link."""
+        doc = HtmlDocument(
+            string='<p>before <a href="https://example.com">link</a> after</p>'
+        )
+        content = content_stream(doc.to_bytes())
+        # Stroke color matches the fill (blue) and a stroke op `S` follows
+        # the move/line pair that draws the underline rule.
+        expect(content).to_contain(b"0 0 0.93333334 RG")
+        expect(content).to_contain(b" m\n")  # MoveTo for the underline
+        expect(content).to_contain(b" l\nS\n")  # LineTo + Stroke
+
+    @test
+    def ua_default_does_not_color_surrounding_text():
+        """Text adjacent to `<a>` keeps its default color (no leak)."""
+        doc = HtmlDocument(
+            string='<p>before <a href="https://example.com">link</a> after</p>'
+        )
+        content = content_stream(doc.to_bytes())
+        # The "before" run must NOT be preceded by a blue fill-color op:
+        # find the position of "(before)" and assert no `0 0 0.93333334 rg`
+        # appears between the start of the content stream and that text.
+        before_idx = content.index(b"(before)")
+        prefix = content[:before_idx]
+        assert b"0 0 0.93333334 rg" not in prefix, (
+            "UA <a> blue must not leak onto preceding text; "
+            f"found blue fill before 'before' at offset {before_idx}"
+        )
+
+    @test
+    def author_a_color_overrides_ua_default():
+        """An author `a { color: red }` rule beats the UA blue."""
+        html = (
+            "<html><head><style>a { color: red; }</style></head>"
+            '<body><p><a href="https://example.com">link</a></p></body></html>'
+        )
+        content = content_stream(HtmlDocument(string=html).to_bytes())
+        # Pure red (1.0, 0.0, 0.0) for the link text fill.
+        expect(content).to_contain(b"1 0 0 rg")
+        # And the UA blue should NOT appear as a fill color anywhere.
+        assert b"0 0 0.93333334 rg" not in content, (
+            "author `a { color: red }` must override the UA blue"
+        )
+
 
 with describe("list-style-type"):
 
@@ -2923,13 +3639,15 @@ with describe("list-style-type"):
 
     @test
     def disc_marker_explicit():
-        """list-style-type: disc produces '*' ASCII marker."""
+        """list-style-type: disc produces WinAnsi bullet byte 0x95
+        (rendered as `<95>` in the content stream by pdf-writer when
+        the literal contains non-ASCII)."""
         doc = HtmlDocument(
             string='<ul style="list-style-type: disc"><li>Item</li></ul>'
         )
         data = doc.to_bytes()
         content = content_stream(data)
-        expect(content).to_contain(b"(*)")
+        expect(content).to_contain(b"<95>")
 
     @test
     def square_marker():
@@ -2955,9 +3673,10 @@ with describe("list-style-type"):
         # Both contain "Item" but the "none" variant has no marker
         expect(data_with_content).to_contain(b"Item")
         expect(data_none_content).to_contain(b"Item")
-        # The marker ShowText call is absent in the "none" version
-        assert b"(*)" in data_with_content
-        assert b"(*)" not in data_none_content
+        # The marker ShowText call is absent in the "none" version.
+        # Disc renders as WinAnsi bullet byte 0x95 (`<95>` hex form).
+        assert b"<95>" in data_with_content
+        assert b"<95>" not in data_none_content
 
     @test
     def decimal_via_stylesheet():
@@ -2997,7 +3716,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
     @test
     def inside_renders_marker_and_text():
@@ -3008,7 +3728,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
     # spec: CSS Lists 3 §3; behaviors: lists-style-position
     @test
@@ -3036,7 +3757,8 @@ with describe("list-style-position"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"Item")
-        expect(content).to_contain(b"(*)")
+        # Disc marker -> WinAnsi byte 0x95.
+        expect(content).to_contain(b"<95>")
 
 
 with describe("definition lists and figures"):
@@ -3435,6 +4157,97 @@ with describe("tables"):
         expect(content).to_contain(b"Left")
         expect(content).to_contain(b"Right")
 
+    # spec: CSS 2.1 §17.5.2 (WS-5)
+    @test
+    def cobra_cost_table_columns():
+        """Mirror the COBRA cost table's 30%/10%/60% colgroup hints and
+        verify the cell-text x-coordinates land at approximately the
+        column boundaries.
+
+        Default page is 612pt wide with 1in (72pt) margins, so the
+        usable column area is 468pt. After the table's own margin (0pt
+        by default) the column boundaries fall at:
+
+            col 0:  72pt        (start)
+            col 1:  72 + 0.3*468 = 212.4pt
+            col 2:  72 + 0.4*468 = 259.2pt
+            (right edge: 540pt)
+
+        Cell text is offset by the cell's left padding (default 6pt).
+        The PDF `Td` operator `x y Td` gives the baseline position, so
+        we look for `Tm`/`Td` operands matching the expected x.
+        """
+        html = (
+            "<table>"
+            "<colgroup>"
+            '<col style="width: 30%">'
+            '<col style="width: 10%">'
+            '<col style="width: 60%">'
+            "</colgroup>"
+            "<tr><td>A</td><td>B</td><td>C</td></tr>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # All three cells render
+        expect(content).to_contain(b"(A) Tj")
+        expect(content).to_contain(b"(B) Tj")
+        expect(content).to_contain(b"(C) Tj")
+        # The text-position lines for A, B, C must be in increasing x.
+        # Each cell-text "<x> <y> Td" precedes its "(.) Tj" line.
+        ax = _find_text_x(content, b"(A) Tj")
+        bx = _find_text_x(content, b"(B) Tj")
+        cx = _find_text_x(content, b"(C) Tj")
+        assert ax is not None, f"expected Td/Tj for (A); got {ax}"
+        assert bx is not None, f"expected Td/Tj for (B); got {bx}"
+        assert cx is not None, f"expected Td/Tj for (C); got {cx}"
+        assert ax < bx, f"col 0→1 out of order: {ax} >= {bx}"
+        assert bx < cx, f"col 1→2 out of order: {bx} >= {cx}"
+        # Approximate location asserts: col 1 starts ~140pt to the right
+        # of col 0; col 2 ~47pt to the right of col 1. Allow 1pt slop
+        # for padding rounding.
+        assert 130 < (bx - ax) < 150, (
+            f"expected col 0→1 gap ≈ 30% of 468 = 140pt; got {bx - ax}"
+        )
+        assert 35 < (cx - bx) < 60, (
+            f"expected col 1→2 gap ≈ 10% of 468 = 47pt; got {cx - bx}"
+        )
+
+    # spec: CSS 2.1 §17.5.1 painter's order, §17.3 col properties (WS-5)
+    @test
+    def col_background_paints_behind_cells():
+        """A `<col style="background-color: yellow">` paints a yellow
+        rectangle behind that column's cells. Per CSS 2.1 §17.5.1 the
+        column rectangle is drawn before the cell rectangles, so the
+        yellow `1 1 0 rg` fill must appear in the content stream before
+        the cell text fills.
+        """
+        html = (
+            "<table>"
+            "<colgroup>"
+            '<col style="background-color: yellow">'
+            "<col>"
+            "</colgroup>"
+            "<tr><td>L</td><td>R</td></tr>"
+            "</table>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        # Yellow column fill — `1 1 0 rg` is the f32-formatted RGB.
+        expect(content).to_contain(b"1 1 0 rg")
+        # Painter's order: column-background `1 1 0 rg` then `f` Fill
+        # before the per-cell text `(L) Tj`.
+        yellow_idx = content.find(b"1 1 0 rg")
+        l_idx = content.find(b"(L) Tj")
+        assert yellow_idx >= 0, "expected yellow rg in content stream"
+        assert l_idx >= 0, "expected (L) Tj in content stream"
+        assert yellow_idx < l_idx, (
+            f"col background (1 1 0 rg @ {yellow_idx}) must paint before cell text "
+            f"((L) Tj @ {l_idx}) per CSS 2.1 §17.5.1"
+        )
+
 
 with describe("images"):
     # spec: HTML; behaviors: html-img-png
@@ -3583,6 +4396,23 @@ with describe("images"):
             img_path.write_bytes(png)
             doc = HtmlDocument(
                 string='<img src="pixel.png">',
+                base_url=tmpdir,
+            )
+            data = doc.to_bytes()
+            expect(data).to_contain(b"/Subtype /Image")
+
+    @test
+    def img_absolute_from_root_resolves_against_base_url():
+        """T1.2: ``<img src="/assets/foo.png">`` with ``base_url=tmpdir``
+        resolves to ``tmpdir/assets/foo.png`` rather than the system
+        root, matching browser + WeasyPrint behavior."""
+        png = _make_png(1, 1, bytes([200, 100, 50]))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets = Path(tmpdir) / "assets"
+            assets.mkdir()
+            (assets / "foo.png").write_bytes(png)
+            doc = HtmlDocument(
+                string='<img src="/assets/foo.png">',
                 base_url=tmpdir,
             )
             data = doc.to_bytes()
@@ -4191,6 +5021,56 @@ with describe("min-height and max-height"):
         expect(content).to_contain(b"0 0 1 rg")
 
 
+with describe("explicit height triggers vertical fragmentation"):
+    # spec: CSS 2.1 §10.5; behaviors: vfmd-height, paged-page-break-inside
+    @test
+    def length_height_pushes_next_sibling_to_new_page():
+        """A block whose explicit `height` exceeds the remaining space on
+        the current page consumes that space and forces the next sibling
+        to start on a fresh page. Without this, an 11in cover div was
+        leaving the cursor at the natural text height and the body
+        rendered on the same page (the COBRA notice regression)."""
+        html = "<div style='height: 11in'>cover</div><div>body</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        pages = page_texts(data)
+        expect(len(pages)).to_be_greater_than_or_equal(2)
+        expect(pages[0]).to_contain("cover")
+        expect(pages[1]).to_contain("body")
+
+    @test
+    def percent_height_against_page_consumes_full_content_area():
+        """`height: 100%` on a top-level block resolves against the
+        page's content area (the initial containing block). With nothing
+        left after the cover, the next sibling renders on page 2."""
+        html = "<div style='height: 100%'>cover</div><div>body</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        pages = page_texts(data)
+        expect(len(pages)).to_be_greater_than_or_equal(2)
+        expect(pages[0]).to_contain("cover")
+        expect(pages[1]).to_contain("body")
+
+    @test
+    def page_break_inside_avoid_still_pushes_whole_block():
+        """The default `page-break-inside: avoid` should send the cover
+        whole — not split it — when its explicit height won't fit in the
+        remaining space. The cover lands on page 1 in one piece, and any
+        siblings move to page 2."""
+        html = (
+            "<div>preamble</div>"
+            "<div style='height: 10in; page-break-inside: avoid'>cover</div>"
+            "<div>body</div>"
+        )
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        pages = page_texts(data)
+        expect(len(pages)).to_be_greater_than_or_equal(2)
+        # The cover is whole on a single page (not split across pages).
+        cover_pages = [i for i, p in enumerate(pages) if "cover" in p]
+        expect(len(cover_pages)).to_equal(1)
+
+
 with describe("per-corner border-radius"):
 
     @test
@@ -4262,6 +5142,121 @@ with describe("opacity"):
         data = doc.to_bytes()
         content = content_stream(data)
         expect(content).to_contain(b"/Gs1 gs")
+
+
+with describe("rgba/hsla alpha plumbing (WS-2)"):
+    """End-to-end coverage for `rgba()` / `hsla()` alpha < 1.0 flowing all
+    the way through to PDF's ExtGState `ca` / `CA` channels. ISO
+    32000-1 §11.3.7."""
+
+    @test
+    def translucent_fill_emits_extgstate():
+        """A `background-color: rgba(255, 0, 0, 0.5)` block emits a
+        `/Gs<N> gs` op immediately before the `1 0 0 rg` fill, and the
+        document's `/ExtGState` resource binds that key to `/ca 0.5
+        /CA 0.5` (non-stroking AND stroking — never stale)."""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " background-color: rgba(255, 0, 0, 0.5)'>x</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        # Background color is unchanged at the rg op.
+        expect(content).to_contain(b"1 0 0 rg")
+        # An ExtGState reference precedes it, gating the fill alpha.
+        idx_gs = content.index(b"gs")
+        idx_rg = content.index(b"1 0 0 rg")
+        expect(idx_gs < idx_rg).to_equal(True)
+        # The page resource dict + ExtGState entries land in the doc.
+        expect(data).to_contain(b"/ExtGState")
+        # ISO 32000-1 §11.3.7: both `ca` AND `CA` MUST be set together.
+        # A stale `CA` from a prior op carries through if not reset.
+        expect(data).to_contain(b"/ca 0.5")
+        expect(data).to_contain(b"/CA 0.5")
+
+    @test
+    def translucent_border_uses_ca_channel():
+        """A translucent border (`rgba(0,0,255,0.5)` on a stroked rect)
+        emits the `/Gs<N> gs` gate before the `0 0 1 RG` stroke color
+        — and the ExtGState entry sets `CA` (stroking alpha)."""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " border: 2pt solid rgba(0, 0, 255, 0.5)'>x</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        # Stroke color (uppercase RG) for the border.
+        expect(content).to_contain(b"0 0 1 RG")
+        idx_gs = content.index(b"gs")
+        idx_rg = content.index(b"0 0 1 RG")
+        expect(idx_gs < idx_rg).to_equal(True)
+        expect(data).to_contain(b"/CA 0.5")
+        # Both channels are still set together — `ca` must be present too.
+        expect(data).to_contain(b"/ca 0.5")
+
+    @test
+    def opaque_color_emits_no_extgstate():
+        """`rgba(...)` with alpha = 1.0 (or plain `rgb()`) does NOT emit a
+        `/Gs<N> gs` gate — only the opaque rg/RG ops. Cheap path."""
+        html = '<p style="color: rgba(255, 0, 0, 1.0)">opaque</p>'
+        data = HtmlDocument(string=html).to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 rg")
+        # No /Gs gate — full alpha needs no ExtGState reference.
+        expect(b"/Gs1 gs" not in content).to_equal(True)
+
+    @test
+    def page_group_entry_present_when_translucent():
+        """ISO 32000-1 §11.6.6 + WeasyPrint issue #2723: a page that
+        contains any `ca`/`CA != 1` gets a `/Group << /S /Transparency
+        /CS /DeviceRGB /I true >>` entry on the page object so the
+        viewer doesn't fall back to non-isolated-against-page-backdrop
+        and produce divergent renderings between Adobe / Foxit /
+        Preview."""
+        html = (
+            "<div style='width: 60pt; height: 40pt;"
+            " background-color: rgba(255, 0, 0, 0.5)'>x</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # The page dict must carry the Transparency Group entry.
+        expect(data).to_contain(b"/Group")
+        expect(data).to_contain(b"/S /Transparency")
+        expect(data).to_contain(b"/CS /DeviceRGB")
+        expect(data).to_contain(b"/I true")
+
+    @test
+    def page_group_absent_when_fully_opaque():
+        """Pages that paint only opaque colors do NOT emit the page
+        Group entry — no extra dict cost on opaque pages."""
+        html = "<div style='background: rgb(255, 0, 0)'>x</div>"
+        data = HtmlDocument(string=html).to_bytes()
+        # No translucent paint anywhere → no page Group entry.
+        expect(b"/S /Transparency" not in data).to_equal(True)
+
+    @test
+    def opacity_with_children_uses_form_xobject():
+        """`opacity: 0.5` on a parent that paints child boxes must NOT
+        be implemented by multiplying alpha through to each leaf — that
+        would double-attenuate where children overlap. Per CSS
+        Compositing & Blending L1 §4 + ISO 32000-1 §11.6.5, the subtree
+        renders into a Form XObject with `/Group << /S /Transparency
+        /I true /K false /CS /DeviceRGB >>`, and the parent's `gs`
+        applies on the surrounding stream. Verify the Form XObject's
+        `/Group` dict is emitted in the document and that the page
+        references it via `/Fm<idx>`."""
+        html = (
+            "<div style='opacity: 0.5'>"
+            "<p style='background: rgb(255, 0, 0)'>red</p>"
+            "<p style='background: rgb(0, 0, 255)'>blue</p>"
+            "</div>"
+        )
+        data = HtmlDocument(string=html).to_bytes()
+        # Form XObject's /Group dict must be in the document.
+        expect(data).to_contain(b"/Subtype /Form")
+        expect(data).to_contain(b"/Group")
+        expect(data).to_contain(b"/S /Transparency")
+        # Page resource dict references the captured XObject.
+        expect(data).to_contain(b"/Fm0")
 
 
 with describe("box-shadow"):
@@ -4697,6 +5692,41 @@ with describe("position: relative"):
         content = content_stream(data)
         expect(b"1 0 0 1 0 0 cm" in content).to_equal(False)
 
+    # spec: CSS 2.1 §9.4.3; behaviors: vfm-position-relative, vfm-offsets
+    @test
+    def relative_left_pt_offsets_against_resolved_value():
+        """`position: relative; left: 50pt` translates the painted box
+        right by exactly 50pt — the offset is resolved literally and the
+        in-flow position is unchanged."""
+        html = "<div style='position: relative; left: 50pt;'>X</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 50 0 cm")
+
+    # spec: CSS 2.1 §9.4.3; behaviors: vfm-position-relative, vfm-offsets
+    @test
+    def relative_left_percent_resolves_against_container_width():
+        """`position: relative; left: 10%` resolves the percentage against
+        the page's content width. Letter (612pt) with default 72pt margins
+        gives a 468pt content width → 46.8pt translate."""
+        html = "<div style='position: relative; left: 10%;'>X</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 46.8 0 cm")
+
+    # spec: CSS 2.1 §9.4.3; behaviors: vfm-position-relative, vfm-offsets
+    @test
+    def relative_right_falls_back_when_left_absent():
+        """`position: relative; right: 12pt` shifts the painted box left by
+        12pt when no `left` is set (CSS 2.1 §9.4.3)."""
+        html = "<div style='position: relative; right: 12pt;'>X</div>"
+        doc = HtmlDocument(string=html)
+        data = doc.to_bytes()
+        content = content_stream(data)
+        expect(content).to_contain(b"1 0 0 1 -12 0 cm")
+
 
 with describe("position: absolute"):
     # spec: CSS 2.1 §9.6; behaviors: vfm-position-absolute, vfm-offsets
@@ -4763,6 +5793,93 @@ with describe("position: absolute"):
         # Default page width is 612pt. Box's left edge = 612 - 20 - 50 = 542.
         # We don't assert the exact translate delta (depends on natural
         # flow origin) but the PDF should still render without error.
+
+    # spec: CSS 2.1 §9.6; behaviors: vfm-position-absolute, vfm-offsets
+    @test
+    def absolute_img_with_right_lands_at_page_edge():
+        """`<img position: absolute; right: 0pt>` paints flush against the
+        page's right edge: image x = page_width - right - img_width."""
+        png = _make_png(2, 2, bytes([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = Path(f.name).as_posix()
+        try:
+            html = (
+                f'<img src="{path}" width="50" height="50" '
+                "style='position: absolute; top: 0pt; right: 0pt;'>"
+            )
+            data = HtmlDocument(string=html).to_bytes()
+            content = content_stream(data)
+            # Default page width is 612pt; img width = 50pt -> x = 562.
+            # Image CTM is "<w> 0 0 <h> <x> <y> cm".
+            expect(content).to_contain(b"50 0 0 50 562 ")
+            expect(content).to_contain(b"/Im0 Do")
+        finally:
+            Path(path).unlink()
+
+    # spec: CSS 2.1 §9.6; behaviors: vfm-position-absolute, vfm-offsets
+    @test
+    def absolute_img_is_removed_from_normal_flow():
+        """A `<img position: absolute>` does not advance the in-flow cursor
+        — a sibling paragraph following it renders at the same baseline as
+        if the image were not there."""
+        png = _make_png(1, 1, bytes([128, 128, 128]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = Path(f.name).as_posix()
+        try:
+            with_abs = HtmlDocument(
+                string=(
+                    "<p>BEFORE</p>"
+                    f'<img src="{path}" width="50" height="50" '
+                    "style='position: absolute; top: 100pt; left: 200pt;'>"
+                    "<p>AFTER</p>"
+                )
+            ).to_bytes()
+            without_abs = HtmlDocument(string="<p>BEFORE</p><p>AFTER</p>").to_bytes()
+            cs_with = content_stream(with_abs)
+            cs_without = content_stream(without_abs)
+            import re as _re
+
+            def baseline_of(content: bytes, text: bytes) -> bytes | None:
+                idx = content.find(text)
+                if idx == -1:
+                    return None
+                prefix = content[:idx]
+                matches = _re.findall(rb"([\-\d\.]+ [\-\d\.]+) Td", prefix)
+                return matches[-1] if matches else None
+
+            expect(baseline_of(cs_with, b"(AFTER)")).to_equal(
+                baseline_of(cs_without, b"(AFTER)")
+            )
+        finally:
+            Path(path).unlink()
+
+    # spec: HTML; CSS 2.1 §9.6; behaviors: vfm-position-absolute, html-img-png
+    @test
+    def inline_block_img_still_paints_when_absolutely_positioned():
+        """An `<img>` carrying both `display: inline-block` and
+        `position: absolute` (the COBRA cover pattern) routes to the image
+        emitter — the bitmap is painted, not silently swallowed by the
+        inline-block atom path."""
+        png = _make_png(1, 1, bytes([0, 64, 255]))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(png)
+            path = Path(f.name).as_posix()
+        try:
+            html = (
+                f'<img src="{path}" width="50" height="50" '
+                "style='display: inline-block; position: absolute; "
+                "top: 5pt; right: 5pt;'>"
+            )
+            data = HtmlDocument(string=html).to_bytes()
+            content = content_stream(data)
+            expect(data).to_contain(b"/Subtype /Image")
+            expect(content).to_contain(b"/Im0 Do")
+            # x = 612 - 5 - 50 = 557. The image CTM begins with "50 0 0 50 557".
+            expect(content).to_contain(b"50 0 0 50 557 ")
+        finally:
+            Path(path).unlink()
 
 
 with describe("position: fixed"):
@@ -5447,6 +6564,24 @@ with describe("@font-face"):
             font_path = Path(tmpdir) / "myfont.ttf"
             font_path.write_bytes(_FIXTURE_TTF_PATH.read_bytes())
             css = '@font-face { font-family: MyFont; src: url("myfont.ttf"); }'
+            html = f"<style>{css}</style><p style='font-family: MyFont'>x</p>"
+            doc = HtmlDocument(string=html, base_url=tmpdir)
+            data = doc.to_bytes()
+            expect(doc.warnings()).to_equal([])
+            assert b"/Subtype /Type0" in data
+
+    @test
+    def absolute_from_root_path_resolves_against_base_url():
+        """T1.2: ``url("/assets/font.ttf")`` is treated as
+        ``base_url``-relative — matching browser + WeasyPrint URL-join
+        semantics where ``base_url`` is the document root for
+        ``/``-rooted refs. Before T1.2 this failed with "no such file
+        or directory" against the system root."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets_dir = Path(tmpdir) / "assets"
+            assets_dir.mkdir()
+            (assets_dir / "myfont.ttf").write_bytes(_FIXTURE_TTF_PATH.read_bytes())
+            css = "@font-face { font-family: MyFont; src: url(/assets/myfont.ttf); }"
             html = f"<style>{css}</style><p style='font-family: MyFont'>x</p>"
             doc = HtmlDocument(string=html, base_url=tmpdir)
             data = doc.to_bytes()

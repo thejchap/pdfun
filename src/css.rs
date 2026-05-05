@@ -80,12 +80,19 @@ pub struct LengthContext {
     pub vw: f32,
     /// Viewport (page) height in points (for `vh`).
     pub vh: f32,
-    /// Containing-block reference value for percentages. Default is the
-    /// containing block's content width (the usual choice — margins,
-    /// paddings, and widths all resolve against width per CSS spec).
-    /// Callers resolving height-related percents should build a second
-    /// context with `container` set to the containing height.
+    /// Containing-block reference value for percentages on horizontal
+    /// properties (margins, paddings, widths). Per CSS 2.1 §10.3, all
+    /// of those resolve against the containing block's content width,
+    /// so this is the normal `container`.
     pub container: f32,
+    /// Containing-block content height for percentages on vertical
+    /// properties (`height`, `min-height`, `max-height`, vertical
+    /// margins/paddings when CSS would resolve them against height).
+    /// `None` means the containing block is `height: auto` — per CSS
+    /// 2.1 §10.5 a percent height in that situation computes to
+    /// `auto`, so callers should treat the property as unset rather
+    /// than resolve to a number.
+    pub container_height: Option<f32>,
 }
 
 impl LengthContext {
@@ -102,6 +109,7 @@ impl LengthContext {
             vw: Self::DEFAULT_VW,
             vh: Self::DEFAULT_VH,
             container: Self::DEFAULT_VW,
+            container_height: None,
         }
     }
 }
@@ -117,6 +125,7 @@ impl CssLength {
             vw: LengthContext::DEFAULT_VW,
             vh: LengthContext::DEFAULT_VH,
             container: LengthContext::DEFAULT_VW,
+            container_height: None,
         })
     }
 
@@ -138,6 +147,20 @@ impl CssLength {
                 CalcOp::Mul(a, n) => a.resolve_ctx(ctx) * n,
                 CalcOp::Div(a, n) => a.resolve_ctx(ctx) / n,
             },
+        }
+    }
+
+    /// Resolve a length used for a vertical sizing property (`height`,
+    /// `min-height`, `max-height`). Differs from [`resolve_ctx`] only
+    /// for `Pct`: percent heights resolve against
+    /// `LengthContext::container_height` rather than `container`
+    /// (which is a width-like value). Returns `None` when the value
+    /// is a percent and the containing block height is `auto`
+    /// (CSS 2.1 §10.5: percent of auto computes to auto).
+    pub fn resolve_height_ctx(self, ctx: &LengthContext) -> Option<f32> {
+        match self {
+            CssLength::Pct(v) => ctx.container_height.map(|h| v * h / 100.0),
+            other => Some(other.resolve_ctx(ctx)),
         }
     }
 }
@@ -268,6 +291,7 @@ pub enum BorderStyle {
     Solid,
     Dashed,
     Dotted,
+    Double,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -444,6 +468,71 @@ pub enum BorderCollapseValue {
     Collapse,
 }
 
+/// CSS `table-layout` (CSS 2.1 §17.5.2).
+///
+/// `Auto` (default) treats explicit column hints as *preferred* widths
+/// bounded below by the content's min-width. `Fixed` pins column widths
+/// to their hints — cells cannot widen the column (overflow or wrap).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TableLayoutValue {
+    /// Column widths are determined by content; explicit hints set
+    /// preferred widths but the content min-width still wins to prevent
+    /// long words from clipping. CSS 2.1 §17.5.2.2.
+    #[default]
+    Auto,
+    /// Column widths are fixed to their hints (or an even share when no
+    /// hint is given). Cell content does not widen columns. CSS 2.1
+    /// §17.5.2.1.
+    Fixed,
+}
+
+/// CSS `visibility` (CSS 2.1 §11.2). Stored on `<col>` so future passes
+/// can implement `collapse` without re-threading the table column type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)] // `Hidden` and `Collapse` are intentional v1 cuts.
+pub enum Visibility {
+    /// Element is rendered normally.
+    #[default]
+    Visible,
+    /// Element is invisible (still occupies space).
+    Hidden,
+    /// On `<col>` / `<colgroup>` only: column is removed from layout.
+    /// v1 cut: parsed and stored but not yet honored at layout time.
+    // TODO(WS-5 follow-up): apply `collapse` to column layout.
+    Collapse,
+}
+
+/// Per-column style record built from `<colgroup>` / `<col>` elements
+/// (CSS 2.1 §17.3). One entry per column in the table; `<col span="N">`
+/// replicates the same record N times. Carries every property a `<col>`
+/// is allowed to set so future passes (visibility-collapse, col borders
+/// in collapse mode) don't have to re-thread the layout pipeline.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColStyle {
+    /// Explicit width hint from `<col style="width: ...">` or the legacy
+    /// `width` attribute. `None` = no hint, fall through to content
+    /// intrinsic width.
+    pub width: Option<CssLength>,
+    /// `background-color` painted behind the column area, beneath the
+    /// row / cell backgrounds (CSS 2.1 §17.5.1 painter's order).
+    pub background_color: Option<(f32, f32, f32)>,
+    /// `visibility` per CSS 2.1 §11.2. `Collapse` is parsed but a v1 cut.
+    pub visibility: Visibility,
+    /// `border-*` shorthand resolved into a single record. Honored only
+    /// in `border-collapse: collapse` mode (CSS 2.1 §17.6.2 only allows
+    /// col borders in collapse mode); ignored in `separate`.
+    pub border: Option<ColBorder>,
+}
+
+/// Border declared on a `<col>` / `<colgroup>`. Width / color / style are
+/// resolved at parse time from the longhand cascade.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColBorder {
+    pub width: f32,
+    pub color: (f32, f32, f32),
+    pub style: BorderStyle,
+}
+
 // ── PageStyle (@page rule) ──────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -455,6 +544,170 @@ pub struct PageStyle {
     pub margin_bottom: Option<f32>,
     pub margin_left: Option<f32>,
     pub margin_boxes: MarginBoxes,
+}
+
+/// Which side of a page spread a `:left` / `:right` pseudo-class targets.
+/// Per CSS Paged Media L3 §4.4 the side is determined by the page parity
+/// in the writing direction. pdfun assumes LTR for now (page 1 = right);
+/// a follow-up workstream will plumb `direction: rtl` from `<html>`.
+// TODO(WS-4 follow-up): honor `direction: rtl` so RTL docs treat
+// page 1 as `:left`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageSide {
+    Left,
+    Right,
+}
+
+/// Parsed prelude of an `@page` rule. Each pseudo-class flag (or named
+/// page slot) contributes to the CSS Paged Media L3 §4.4 specificity
+/// tuple `(f, g, h)` where:
+///
+/// - `f` = page-name count + `:nth(N)` count
+/// - `g` = `:first` + `:blank` count
+/// - `h` = `:left` + `:right` count
+///
+/// A page can match multiple selectors at once (e.g. `:first:right` on
+/// page 1 of an LTR document beats both `:first` and `:right`
+/// individually). The cascade is therefore *not* first-match-wins —
+/// `resolve_page_style` walks every matching rule in ascending
+/// specificity order and merges per-property.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PageSelector {
+    /// Page name slot (e.g. `@page cover { … }`). Pages aren't bound to
+    /// names yet — when set, the selector is parsed but never matches.
+    /// TODO(WS-4 follow-up): plumb `page: <name>` element styles.
+    pub page_name: Option<String>,
+    /// `:first` — matches the first generated page.
+    pub first: bool,
+    /// `:blank` — matches a page forced empty by `break-before: page`.
+    /// pdfun's pagination doesn't yet expose forced-empty pages, so
+    /// `:blank` is parsed and stored but never matches in v1.
+    /// TODO(WS-4 follow-up): synthesize-empty-page detection.
+    pub blank: bool,
+    /// `:left` / `:right` — page parity in the writing direction.
+    pub side: Option<PageSide>,
+    /// `:nth(N)` — literal integer page index. `An+B` form is a v1 cut.
+    /// TODO(WS-4 follow-up): full `An+B` grammar.
+    pub nth: Option<u32>,
+}
+
+impl PageSelector {
+    /// CSS Paged Media L3 §4.4 specificity tuple. Larger tuples win in
+    /// the per-property cascade.
+    pub fn specificity(&self) -> (u16, u16, u16) {
+        let f = u16::from(self.page_name.is_some()) + u16::from(self.nth.is_some());
+        let g = u16::from(self.first) + u16::from(self.blank);
+        let h = u16::from(self.side.is_some());
+        (f, g, h)
+    }
+
+    /// Returns `true` if this selector matches the page at `page_num`
+    /// (1-indexed). LTR-only: page 1 is `:right`, page 2 is `:left`,
+    /// etc. `:blank` never matches in v1; named pages don't match
+    /// because the element-binding is not implemented yet.
+    pub fn matches(&self, page_num: usize, _total_pages: usize) -> bool {
+        if self.page_name.is_some() {
+            return false;
+        }
+        if self.blank {
+            return false;
+        }
+        if self.first && page_num != 1 {
+            return false;
+        }
+        if let Some(side) = self.side {
+            // LTR: odd 1-indexed pages are right-hand, even are left.
+            let actual = if page_num.is_multiple_of(2) {
+                PageSide::Left
+            } else {
+                PageSide::Right
+            };
+            if side != actual {
+                return false;
+            }
+        }
+        if let Some(n) = self.nth
+            && page_num as u32 != n
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Parse an `@page` prelude (the text between `@page` and the opening
+/// `{`) into a `PageSelector`. Recognized syntax:
+///
+/// ```text
+/// @page                  -> default selector, matches every page
+/// @page :first           -> matches page 1
+/// @page :left | :right   -> matches by parity (LTR)
+/// @page :blank           -> stored, never matches in v1
+/// @page :nth(N)          -> matches page N (literal integer)
+/// @page :first:right     -> combined; specificity sums per-component
+/// @page name             -> page-name slot (parsed, never matches in v1)
+/// @page name:first       -> page-name + first
+/// ```
+///
+/// Unknown pseudo-class tokens are silently dropped — matching browser
+/// behavior for paged-media at-rules with unknown flags. Whitespace
+/// around the prelude is trimmed.
+pub(crate) fn parse_page_selector(prelude: &str) -> PageSelector {
+    let prelude = prelude.trim();
+    let mut selector = PageSelector::default();
+    if prelude.is_empty() {
+        return selector;
+    }
+
+    // Split on `:` to separate the optional page-name from the
+    // pseudo-class chain. The first segment (before any `:`) is the page
+    // name; subsequent segments are pseudo-class names possibly carrying
+    // `(args)`.
+    let mut segments = prelude.split(':');
+    if let Some(name) = segments.next() {
+        let name = name.trim();
+        if !name.is_empty() {
+            selector.page_name = Some(name.to_string());
+        }
+    }
+
+    for seg in segments {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        // Detect `nth(...)` — strip arg list before matching.
+        let (token, arg) = if let Some(open) = seg.find('(') {
+            let close = seg.rfind(')').unwrap_or(seg.len());
+            let arg = if close > open + 1 {
+                Some(seg[open + 1..close].trim())
+            } else {
+                None
+            };
+            (&seg[..open], arg)
+        } else {
+            (seg, None)
+        };
+        match token.to_ascii_lowercase().as_str() {
+            "first" => selector.first = true,
+            "blank" => selector.blank = true,
+            "left" => selector.side = Some(PageSide::Left),
+            "right" => selector.side = Some(PageSide::Right),
+            "nth" => {
+                if let Some(a) = arg
+                    && let Ok(n) = a.parse::<u32>()
+                {
+                    selector.nth = Some(n);
+                }
+                // TODO(WS-4 follow-up): full `An+B` form.
+            }
+            _ => {
+                // Unknown pseudo-class — drop silently.
+            }
+        }
+    }
+
+    selector
 }
 
 /// A single `content:` value item inside a `@page` margin box.
@@ -627,6 +880,7 @@ macro_rules! with_style_fields {
             (clear,             copy,  no),
             (vertical_align,    copy,  no),
             (border_collapse,   copy,  no),
+            (table_layout,      copy,  no),
             (overflow,          copy,  no),
             (position,          copy,  no),
             (top,               copy,  no),
@@ -721,8 +975,14 @@ with_style_fields!(gen_merge);
 
 #[derive(Clone, Debug, Default)]
 pub struct ComputedStyle {
-    pub color: Option<(f32, f32, f32)>,
-    pub background_color: Option<(f32, f32, f32)>,
+    /// Foreground color (CSS Color 3 §3.1). Stored as RGBA — α < 1.0
+    /// flows through `WS-2`'s `ExtGState` `ca`/`CA` plumbing so translucent
+    /// `rgba()` text actually paints translucently.
+    pub color: Option<(f32, f32, f32, f32)>,
+    /// Background color (CSS Backgrounds & Borders 3 §3). RGBA so
+    /// translucent panels (e.g. `rgba(255, 255, 255, 0.85)` on top of
+    /// an image) render correctly.
+    pub background_color: Option<(f32, f32, f32, f32)>,
     pub font_size: Option<CssLength>,
     pub font_weight: Option<FontWeight>,
     pub font_style: Option<FontStyle>,
@@ -738,12 +998,12 @@ pub struct ComputedStyle {
     pub padding_bottom: Option<CssLength>,
     pub padding_left: Option<CssLength>,
     pub border_width: Option<CssLength>,
-    pub border_color: Option<(f32, f32, f32)>,
+    pub border_color: Option<(f32, f32, f32, f32)>,
     pub border_style: Option<BorderStyle>,
     pub column_count: Option<u32>,
     pub column_gap: Option<CssLength>,
     pub column_rule_width: Option<CssLength>,
-    pub column_rule_color: Option<(f32, f32, f32)>,
+    pub column_rule_color: Option<(f32, f32, f32, f32)>,
     pub display: Option<DisplayValue>,
     pub text_decoration: Option<TextDecoration>,
     pub list_style_type: Option<ListStyleType>,
@@ -771,6 +1031,7 @@ pub struct ComputedStyle {
     pub clear: Option<ClearValue>,
     pub vertical_align: Option<VerticalAlignValue>,
     pub border_collapse: Option<BorderCollapseValue>,
+    pub table_layout: Option<TableLayoutValue>,
     pub overflow: Option<Overflow>,
     pub position: Option<Position>,
     pub top: Option<CssLength>,
@@ -809,22 +1070,46 @@ pub struct ComputedStyle {
 
 // ── Color parsing ───────────────────────────────────────────
 
-fn u8_to_f32(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+fn u8_to_f32(r: u8, g: u8, b: u8) -> (f32, f32, f32, f32) {
     (
         f32::from(r) / 255.0,
         f32::from(g) / 255.0,
         f32::from(b) / 255.0,
+        1.0,
     )
 }
 
-fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), ParseError<'i, ()>> {
+/// Drop the alpha channel of a 4-tuple color. Used for sites that don't
+/// carry alpha through the rendering pipeline yet (e.g. `box-shadow`,
+/// `@page` margin-box `color`) — they take the opaque fallback.
+pub(crate) fn rgb_only(c: (f32, f32, f32, f32)) -> (f32, f32, f32) {
+    (c.0, c.1, c.2)
+}
+
+/// Parse a CSS `<color>` value, returning premultiplied RGBA in the
+/// (r, g, b, a) tuple where each channel is in `[0.0, 1.0]`. Named
+/// colors and `<rgb()>` / hex notation produce α = 1.0; `rgba()` and
+/// `hsla()` capture the explicit fourth component (CSS Color 3 §4.2.1
+/// / §4.2.4). `device-cmyk()` flattens to sRGB but still honors a
+/// trailing alpha (CSS Color 4 §5.1).
+fn parse_css_color<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<(f32, f32, f32, f32), ParseError<'i, ()>> {
     let location = input.current_source_location();
     let token = input.next()?.clone();
     match &token {
         Token::Hash(value) | Token::IDHash(value) => {
-            let (r, g, b, _a) =
+            // `cssparser::parse_hash_color` returns `(u8, u8, u8, f32)`
+            // — the alpha is already in `[0.0, 1.0]` and is `1.0` for the
+            // common 3- and 6-digit forms. Pass it through as-is.
+            let (r, g, b, a) =
                 parse_hash_color(value.as_bytes()).map_err(|()| location.new_custom_error(()))?;
-            Ok(u8_to_f32(r, g, b))
+            Ok((
+                f32::from(r) / 255.0,
+                f32::from(g) / 255.0,
+                f32::from(b) / 255.0,
+                a,
+            ))
         }
         Token::Ident(ident) => {
             let (r, g, b) = parse_named_color(ident).map_err(|()| location.new_custom_error(()))?;
@@ -839,13 +1124,15 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
                 let g = input.expect_number()?.clamp(0.0, 255.0);
                 input.expect_comma()?;
                 let b = input.expect_number()?.clamp(0.0, 255.0);
-                // Optional alpha: ", <number>" — parsed and ignored.
-                let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
-                    i.expect_comma()?;
-                    let _ = i.expect_number()?;
-                    Ok(())
-                });
-                Ok((r / 255.0, g / 255.0, b / 255.0))
+                // Optional alpha: ", <number>" — clamp to [0, 1] per
+                // CSS Color 3 §4.2.1.
+                let alpha = input
+                    .try_parse(|i| -> Result<f32, ParseError<'i, ()>> {
+                        i.expect_comma()?;
+                        Ok(i.expect_number()?.clamp(0.0, 1.0))
+                    })
+                    .unwrap_or(1.0);
+                Ok((r / 255.0, g / 255.0, b / 255.0, alpha))
             })
         }
         Token::Function(name)
@@ -857,14 +1144,16 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
                 let s = input.expect_percentage()?.clamp(0.0, 1.0);
                 input.expect_comma()?;
                 let l = input.expect_percentage()?.clamp(0.0, 1.0);
-                // Optional alpha: ", <number>" — parsed and ignored.
-                let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
-                    i.expect_comma()?;
-                    let _ = i.expect_number()?;
-                    Ok(())
-                });
+                // Optional alpha: ", <number>" — clamp to [0, 1] per
+                // CSS Color 3 §4.2.4.
+                let alpha = input
+                    .try_parse(|i| -> Result<f32, ParseError<'i, ()>> {
+                        i.expect_comma()?;
+                        Ok(i.expect_number()?.clamp(0.0, 1.0))
+                    })
+                    .unwrap_or(1.0);
                 let (r, g, b) = hsl_to_rgb(h, s, l);
-                Ok((r, g, b))
+                Ok((r, g, b, alpha))
             })
         }
         Token::Function(name)
@@ -886,7 +1175,7 @@ fn parse_css_color<'i>(input: &mut Parser<'i, '_>) -> Result<(f32, f32, f32), Pa
 /// trailing alpha (`/ <number>` or `, <number>`) is parsed and ignored.
 fn parse_cmyk_to_rgb<'i>(
     input: &mut Parser<'i, '_>,
-) -> Result<(f32, f32, f32), ParseError<'i, ()>> {
+) -> Result<(f32, f32, f32, f32), ParseError<'i, ()>> {
     let c = parse_cmyk_component(input)?;
     let _ = input.try_parse(cssparser::Parser::expect_comma);
     let m = parse_cmyk_component(input)?;
@@ -894,18 +1183,19 @@ fn parse_cmyk_to_rgb<'i>(
     let y = parse_cmyk_component(input)?;
     let _ = input.try_parse(cssparser::Parser::expect_comma);
     let k = parse_cmyk_component(input)?;
-    let _ = input.try_parse(|i| -> Result<(), ParseError<'i, ()>> {
-        let comma = i.try_parse(cssparser::Parser::expect_comma).is_ok();
-        if !comma {
-            i.expect_delim('/')?;
-        }
-        let _ = i.expect_number()?;
-        Ok(())
-    });
+    let alpha = input
+        .try_parse(|i| -> Result<f32, ParseError<'i, ()>> {
+            let comma = i.try_parse(cssparser::Parser::expect_comma).is_ok();
+            if !comma {
+                i.expect_delim('/')?;
+            }
+            Ok(i.expect_number()?.clamp(0.0, 1.0))
+        })
+        .unwrap_or(1.0);
     let r = (1.0 - c) * (1.0 - k);
     let g = (1.0 - m) * (1.0 - k);
     let b = (1.0 - y) * (1.0 - k);
-    Ok((r, g, b))
+    Ok((r, g, b, alpha))
 }
 
 fn parse_cmyk_component<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
@@ -976,6 +1266,14 @@ fn parse_css_length<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseEr
                 Ok(CssLength::Rem(*value))
             } else if unit.eq_ignore_ascii_case("in") {
                 Ok(CssLength::In(*value))
+            } else if unit.eq_ignore_ascii_case("cm") {
+                // 1in = 2.54cm, 1in = 72pt → 1cm = 72/2.54 ≈ 28.3464567pt.
+                // Stored as `Pt` since the conversion is unit-only and
+                // doesn't need the resolution context.
+                Ok(CssLength::Pt(*value * 72.0 / 2.54))
+            } else if unit.eq_ignore_ascii_case("mm") {
+                // 1mm = 72/25.4 ≈ 2.83464567pt.
+                Ok(CssLength::Pt(*value * 72.0 / 25.4))
             } else if unit.eq_ignore_ascii_case("vw") {
                 Ok(CssLength::Vw(*value))
             } else if unit.eq_ignore_ascii_case("vh") {
@@ -1438,7 +1736,9 @@ fn parse_box_shadow_one<'i>(input: &mut Parser<'i, '_>) -> Result<BoxShadow, Par
         if color.is_none()
             && let Ok(c) = input.try_parse(parse_css_color)
         {
-            color = Some(c);
+            // box-shadow alpha is a v1 cut: PDF has no native gaussian
+            // blur and shadow alpha was never plumbed; drop it now.
+            color = Some(rgb_only(c));
             continue;
         }
         break;
@@ -1644,6 +1944,7 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     "solid" => self.style.border_style = Some(BorderStyle::Solid),
                     "dashed" => self.style.border_style = Some(BorderStyle::Dashed),
                     "dotted" => self.style.border_style = Some(BorderStyle::Dotted),
+                    "double" => self.style.border_style = Some(BorderStyle::Double),
                     _ => return Err(location.new_custom_error(())),
                 }
             }
@@ -1663,6 +1964,7 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                             "solid" => Ok::<_, ParseError<'i, ()>>(BorderStyle::Solid),
                             "dashed" => Ok(BorderStyle::Dashed),
                             "dotted" => Ok(BorderStyle::Dotted),
+                            "double" => Ok(BorderStyle::Double),
                             "none" | "hidden" => Ok(BorderStyle::None),
                             _ => Err(i.new_custom_error(())),
                         }
@@ -2068,6 +2370,18 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                     _ => return Err(location.new_custom_error(())),
                 };
                 self.style.border_collapse = Some(bc);
+            }
+            "table-layout" => {
+                // CSS 2.1 §17.5.2 — `auto` (default) lets cell content
+                // widen the column; `fixed` pins column widths.
+                let location = input.current_source_location();
+                let ident = input.expect_ident()?.clone();
+                let tl = match ident.to_ascii_lowercase().as_str() {
+                    "auto" => TableLayoutValue::Auto,
+                    "fixed" => TableLayoutValue::Fixed,
+                    _ => return Err(location.new_custom_error(())),
+                };
+                self.style.table_layout = Some(tl);
             }
             "content" => {
                 // Only the literal-string form of `content`. `none` and the
@@ -2624,13 +2938,151 @@ pub struct CssRule {
     pub style: ComputedStyle,
 }
 
+/// A single `@page` rule: its prelude (the `PageSelector`) and its
+/// declaration block (raw, unmerged). Multiple rules may match the same
+/// page; `Stylesheet::resolve_page_style` walks them in ascending
+/// specificity order and merges per-property.
+#[derive(Clone, Debug, Default)]
+pub struct PageRule {
+    pub selector: PageSelector,
+    pub decls: PageStyle,
+}
+
 /// A parsed stylesheet: a list of CSS rules.
+///
+/// `@page` rules are stored in `page_rules` in source order. Use
+/// `resolve_page_style(page_num, total_pages)` to compute the merged
+/// `PageStyle` for a given page; the merge follows CSS Paged Media L3
+/// §4.4 (specificity tuple `(f, g, h)`) and is applied per-property,
+/// not per-block, so margin boxes layered across rules combine
+/// individual properties from each.
+///
+/// `page_style` is the legacy back-compat view: it holds the resolution
+/// for a single-page document (page 1 of 1) so existing callers that
+/// haven't been migrated to `resolve_page_style` continue to work.
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
     pub rules: Vec<CssRule>,
     pub page_style: PageStyle,
+    pub page_rules: Vec<PageRule>,
     #[allow(dead_code)]
     pub font_faces: Vec<FontFaceRule>,
+}
+
+impl Stylesheet {
+    /// Resolve the effective `@page` style for `page_num` (1-indexed) in
+    /// a document of `total_pages`. Walks `self.page_rules` in
+    /// ascending specificity order (CSS Paged Media L3 §4.4) and merges
+    /// each matching rule's declarations per property. Margin boxes
+    /// cascade per-property: a more-specific `@page :first { @top-left { … } }`
+    /// only overlays the properties it sets, leaving the rest of
+    /// `@top-left`'s properties from the base `@page` intact.
+    pub fn resolve_page_style(&self, page_num: usize, total_pages: usize) -> PageStyle {
+        let mut indexed: Vec<(usize, &PageRule)> = self
+            .page_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.selector.matches(page_num, total_pages))
+            .collect();
+        // Stable sort: ascending specificity, then source-order tiebreak.
+        // Source order is the second key so that, for two rules of equal
+        // specificity, the later declaration wins (standard CSS cascade).
+        indexed.sort_by_key(|(idx, r)| (r.selector.specificity(), *idx));
+        let mut merged = PageStyle::default();
+        for (_, rule) in indexed {
+            merge_page_style(&mut merged, &rule.decls);
+        }
+        merged
+    }
+}
+
+/// Public re-export of `merge_page_style` for callers in other crate
+/// modules (e.g. `layout::LayoutInner::apply_page_style_for`). The
+/// merge is per-property; see `merge_page_style` for details.
+pub fn merge_page_style_pub(dst: &mut PageStyle, src: &PageStyle) {
+    merge_page_style(dst, src);
+}
+
+/// Per-property merge of `src` into `dst`. Each `Some(_)` field in
+/// `src` overrides the corresponding field in `dst`; `None` fields in
+/// `src` leave `dst` unchanged. Margin boxes merge per-position with
+/// per-property semantics (see `merge_margin_box`).
+fn merge_page_style(dst: &mut PageStyle, src: &PageStyle) {
+    if src.width.is_some() {
+        dst.width = src.width;
+    }
+    if src.height.is_some() {
+        dst.height = src.height;
+    }
+    if src.margin_top.is_some() {
+        dst.margin_top = src.margin_top;
+    }
+    if src.margin_right.is_some() {
+        dst.margin_right = src.margin_right;
+    }
+    if src.margin_bottom.is_some() {
+        dst.margin_bottom = src.margin_bottom;
+    }
+    if src.margin_left.is_some() {
+        dst.margin_left = src.margin_left;
+    }
+    merge_margin_boxes(&mut dst.margin_boxes, &src.margin_boxes);
+}
+
+/// Per-position, per-property merge of margin-box declarations.
+fn merge_margin_boxes(dst: &mut MarginBoxes, src: &MarginBoxes) {
+    let positions = [
+        MarginBoxPosition::TopLeft,
+        MarginBoxPosition::TopCenter,
+        MarginBoxPosition::TopRight,
+        MarginBoxPosition::BottomLeft,
+        MarginBoxPosition::BottomCenter,
+        MarginBoxPosition::BottomRight,
+    ];
+    for pos in positions {
+        let s = match pos {
+            MarginBoxPosition::TopLeft => src.top_left.as_ref(),
+            MarginBoxPosition::TopCenter => src.top_center.as_ref(),
+            MarginBoxPosition::TopRight => src.top_right.as_ref(),
+            MarginBoxPosition::BottomLeft => src.bottom_left.as_ref(),
+            MarginBoxPosition::BottomCenter => src.bottom_center.as_ref(),
+            MarginBoxPosition::BottomRight => src.bottom_right.as_ref(),
+        };
+        let Some(s) = s else { continue };
+        let slot = match pos {
+            MarginBoxPosition::TopLeft => &mut dst.top_left,
+            MarginBoxPosition::TopCenter => &mut dst.top_center,
+            MarginBoxPosition::TopRight => &mut dst.top_right,
+            MarginBoxPosition::BottomLeft => &mut dst.bottom_left,
+            MarginBoxPosition::BottomCenter => &mut dst.bottom_center,
+            MarginBoxPosition::BottomRight => &mut dst.bottom_right,
+        };
+        let target = slot.get_or_insert_with(MarginBox::default);
+        merge_margin_box(target, s);
+    }
+}
+
+/// Per-property merge of a single margin box. `content` is treated as
+/// "overrides when non-empty"; the spec says an empty `content` value
+/// produces no generated content anyway, so an empty Vec from a
+/// less-specific rule never occludes a non-empty Vec from a
+/// more-specific one.
+fn merge_margin_box(dst: &mut MarginBox, src: &MarginBox) {
+    if !src.content.is_empty() {
+        dst.content.clone_from(&src.content);
+    }
+    if src.font_family.is_some() {
+        dst.font_family.clone_from(&src.font_family);
+    }
+    if src.font_size.is_some() {
+        dst.font_size = src.font_size;
+    }
+    if src.color.is_some() {
+        dst.color = src.color;
+    }
+    if src.text_align.is_some() {
+        dst.text_align.clone_from(&src.text_align);
+    }
 }
 
 // ── Selector parsing ──────────────────────────────────────
@@ -3236,19 +3688,53 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
     }
 }
 
+// ── User-agent stylesheet ─────────────────────────────────
+
+/// User-agent default stylesheet rules applied before any author CSS.
+///
+/// This mirrors the small subset of the CSS 2.1 §A.5 / HTML Living
+/// Standard "rendering" defaults that pdfun cares about for paged
+/// output. Browsers (Chromium, Firefox) and `WeasyPrint` all ship
+/// equivalents of these declarations through their own UA sheets;
+/// without them, `<a href>` text inherits the surrounding color and
+/// is visually indistinguishable from non-link prose.
+///
+/// The constant is exposed so `html_render` can prepend it to the
+/// concatenated `<style>` block CSS at parse time. Because rules are
+/// resolved in source order on equal specificity (see
+/// `match_rules_for`), author rules parsed afterwards win — preserving
+/// the standard CSS cascade origin precedence (UA < author).
+///
+/// `:visited`, `:hover`, `:focus`, and the `cursor` property are
+/// intentionally omitted: pdfun has no notion of visited state in
+/// paged output and does not parse those CSS features today.
+pub const USER_AGENT_STYLESHEET: &str = "a { color: #0000ee; text-decoration: underline; }\n";
+
 // ── Stylesheet parsing ────────────────────────────────────
 
 /// Parse a CSS stylesheet (from `<style>` blocks) into rules.
+///
+/// `@page` rules are routed through `parse_page_selector` so each rule
+/// keeps its prelude (e.g. `:first`, `:left`, `:right`, `:blank`,
+/// `:nth(N)`) and contributes to the per-page cascade documented on
+/// `Stylesheet::resolve_page_style`. The legacy `page_style` field on
+/// the returned `Stylesheet` is kept populated for callers that
+/// haven't migrated to the per-page resolver — it holds the resolution
+/// for page 1 of a single-page document, which is what the previous
+/// "single global @page" model effectively returned.
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
-    let mut page_style = PageStyle::default();
+    let mut page_rules = Vec::new();
     let mut font_faces = Vec::new();
-    parse_stylesheet_manual(css, &mut rules, &mut page_style, &mut font_faces);
-    Stylesheet {
+    parse_stylesheet_manual(css, &mut rules, &mut page_rules, &mut font_faces);
+    let mut sheet = Stylesheet {
         rules,
-        page_style,
+        page_style: PageStyle::default(),
+        page_rules,
         font_faces,
-    }
+    };
+    sheet.page_style = sheet.resolve_page_style(1, 1);
+    sheet
 }
 
 /// Find the byte index of the `}` that matches the `{` at position
@@ -3364,7 +3850,7 @@ fn skip_leading_at_statements(mut remaining: &str) -> &str {
 fn parse_stylesheet_manual(
     css: &str,
     rules: &mut Vec<CssRule>,
-    page_style: &mut PageStyle,
+    page_rules: &mut Vec<PageRule>,
     font_faces: &mut Vec<FontFaceRule>,
 ) {
     let mut remaining = css;
@@ -3384,14 +3870,21 @@ fn parse_stylesheet_manual(
 
         // Handle @page rule — may contain nested `@top-center { ... }`
         // blocks, so we need to find the matching close brace honoring
-        // nesting.
-        if selector_text.starts_with("@page") {
+        // nesting. The prelude (text after `@page` and before `{`) may
+        // carry pseudo-class selectors per CSS Paged Media L3 §4.4
+        // (`:first`, `:left`, `:right`, `:blank`, `:nth(N)`); we route
+        // each rule through `parse_page_selector` so they cascade with
+        // per-property specificity.
+        if let Some(prelude) = selector_text.strip_prefix("@page") {
             let Some(brace_close) = find_matching_close(after_open) else {
                 break;
             };
             let body = &after_open[..brace_close];
             remaining = &after_open[brace_close + 1..];
-            parse_page_body(body, page_style);
+            let selector = parse_page_selector(prelude);
+            let mut decls = PageStyle::default();
+            parse_page_body(body, &mut decls);
+            page_rules.push(PageRule { selector, decls });
             continue;
         }
 
@@ -3407,7 +3900,7 @@ fn parse_stylesheet_manual(
             let body = &after_open[..brace_close];
             remaining = &after_open[brace_close + 1..];
             if media_query_applies_to_print(prelude) {
-                parse_stylesheet_manual(body, rules, page_style, font_faces);
+                parse_stylesheet_manual(body, rules, page_rules, font_faces);
             }
             continue;
         }
@@ -3832,7 +4325,9 @@ fn parse_margin_box_declarations(declarations: &str) -> MarginBox {
                 }
                 "color" => {
                     if let Ok(c) = parse_css_color(input) {
-                        mb.color = Some(c);
+                        // Margin-box `color` alpha is a v1 cut — paged
+                        // headers/footers paint opaque text only.
+                        mb.color = Some(rgb_only(c));
                     }
                 }
                 "text-align" => {
@@ -4177,52 +4672,154 @@ mod tests {
     #[test]
     fn color_named_red() {
         let s = parse_inline_style("color: red");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn color_named_blue() {
         let s = parse_inline_style("color: blue");
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
     fn color_named_black() {
         let s = parse_inline_style("color: black");
-        assert_eq!(s.color, Some((0.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn color_named_white() {
         let s = parse_inline_style("color: white");
-        assert_eq!(s.color, Some((1.0, 1.0, 1.0)));
+        assert_eq!(s.color, Some((1.0, 1.0, 1.0, 1.0)));
     }
 
     #[test]
     fn color_hex_6() {
         let s = parse_inline_style("color: #ff0000");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn color_hex_3() {
         let s = parse_inline_style("color: #00f");
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
     fn color_rgb_function() {
         let s = parse_inline_style("color: rgb(255, 128, 0)");
-        let (r, g, b) = s.color.unwrap();
+        let (r, g, b, a) = s.color.unwrap();
         assert!((r - 1.0).abs() < 0.01);
         assert!((g - 128.0 / 255.0).abs() < 0.01);
         assert!(b.abs() < 0.01);
+        assert!((a - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn background_color() {
         let s = parse_inline_style("background-color: yellow");
-        assert_eq!(s.background_color, Some((1.0, 1.0, 0.0)));
+        assert_eq!(s.background_color, Some((1.0, 1.0, 0.0, 1.0)));
+    }
+
+    // ── WS-2 Rung 1: parser alpha capture ─────────────────────
+
+    #[test]
+    fn rgba_captures_alpha() {
+        // CSS Color 3 §4.2.1: rgba()'s 4th component flows through
+        // unchanged into the parsed RGBA tuple.
+        let s = parse_inline_style("color: rgba(255, 0, 0, 0.5)");
+        let (r, g, b, a) = s.color.unwrap();
+        assert!((r - 1.0).abs() < 0.01);
+        assert!(g.abs() < 0.01);
+        assert!(b.abs() < 0.01);
+        assert!((a - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn rgb_defaults_alpha_one() {
+        // rgb() (no `a` form) defaults α=1.0.
+        let s = parse_inline_style("color: rgb(255, 0, 0)");
+        let (r, _, _, a) = s.color.unwrap();
+        assert!((r - 1.0).abs() < 0.01);
+        assert!((a - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsla_captures_alpha() {
+        // CSS Color 3 §4.2.4: hsla() carries an alpha component too.
+        // hsla(240, 100%, 50%, 0.25) is pure blue at α=0.25.
+        let s = parse_inline_style("color: hsla(240, 100%, 50%, 0.25)");
+        let (r, g, b, a) = s.color.unwrap();
+        assert!(r.abs() < 0.01);
+        assert!(g.abs() < 0.01);
+        assert!((b - 1.0).abs() < 0.01);
+        assert!((a - 0.25).abs() < 0.01);
+    }
+
+    #[test]
+    fn hsl_defaults_alpha_one() {
+        let s = parse_inline_style("color: hsl(240, 100%, 50%)");
+        let (_, _, _, a) = s.color.unwrap();
+        assert!((a - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hex_long_with_alpha_captures_alpha() {
+        // 8-digit hex carries an explicit alpha byte.
+        let s = parse_inline_style("color: #ff000080");
+        let (r, _, _, a) = s.color.unwrap();
+        assert!((r - 1.0).abs() < 0.01);
+        // 0x80 / 255 ≈ 0.502
+        assert!((a - 128.0 / 255.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hex_short_defaults_alpha_one() {
+        let s = parse_inline_style("color: #f00");
+        let (_, _, _, a) = s.color.unwrap();
+        assert!((a - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn named_color_defaults_alpha_one() {
+        let s = parse_inline_style("color: blue");
+        let (_, _, _, a) = s.color.unwrap();
+        assert!((a - 1.0).abs() < 0.01);
+    }
+
+    // ── WS-2 Rung 2: cascade carries alpha ────────────────────
+
+    #[test]
+    fn computed_style_carries_alpha() {
+        // The cascade (parse_inline_style → ComputedStyle) must preserve
+        // the parsed alpha all the way through to the field — i.e. the
+        // tuple actually stored on `ComputedStyle.background_color`
+        // includes the 4th component, not just (r, g, b).
+        let s = parse_inline_style("background-color: rgba(0, 0, 0, 0.5)");
+        let (r, g, b, a) = s.background_color.unwrap();
+        assert!(r.abs() < 0.01);
+        assert!(g.abs() < 0.01);
+        assert!(b.abs() < 0.01);
+        assert!((a - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn computed_style_border_color_carries_alpha() {
+        let s = parse_inline_style("border-color: rgba(255, 255, 255, 0.7)");
+        let (_, _, _, a) = s.border_color.unwrap();
+        assert!((a - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn rgba_alpha_clamped_to_unit_range() {
+        // Out-of-range alpha is clamped per CSS Color 3 (we use clamp,
+        // which matches both Blink and Gecko's "be lenient" behavior).
+        let above = parse_inline_style("color: rgba(255, 0, 0, 2.0)");
+        let (_, _, _, a_high) = above.color.unwrap();
+        assert!((a_high - 1.0).abs() < 0.01);
+        let below = parse_inline_style("color: rgba(255, 0, 0, -0.5)");
+        let (_, _, _, a_low) = below.color.unwrap();
+        assert!(a_low.abs() < 0.01);
     }
 
     #[test]
@@ -4356,20 +4953,20 @@ mod tests {
     #[test]
     fn border_color() {
         let s = parse_inline_style("border-color: red");
-        assert_eq!(s.border_color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.border_color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn border_shorthand() {
         let s = parse_inline_style("border: 1px solid black");
         assert!(matches!(s.border_width, Some(CssLength::Px(v)) if (v - 1.0).abs() < 0.001));
-        assert_eq!(s.border_color, Some((0.0, 0.0, 0.0)));
+        assert_eq!(s.border_color, Some((0.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn invalid_property_ignored() {
         let s = parse_inline_style("invalid-prop: value; color: blue");
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
@@ -4389,7 +4986,7 @@ mod tests {
     #[test]
     fn multiple_properties() {
         let s = parse_inline_style("color: red; font-size: 24pt; font-weight: bold");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.font_size, Some(CssLength::Pt(v)) if (v - 24.0).abs() < 0.001));
         assert_eq!(s.font_weight, Some(FontWeight::Bold));
     }
@@ -4429,6 +5026,7 @@ mod tests {
             vw: 612.0,
             vh: 792.0,
             container: 500.0,
+            container_height: None,
         };
         assert!((CssLength::Rem(2.0).resolve_ctx(&ctx) - 24.0).abs() < 0.001);
         assert!((CssLength::Em(2.0).resolve_ctx(&ctx) - 48.0).abs() < 0.001);
@@ -4442,6 +5040,7 @@ mod tests {
             vw: 600.0,
             vh: 800.0,
             container: 500.0,
+            container_height: None,
         };
         assert!((CssLength::Vw(50.0).resolve_ctx(&ctx) - 300.0).abs() < 0.001);
         assert!((CssLength::Vh(25.0).resolve_ctx(&ctx) - 200.0).abs() < 0.001);
@@ -4458,8 +5057,68 @@ mod tests {
             vw: 612.0,
             vh: 792.0,
             container: 400.0,
+            container_height: None,
         };
         assert!((CssLength::Pct(50.0).resolve_ctx(&ctx) - 200.0).abs() < 0.001);
+    }
+
+    // ── T3 Rung 2: percent heights resolve against container_height ──
+
+    #[test]
+    fn percent_height_resolves_against_container_height() {
+        // CSS 2.1 §10.5: percent on `height` resolves against the
+        // containing block's content height, not its width. The
+        // dedicated `resolve_height_ctx` path uses
+        // `container_height` so width and height percents stay
+        // independent.
+        let ctx = LengthContext {
+            em: 12.0,
+            rem: 12.0,
+            vw: 612.0,
+            vh: 792.0,
+            container: 612.0,
+            container_height: Some(400.0),
+        };
+        let resolved = CssLength::Pct(50.0).resolve_height_ctx(&ctx);
+        assert!(matches!(resolved, Some(v) if (v - 200.0).abs() < 0.001));
+    }
+
+    #[test]
+    fn percent_height_against_auto_containing_block_is_none() {
+        // CSS 2.1 §10.5: when the containing block's height is `auto`
+        // (i.e. depends on its content) a child's percent height also
+        // computes to `auto`. We model "auto" as
+        // `container_height: None`, and `resolve_height_ctx` returns
+        // `None` so the cascade can leave `block_style.height` unset.
+        let ctx = LengthContext {
+            em: 12.0,
+            rem: 12.0,
+            vw: 612.0,
+            vh: 792.0,
+            container: 400.0,
+            container_height: None,
+        };
+        assert!(CssLength::Pct(50.0).resolve_height_ctx(&ctx).is_none());
+        assert!(CssLength::Pct(100.0).resolve_height_ctx(&ctx).is_none());
+    }
+
+    #[test]
+    fn non_percent_height_resolves_normally() {
+        // Absolute / em / vh / etc. lengths don't depend on the
+        // containing block, so `resolve_height_ctx` returns the same
+        // value `resolve_ctx` does — wrapped in `Some`.
+        let ctx = LengthContext {
+            em: 16.0,
+            rem: 16.0,
+            vw: 612.0,
+            vh: 792.0,
+            container: 500.0,
+            container_height: None,
+        };
+        let resolved = CssLength::Pt(100.0).resolve_height_ctx(&ctx);
+        assert!(matches!(resolved, Some(v) if (v - 100.0).abs() < 0.001));
+        let vh = CssLength::Vh(50.0).resolve_height_ctx(&ctx);
+        assert!(matches!(vh, Some(v) if (v - 396.0).abs() < 0.001));
     }
 
     #[test]
@@ -4503,7 +5162,7 @@ mod tests {
     #[test]
     fn later_declaration_wins() {
         let s = parse_inline_style("color: red; color: blue");
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
@@ -4516,13 +5175,13 @@ mod tests {
     fn important_not_breaking() {
         // !important should not prevent the value from being parsed
         let s = parse_inline_style("color: red !important");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn important_with_other_declarations() {
         let s = parse_inline_style("color: red !important; font-size: 18pt");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
     }
 
@@ -4554,7 +5213,7 @@ mod tests {
     #[test]
     fn uppercase_property_name() {
         let s = parse_inline_style("COLOR: red");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -4566,26 +5225,26 @@ mod tests {
     #[test]
     fn uppercase_hex_color() {
         let s = parse_inline_style("color: #FF0000");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn uppercase_named_color() {
         let s = parse_inline_style("color: RED");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn extra_whitespace_around_values() {
         let s = parse_inline_style("  color :  red  ;  font-size :  18pt  ");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
     }
 
     #[test]
     fn extra_semicolons() {
         let s = parse_inline_style(";;color: red;;;font-size: 18pt;;");
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
     }
 
@@ -4633,7 +5292,7 @@ mod tests {
     #[test]
     fn border_color_first() {
         let s = parse_inline_style("border: red 2px solid");
-        assert_eq!(s.border_color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.border_color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(s.border_width, Some(CssLength::Px(v)) if (v - 2.0).abs() < 0.001));
     }
 
@@ -4747,7 +5406,7 @@ mod tests {
     fn stylesheet_single_rule() {
         let sheet = parse_stylesheet("p { color: red }");
         assert_eq!(sheet.rules.len(), 1);
-        assert_eq!(sheet.rules[0].style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(sheet.rules[0].style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -4788,7 +5447,7 @@ mod tests {
         let sheet = parse_stylesheet("p { color: red }");
         let elem = test_elem("p", vec![], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -4796,7 +5455,7 @@ mod tests {
         let sheet = parse_stylesheet(".red { color: red }");
         let elem = test_elem("p", vec!["red"], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -4818,7 +5477,7 @@ mod tests {
             vec![("div", vec![], None, vec![])],
         );
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -4832,7 +5491,7 @@ mod tests {
             vec![("div", vec![], None, vec![])],
         );
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -4857,7 +5516,7 @@ mod tests {
         let sheet = parse_stylesheet("p { color: red } .blue { color: blue }");
         let elem = test_elem("p", vec!["blue"], None, vec![], vec![]);
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(style.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     // ── Attribute selector tests ──────────────────────────────
@@ -4867,14 +5526,77 @@ mod tests {
         let sheet = parse_stylesheet("[data-x] { color: red }");
         let elem = test_elem("p", vec![], None, vec![("data-x", "")], vec![]);
         let style = match_rules(&elem, &sheet);
-        assert_eq!(style.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn match_attr_equals() {
         let sheet = parse_stylesheet("[data-role=\"primary\"] { color: red }");
         let elem = test_elem("p", vec![], None, vec![("data-role", "primary")], vec![]);
-        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
+    }
+
+    // ── Tier 1.3: <a> user-agent defaults ─────────────────────
+
+    #[test]
+    fn ua_stylesheet_gives_anchor_blue_underline() {
+        // The UA stylesheet shipped with pdfun supplies the standard
+        // unvisited-link defaults. Parsing it on its own and matching
+        // an `<a>` element must yield the canonical Mosaic-blue color
+        // (#0000ee) and an `underline` text-decoration.
+        let sheet = parse_stylesheet(USER_AGENT_STYLESHEET);
+        let elem = test_elem("a", vec![], None, vec![("href", "x")], vec![]);
+        let style = match_rules(&elem, &sheet);
+        let (r, g, b, a) = style.color.expect("UA sheet must set <a> color");
+        assert!(r.abs() < 0.01, "red channel should be ~0, got {r}");
+        assert!(g.abs() < 0.01, "green channel should be ~0, got {g}");
+        assert!(
+            (b - 0xee as f32 / 255.0).abs() < 0.01,
+            "blue channel should be ~0.933, got {b}"
+        );
+        let dec = style
+            .text_decoration
+            .expect("UA sheet must set <a> text-decoration");
+        assert!(dec.underline, "UA <a> default must include underline");
+        assert!(
+            (a - 1.0).abs() < f32::EPSILON,
+            "alpha must default to 1.0, got {a}"
+        );
+    }
+
+    #[test]
+    fn ua_stylesheet_does_not_target_non_anchors() {
+        // Sanity check: the UA `a` rule must not bleed onto `<p>` or
+        // any other type. If it did, we'd be turning every paragraph
+        // blue and underlined.
+        let sheet = parse_stylesheet(USER_AGENT_STYLESHEET);
+        let elem = test_elem("p", vec![], None, vec![], vec![]);
+        let style = match_rules(&elem, &sheet);
+        assert!(style.color.is_none());
+        assert!(style.text_decoration.is_none());
+    }
+
+    #[test]
+    fn author_a_color_overrides_ua_default() {
+        // The UA stylesheet must lose to author CSS at equal
+        // specificity (a vs. a, both 0,0,1). We simulate the
+        // production cascade by concatenating UA + author into a
+        // single stylesheet — that's exactly what
+        // `html_render::render_dom_to_layout` does at parse time.
+        let combined = format!("{USER_AGENT_STYLESHEET}a {{ color: red }}");
+        let sheet = parse_stylesheet(&combined);
+        let elem = test_elem("a", vec![], None, vec![("href", "x")], vec![]);
+        let style = match_rules(&elem, &sheet);
+        assert_eq!(
+            style.color,
+            Some((1.0, 0.0, 0.0, 1.0)),
+            "author `a {{ color: red }}` must override UA blue"
+        );
+        // The UA underline still wins for text-decoration since the
+        // author rule didn't override it — confirms per-property
+        // cascade behavior.
+        let dec = style.text_decoration.expect("UA underline still applies");
+        assert!(dec.underline);
     }
 
     #[test]
@@ -4889,7 +5611,7 @@ mod tests {
         );
         assert_eq!(
             match_rules(&elem_match, &sheet).color,
-            Some((1.0, 0.0, 0.0))
+            Some((1.0, 0.0, 0.0, 1.0))
         );
 
         let elem_no = test_elem(
@@ -4908,8 +5630,8 @@ mod tests {
         let a = test_elem("p", vec![], None, vec![("lang", "en")], vec![]);
         let b = test_elem("p", vec![], None, vec![("lang", "en-US")], vec![]);
         let c = test_elem("p", vec![], None, vec![("lang", "english")], vec![]);
-        assert_eq!(match_rules(&a, &sheet).color, Some((1.0, 0.0, 0.0)));
-        assert_eq!(match_rules(&b, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&a, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(match_rules(&b, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(match_rules(&c, &sheet).color.is_none());
     }
 
@@ -4933,16 +5655,25 @@ mod tests {
             vec![("class", "bigbox")],
             vec![],
         );
-        assert_eq!(match_rules(&a, &sheet_prefix).color, Some((1.0, 0.0, 0.0)));
-        assert_eq!(match_rules(&b, &sheet_suffix).color, Some((1.0, 0.0, 0.0)));
-        assert_eq!(match_rules(&c, &sheet_substr).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(
+            match_rules(&a, &sheet_prefix).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            match_rules(&b, &sheet_suffix).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            match_rules(&c, &sheet_substr).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
     }
 
     #[test]
     fn match_attr_compound_with_type() {
         let sheet = parse_stylesheet("p[class=\"foo\"] { color: red }");
         let elem = test_elem("p", vec!["foo"], None, vec![("class", "foo")], vec![]);
-        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&elem, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5057,7 +5788,10 @@ mod tests {
         let mut first = test_elem("p", vec![], None, vec![], vec![]);
         first.sibling_index = 0;
         first.sibling_count = 3;
-        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(
+            match_rules(&first, &sheet).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
 
         let mut second = test_elem("p", vec![], None, vec![], vec![]);
         second.sibling_index = 1;
@@ -5071,7 +5805,7 @@ mod tests {
         let mut li2 = test_elem("li", vec![], None, vec![], vec![]);
         li2.sibling_index = 1; // 2nd
         li2.sibling_count = 4;
-        assert_eq!(match_rules(&li2, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&li2, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
 
         let mut li1 = test_elem("li", vec![], None, vec![], vec![]);
         li1.sibling_index = 0;
@@ -5083,7 +5817,10 @@ mod tests {
     fn match_not_pseudo() {
         let sheet = parse_stylesheet("p:not(.skip) { color: red }");
         let plain = test_elem("p", vec![], None, vec![], vec![]);
-        assert_eq!(match_rules(&plain, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(
+            match_rules(&plain, &sheet).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
 
         let skipped = test_elem("p", vec!["skip"], None, vec![], vec![]);
         assert!(match_rules(&skipped, &sheet).color.is_none());
@@ -5103,7 +5840,7 @@ mod tests {
             sibling_index: 0,
             sibling_count: 2,
         }];
-        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
 
         // A p following a div should NOT match h1+p.
         let mut p2 = test_elem("p", vec![], None, vec![], vec![]);
@@ -5145,7 +5882,7 @@ mod tests {
                 sibling_count: 3,
             },
         ];
-        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(match_rules(&p, &sheet).color, Some((1.0, 0.0, 0.0, 1.0)));
     }
 
     #[test]
@@ -5161,7 +5898,10 @@ mod tests {
         );
         first.sibling_index = 0;
         first.sibling_count = 2;
-        assert_eq!(match_rules(&first, &sheet).color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(
+            match_rules(&first, &sheet).color,
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
 
         let mut second = test_elem(
             "p",
@@ -5271,10 +6011,224 @@ mod tests {
         );
     }
 
+    // ── @page pseudo-selector (WS-4) ────────────────────────
+
+    /// Helper: parse an `@page` prelude (between `@page` and `{`) into a
+    /// `PageSelector`. Used by the rung-1 parser tests; the public
+    /// stylesheet parser uses this same routine internally.
+    fn parse_page_selector_text(prelude: &str) -> PageSelector {
+        super::parse_page_selector(prelude)
+    }
+
+    #[test]
+    fn parses_at_page_first() {
+        // CSS Paged Media L3 §4.4 — `:first` is a pseudo-class, not a name.
+        let sel = parse_page_selector_text(":first");
+        assert!(sel.first);
+        assert!(!sel.blank);
+        assert!(sel.side.is_none());
+        assert!(sel.nth.is_none());
+        assert!(sel.page_name.is_none());
+        assert_eq!(sel.specificity(), (0, 1, 0));
+    }
+
+    #[test]
+    fn parses_at_page_left() {
+        let sel = parse_page_selector_text(":left");
+        assert_eq!(sel.side, Some(PageSide::Left));
+        assert_eq!(sel.specificity(), (0, 0, 1));
+    }
+
+    #[test]
+    fn parses_at_page_right() {
+        let sel = parse_page_selector_text(":right");
+        assert_eq!(sel.side, Some(PageSide::Right));
+        assert_eq!(sel.specificity(), (0, 0, 1));
+    }
+
+    #[test]
+    fn parses_at_page_blank() {
+        let sel = parse_page_selector_text(":blank");
+        assert!(sel.blank);
+        assert_eq!(sel.specificity(), (0, 1, 0));
+    }
+
+    #[test]
+    fn parses_at_page_nth_literal() {
+        let sel = parse_page_selector_text(":nth(3)");
+        assert_eq!(sel.nth, Some(3));
+        // `:nth(N)` is a `f`-class selector per CSS Paged Media L3.
+        assert_eq!(sel.specificity(), (1, 0, 0));
+    }
+
+    #[test]
+    fn parses_at_page_combined_first_right() {
+        let sel = parse_page_selector_text(":first:right");
+        assert!(sel.first);
+        assert_eq!(sel.side, Some(PageSide::Right));
+        assert_eq!(sel.specificity(), (0, 1, 1));
+    }
+
+    #[test]
+    fn parses_at_page_empty_prelude_is_universal() {
+        // Bare `@page { … }` matches every page with specificity (0, 0, 0).
+        let sel = parse_page_selector_text("");
+        assert!(!sel.first);
+        assert!(!sel.blank);
+        assert!(sel.side.is_none());
+        assert!(sel.nth.is_none());
+        assert_eq!(sel.specificity(), (0, 0, 0));
+    }
+
+    #[test]
+    fn margin_box_cascades_per_property() {
+        // Given:
+        //   @page          { @top-left { content: "X"; color: red } }
+        //   @page :first   { @top-left { content: "Y" } }
+        // page 1 should resolve to content="Y" AND color=red — the more
+        // specific rule overrides `content`, the universal rule's `color`
+        // falls through (per-property cascade, not whole-block).
+        let css = r#"
+            @page { @top-left { content: "X"; color: red } }
+            @page :first { @top-left { content: "Y" } }
+        "#;
+        let sheet = parse_stylesheet(css);
+        let resolved = sheet.resolve_page_style(1, 1);
+        let mb = resolved.margin_boxes.top_left.as_ref().expect("top-left");
+        assert_eq!(mb.content, vec![ContentItem::String("Y".to_string())]);
+        // Margin-box `color` is a v1 cut for alpha — alpha is dropped at
+        // parse time, so this assertion is the 3-tuple opaque value.
+        assert_eq!(mb.color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn margin_box_universal_falls_through_for_other_pages() {
+        // The universal `@page` margin box should still apply on pages
+        // that don't match `:first`.
+        let css = r#"
+            @page { @top-left { content: "X"; color: red } }
+            @page :first { @top-left { content: "Y" } }
+        "#;
+        let sheet = parse_stylesheet(css);
+        let resolved = sheet.resolve_page_style(2, 5);
+        let mb = resolved.margin_boxes.top_left.as_ref().expect("top-left");
+        assert_eq!(mb.content, vec![ContentItem::String("X".to_string())]);
+        assert_eq!(mb.color, Some((1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn page_size_and_margin_resolve_per_specificity() {
+        // `@page` declares a default 1in margin; `@page :first` overrides
+        // only the margin. Page 1 must use 0.25in (18pt) margins; page 2
+        // must use 1in (72pt) margins.
+        let css = r"
+            @page { size: letter; margin: 1in }
+            @page :first { margin: 0.25in }
+        ";
+        let sheet = parse_stylesheet(css);
+        let p1 = sheet.resolve_page_style(1, 2);
+        let p2 = sheet.resolve_page_style(2, 2);
+        assert_eq!(p1.width, Some(612.0));
+        assert_eq!(p1.margin_top, Some(18.0));
+        assert_eq!(p2.margin_top, Some(72.0));
+    }
+
+    #[test]
+    fn first_matches_only_page_one() {
+        let sel = parse_page_selector_text(":first");
+        assert!(sel.matches(1, 5));
+        assert!(!sel.matches(2, 5));
+        assert!(!sel.matches(5, 5));
+    }
+
+    #[test]
+    fn left_matches_even_pages_in_ltr() {
+        // LTR: page 1 is right-hand, page 2 is left-hand, etc.
+        let sel = parse_page_selector_text(":left");
+        assert!(!sel.matches(1, 6));
+        assert!(sel.matches(2, 6));
+        assert!(!sel.matches(3, 6));
+        assert!(sel.matches(4, 6));
+    }
+
+    #[test]
+    fn right_matches_odd_pages_in_ltr() {
+        let sel = parse_page_selector_text(":right");
+        assert!(sel.matches(1, 6));
+        assert!(!sel.matches(2, 6));
+        assert!(sel.matches(3, 6));
+        assert!(sel.matches(5, 6));
+    }
+
+    #[test]
+    fn nth_matches_literal_index() {
+        let sel = parse_page_selector_text(":nth(3)");
+        assert!(!sel.matches(1, 10));
+        assert!(!sel.matches(2, 10));
+        assert!(sel.matches(3, 10));
+        assert!(!sel.matches(4, 10));
+    }
+
+    #[test]
+    fn first_right_matches_only_page_one_in_ltr() {
+        // Page 1 is right-hand AND first → matches.
+        let sel = parse_page_selector_text(":first:right");
+        assert!(sel.matches(1, 5));
+        // Page 3 is right-hand but not first → must not match.
+        assert!(!sel.matches(3, 5));
+        // Page 2 is first-disqualified → must not match.
+        assert!(!sel.matches(2, 5));
+    }
+
+    #[test]
+    fn blank_never_matches_in_v1() {
+        // pdfun's pagination doesn't yet expose forced-empty pages, so
+        // `:blank` is parsed-but-never-matched. Documented v1 cut.
+        let sel = parse_page_selector_text(":blank");
+        for n in 1..=10 {
+            assert!(!sel.matches(n, 10));
+        }
+    }
+
+    #[test]
+    fn universal_selector_matches_every_page() {
+        let sel = parse_page_selector_text("");
+        assert!(sel.matches(1, 1));
+        assert!(sel.matches(7, 99));
+    }
+
+    #[test]
+    fn specificity_tuple_orders_correctly() {
+        // Per CSS Paged Media L3 §4.4 the specificity tuple is sorted
+        // lexicographically (f, g, h). `:first:left` `(0,1,1)` beats both
+        // `:first` `(0,1,0)` and `:left` `(0,0,1)` individually.
+        let universal = parse_page_selector_text("").specificity();
+        let first_only = parse_page_selector_text(":first").specificity();
+        let left_only = parse_page_selector_text(":left").specificity();
+        let first_left = parse_page_selector_text(":first:left").specificity();
+        let nth = parse_page_selector_text(":nth(2)").specificity();
+
+        // Lexicographic ordering of the tuples.
+        let mut tuples = [universal, left_only, first_only, first_left, nth];
+        tuples.sort_unstable();
+        assert_eq!(
+            tuples,
+            [(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1), (1, 0, 0)]
+        );
+
+        // Sanity: the spec'd ordering — `:first:left` strictly outranks
+        // both `:first` and `:left`.
+        assert!(first_left > first_only);
+        assert!(first_left > left_only);
+        assert!(first_only > left_only);
+        // `:nth(N)` (an `f`-class) outranks every non-named pseudo combo.
+        assert!(nth > first_left);
+    }
+
     #[test]
     fn merge_style_non_none_wins() {
         let mut target = ComputedStyle {
-            color: Some((1.0, 0.0, 0.0)),
+            color: Some((1.0, 0.0, 0.0, 1.0)),
             ..ComputedStyle::default()
         };
         let source = ComputedStyle {
@@ -5282,7 +6236,7 @@ mod tests {
             ..ComputedStyle::default()
         };
         merge_style(&mut target, &source);
-        assert_eq!(target.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(target.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(matches!(target.font_size, Some(CssLength::Pt(v)) if (v - 18.0).abs() < 0.001));
     }
 
@@ -5308,7 +6262,7 @@ mod tests {
         let mut s = parse_inline_style("--fg: red; color: var(--fg)");
         assert!(s.color.is_none());
         s.resolve_vars();
-        assert_eq!(s.color, Some((1.0, 0.0, 0.0)));
+        assert_eq!(s.color, Some((1.0, 0.0, 0.0, 1.0)));
         assert!(s.var_decls.is_empty());
     }
 
@@ -5316,7 +6270,7 @@ mod tests {
     fn resolve_vars_uses_fallback_when_undefined() {
         let mut s = parse_inline_style("color: var(--missing, blue)");
         s.resolve_vars();
-        assert_eq!(s.color, Some((0.0, 0.0, 1.0)));
+        assert_eq!(s.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]

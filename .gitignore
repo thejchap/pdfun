@@ -42,8 +42,8 @@ target
 # Zensical docs build output
 /site/
 
-# Claude Code harness state
-.claude/scheduled_tasks.lock
+# Claude Code worktree isolation + harness state
+.claude/
 
 # Visual regression report + WeasyPrint blesser cache
 /target/visual-report/
