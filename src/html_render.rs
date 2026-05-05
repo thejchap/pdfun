@@ -197,9 +197,9 @@ fn button_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         display: Some(css::DisplayValue::InlineBlock),
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((0.937, 0.937, 0.937)),
+        background_color: Some((0.937, 0.937, 0.937, 1.0)),
         padding_left: Some(css::CssLength::Pt(6.0)),
         padding_right: Some(css::CssLength::Pt(6.0)),
         padding_top: Some(css::CssLength::Pt(2.0)),
@@ -215,9 +215,9 @@ fn select_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         display: Some(css::DisplayValue::InlineBlock),
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((1.0, 1.0, 1.0)),
+        background_color: Some((1.0, 1.0, 1.0, 1.0)),
         padding_left: Some(css::CssLength::Pt(4.0)),
         padding_right: Some(css::CssLength::Pt(4.0)),
         padding_top: Some(css::CssLength::Pt(1.0)),
@@ -233,9 +233,9 @@ fn select_ua_computed_style() -> ComputedStyle {
 fn textarea_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((1.0, 1.0, 1.0)),
+        background_color: Some((1.0, 1.0, 1.0, 1.0)),
         padding_left: Some(css::CssLength::Pt(4.0)),
         padding_right: Some(css::CssLength::Pt(4.0)),
         padding_top: Some(css::CssLength::Pt(4.0)),
@@ -271,9 +271,9 @@ fn text_input_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         display: Some(css::DisplayValue::InlineBlock),
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((1.0, 1.0, 1.0)),
+        background_color: Some((1.0, 1.0, 1.0, 1.0)),
         padding_left: Some(css::CssLength::Pt(2.0)),
         padding_right: Some(css::CssLength::Pt(2.0)),
         padding_top: Some(css::CssLength::Pt(1.0)),
@@ -292,9 +292,9 @@ fn checkbox_ua_computed_style() -> ComputedStyle {
     ComputedStyle {
         display: Some(css::DisplayValue::InlineBlock),
         border_width: Some(css::CssLength::Pt(1.0)),
-        border_color: Some((0.463, 0.463, 0.463)),
+        border_color: Some((0.463, 0.463, 0.463, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
-        background_color: Some((1.0, 1.0, 1.0)),
+        background_color: Some((1.0, 1.0, 1.0, 1.0)),
         width: Some(css::CssLength::Pt(10.0)),
         font_size: Some(css::CssLength::Pt(8.0)),
         ..ComputedStyle::default()
@@ -451,17 +451,32 @@ fn font_family_root(font: &'static str) -> &'static str {
 }
 
 fn map_css_font_family(family: &str) -> Option<&'static str> {
+    let mut saw_named = false;
     for name in family.split(',') {
         let lower = name
             .trim()
             .trim_matches(|c| c == '\'' || c == '"')
             .to_ascii_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+        saw_named = true;
         match lower.as_str() {
             "serif" | "times" | "times new roman" | "times-roman" => return Some("Times-Roman"),
             "sans-serif" | "helvetica" | "arial" => return Some("Helvetica"),
             "monospace" | "courier" | "courier new" => return Some("Courier"),
             _ => {}
         }
+    }
+    // WS-1B: if `font-family` was declared with at least one name but
+    // *no* generic / built-in matched (and no `@font-face` rule caught
+    // it upstream of this call), promote the run onto the bundled
+    // `__pdfun_fallback` face so unknown families like `Roboto` render
+    // with full Unicode coverage instead of silently swapping to
+    // Helvetica. With the `bundled-fallback-font` feature off, return
+    // None and let the cascade fall through to the UA default.
+    if saw_named && cfg!(feature = "bundled-fallback-font") {
+        return Some(crate::FALLBACK_FONT_NAME);
     }
     None
 }
@@ -479,6 +494,22 @@ struct ListEntry {
     counter: usize,
     style_override: Option<css::ListStyleType>,
     position_override: Option<css::ListStylePosition>,
+    /// Resolved `padding-left` set on the `<ul>`/`<ol>` element itself.
+    /// Each child `<li>` adds this to its own indent so author-set
+    /// padding shifts the bullets/text inward, matching how a real
+    /// container would (`<ul>` is rendered as a list, not a generic
+    /// block container, so this carries the value forward by hand).
+    extra_padding_left: f32,
+    /// Resolved `padding-right` on the `<ul>`/`<ol>`. Subtracted from
+    /// each child `<li>`'s available width so wrapping respects the
+    /// list's right inset.
+    extra_padding_right: f32,
+    /// `background-color` set on the `<ul>`/`<ol>`. Painted behind each
+    /// child `<li>` so the list panel renders even though `<ul>` doesn't
+    /// emit a true container box. The list's items each carry the same
+    /// fill, producing a stripe-per-item that lines up flush with
+    /// neighbouring items in the common case (no per-item margins).
+    background_color: Option<(f32, f32, f32, f32)>,
 }
 
 // ── Style block extraction ──────────────────────────────────
@@ -816,6 +847,10 @@ struct HtmlRenderer<'a> {
     /// before falling through to base-14 mapping; an empty map (the
     /// common case) makes those calls no-ops.
     font_face_lookup: FontFaceLookup,
+    /// Pluggable URL fetcher used for `<img>`, `background-image`, and
+    /// `@font-face` URLs. Defaults to a file-only fetcher; server-side
+    /// callers can plug in an HTTP backend or their own custom impl.
+    fetcher: std::sync::Arc<dyn crate::url_fetcher::UrlFetcher>,
 }
 
 impl<'a> HtmlRenderer<'a> {
@@ -856,6 +891,7 @@ impl<'a> HtmlRenderer<'a> {
             pending_anchor_id: None,
             bg_image_cache: std::collections::BTreeMap::new(),
             font_face_lookup: FontFaceLookup::new(),
+            fetcher: std::sync::Arc::new(crate::url_fetcher::DefaultFetcher),
         }
     }
 
@@ -1107,19 +1143,49 @@ impl<'a> HtmlRenderer<'a> {
                     return;
                 }
 
+                // Images. Handled before the generic `display: inline-block`
+                // path because an `<img style="display: inline-block">` would
+                // otherwise be treated as a (text-only) inline-block atom
+                // and silently dropped — `push_inline_block` flattens the
+                // subtree to text, and `<img>` has none. We route to the
+                // image emitter directly so the bitmap actually paints.
+                if tag == "img" {
+                    self.flush();
+                    self.build_and_push_image(handle, merged_style.as_ref());
+                    return;
+                }
+
                 // display: inline-block — collect the subtree's text as a
                 // single unbreakable atom with a fixed width and optional
                 // background/border. This is the minimal-but-real form:
                 // inline-blocks flow inline, own their background and
                 // border, and never split across lines.
+                //
+                // `<img>` is excluded: it has its own dedicated handler
+                // (`build_and_push_image`, below) which loads the bitmap
+                // through the URL fetcher and resolves intrinsic /
+                // declared dimensions. Falling into the generic
+                // inline-block atom path here would flatten the void
+                // element to empty text and silently drop the image —
+                // the bug behind the COBRA cover-page logo never
+                // reaching the fetcher.
                 if let Some(ref style) = merged_style
                     && style.display == Some(css::DisplayValue::InlineBlock)
+                    && tag != "img"
                 {
                     let parent = self.inherit_stack.last().cloned().unwrap_or_default();
                     let inherited = parent.inherit_into(merged_style.as_ref());
                     self.push_inline_block(handle, &inherited, style, None);
                     return;
                 }
+
+                // Flush any pending inline text BEFORE this element's
+                // style joins the inherit stack — otherwise text that
+                // accumulated in the parent's flow (e.g. "before " in
+                // `<p>before <a>link</a></p>`) would inherit this
+                // element's color via the cascade, which leaks the
+                // UA-default `<a>` blue back onto the surrounding text.
+                self.flush_run();
 
                 // Push inherited style for this element's subtree
                 let parent = self.inherit_stack.last().cloned().unwrap_or_default();
@@ -1130,14 +1196,6 @@ impl<'a> HtmlRenderer<'a> {
                 if tag == "table" {
                     self.flush();
                     self.build_and_push_table(handle, merged_style.as_ref());
-                    self.inherit_stack.pop();
-                    return;
-                }
-
-                // Images
-                if tag == "img" {
-                    self.flush();
-                    self.build_and_push_image(handle, merged_style.as_ref());
                     self.inherit_stack.pop();
                     return;
                 }
@@ -1192,11 +1250,32 @@ impl<'a> HtmlRenderer<'a> {
             };
             let style_override = inline_style.as_ref().and_then(|s| s.list_style_type);
             let position_override = inline_style.as_ref().and_then(|s| s.list_style_position);
+            // `<ul>`/`<ol>` is not in `CONTAINER_ELEMENTS` (it has its
+            // own bullet/numbering paint path), so its inline `padding`
+            // and `background-color` would otherwise be dropped on the
+            // floor. Capture them onto the list entry instead — child
+            // `<li>` flushes consult the entry to extend their indent
+            // and paint a per-item background stripe in the list's
+            // colour. No new container box is introduced; the cascade
+            // and box model for `<li>` itself stay unchanged.
+            let ctx = self.length_context();
+            let extra_padding_left = inline_style
+                .as_ref()
+                .and_then(|s| s.padding_left)
+                .map_or(0.0, |len| len.resolve_ctx(&ctx));
+            let extra_padding_right = inline_style
+                .as_ref()
+                .and_then(|s| s.padding_right)
+                .map_or(0.0, |len| len.resolve_ctx(&ctx));
+            let background_color = inline_style.as_ref().and_then(|s| s.background_color);
             self.list_stack.push(ListEntry {
                 list_type,
                 counter: 0,
                 style_override,
                 position_override,
+                extra_padding_left,
+                extra_padding_right,
+                background_color,
             });
         } else if tag == "li" {
             self.flush();
@@ -1533,7 +1612,14 @@ impl<'a> HtmlRenderer<'a> {
         if tag == Some("li") {
             if let Some(entry) = self.list_stack.last() {
                 let depth = self.list_stack.len() - 1;
-                let padding_left = (depth as f32 + 1.0) * LIST_INDENT;
+                // Per CSS, the bullet sits inside the `<li>`'s box, which
+                // sits inside the `<ul>`'s padding box. We capture the
+                // `<ul>`'s `padding-left` onto the list entry so each
+                // child `<li>` adds it to its own indent — without this,
+                // an author-set `padding-left: 2cm` on `<ul>` is silently
+                // dropped because `<ul>` is rendered as a list rather
+                // than a generic container.
+                let padding_left = (depth as f32 + 1.0) * LIST_INDENT + entry.extra_padding_left;
 
                 // Resolve list-style-type: entry override → inherited → default
                 let inherited_lst = self.inherit_stack.last().and_then(|s| s.list_style_type);
@@ -1549,11 +1635,14 @@ impl<'a> HtmlRenderer<'a> {
                     }
                 });
 
-                // Built-in PDF fonts use WinAnsi encoding, which has limited
-                // Unicode support. Use ASCII-safe marker glyphs.
+                // Built-in PDF fonts use WinAnsi encoding. Disc maps
+                // to the bullet glyph (U+2022) which transcodes to
+                // WinAnsi byte 0x95; Circle and Square stay ASCII
+                // because their canonical glyphs (◦ U+25E6, ■ U+25A0)
+                // are outside WinAnsi.
                 let marker_text = match resolved_lst {
                     css::ListStyleType::None => String::new(),
-                    css::ListStyleType::Disc => "*".to_string(),
+                    css::ListStyleType::Disc => "\u{2022}".to_string(),
                     css::ListStyleType::Circle => "o".to_string(),
                     css::ListStyleType::Square => "#".to_string(),
                     css::ListStyleType::Decimal => format!("{}.", entry.counter),
@@ -1590,11 +1679,16 @@ impl<'a> HtmlRenderer<'a> {
 
                 let mut list_block_style = BlockStyle {
                     padding_left,
+                    padding_right: entry.extra_padding_right,
+                    background_color: entry.background_color,
                     list_style_position: resolved_pos,
                     ..BlockStyle::default()
                 };
 
-                // Apply CSS block properties from li's inline style
+                // Apply CSS block properties from li's inline style.
+                // Author CSS on the `<li>` itself still wins — this
+                // pre-fill only supplies the `<ul>` parent's geometry
+                // and background as a default for unset `<li>` props.
                 self.apply_block_css(&mut list_block_style);
 
                 self.layout.push_paragraph(Paragraph {
@@ -1625,6 +1719,26 @@ impl<'a> HtmlRenderer<'a> {
 
         // Apply CSS block properties
         self.apply_block_css(&mut block_style);
+        // When `flush()` runs for an anonymous wrapper inside a
+        // container (e.g. text/inline-block atoms appearing before
+        // the container's first block-level child), the container's
+        // CSS lives in `self.block_style` and got copied into
+        // `block_style` above. Most duplication is benign — margin
+        // collapse is idempotent on max, and width has only one
+        // sensible interpretation — but `height` is not: applying
+        // the container's `height: 11in` to the wrapper paragraph
+        // reserves a full page of vertical space and pushes every
+        // following block to the next page. The container's own
+        // ContainerStart sentinel carries the height (enforced in
+        // `exit_container_node`), so the wrapper should sit at its
+        // natural intrinsic height instead.
+        if let Some(t) = tag
+            && CONTAINER_ELEMENTS.contains(&t)
+        {
+            block_style.height = None;
+            block_style.min_height = None;
+            block_style.max_height = None;
+        }
 
         let paragraph_tag = tag.and_then(static_paragraph_tag);
 
@@ -1683,6 +1797,13 @@ impl<'a> HtmlRenderer<'a> {
         let border_collapse = table_style
             .and_then(|s| s.border_collapse)
             .unwrap_or_default();
+        let table_layout = table_style.and_then(|s| s.table_layout).unwrap_or_default();
+
+        // Walk the table's <colgroup> / <col> children for per-column
+        // styles. `None` ≡ no <colgroup> declared (fall through to the
+        // intrinsic width algorithm); `Some(empty)` is treated the same.
+        let cs = extract_col_styles(table_handle);
+        let col_styles = if cs.is_empty() { None } else { Some(cs) };
 
         let table = Table {
             rows,
@@ -1691,6 +1812,8 @@ impl<'a> HtmlRenderer<'a> {
             default_line_height,
             caption,
             border_collapse,
+            col_styles,
+            table_layout,
         };
         self.layout.push_table(table);
     }
@@ -1792,7 +1915,7 @@ impl<'a> HtmlRenderer<'a> {
         let bg = style.background_color;
         let border = style.border_width.map(|bw| {
             let w = bw.resolve_ctx(&ctx);
-            let c = style.border_color.unwrap_or((0.0, 0.0, 0.0));
+            let c = style.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0));
             (w, c)
         });
 
@@ -1822,14 +1945,14 @@ impl<'a> HtmlRenderer<'a> {
             return;
         };
 
-        // Resolve path relative to base_dir if given, else CWD
-        let path = if let Some(base) = &self.base_dir {
-            base.join(&src)
-        } else {
-            std::path::PathBuf::from(&src)
-        };
-
-        let img_data = match crate::image::load_from_path(&path) {
+        // Route through the pluggable URL fetcher so HTTP(S) URLs work
+        // when the `http-fetch` feature is enabled. Bare relative paths
+        // resolve against `base_dir` inside the fetcher.
+        let img_data = match crate::image::load_from_source(
+            &src,
+            self.base_dir.as_deref(),
+            self.fetcher.as_ref(),
+        ) {
             Ok(data) => data,
             Err(e) => {
                 self.warnings.push(format!("image {src}: {e}"));
@@ -1895,6 +2018,25 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(len) = s.margin_left {
                 style.margin_left = len.resolve_ctx(&ctx);
             }
+            // Position info is consumed at paint time by `render_image`
+            // for absolute / fixed images and to apply relative offsets.
+            // Percent values resolve against the page content width here
+            // (the same simplification used for block elements).
+            if let Some(pos) = s.position {
+                style.position = pos;
+            }
+            if let Some(len) = s.top {
+                style.position_top = Some(len.resolve_ctx(&ctx));
+            }
+            if let Some(len) = s.left {
+                style.position_left = Some(len.resolve_ctx(&ctx));
+            }
+            if let Some(len) = s.right {
+                style.position_right = Some(len.resolve_ctx(&ctx));
+            }
+            if let Some(len) = s.bottom {
+                style.position_bottom = Some(len.resolve_ctx(&ctx));
+            }
         }
 
         self.layout.push_image(ImageBlock {
@@ -1919,15 +2061,24 @@ impl<'a> HtmlRenderer<'a> {
     /// the right reference for top-level block children; nested blocks
     /// with a narrower parent currently see the same value (a known
     /// limitation addressed when we add real parent-chain tracking).
+    /// `container_height` defaults to the page's content height, which
+    /// is the initial containing block's height per CSS 2.1 §10.1 — so
+    /// `height: 100%` on a top-level block resolves to the full content
+    /// area. Nested children with an `auto` parent height fall back to
+    /// the spec's "percent of auto = auto" rule once we plumb a real
+    /// parent height through.
     fn length_context(&self) -> css::LengthContext {
         let container =
             (self.layout.page_width - self.layout.margin_left - self.layout.margin_right).max(0.0);
+        let container_height =
+            (self.layout.page_height - self.layout.margin_top - self.layout.margin_bottom).max(0.0);
         css::LengthContext {
             em: self.resolve_em_base(),
             rem: css::LengthContext::DEFAULT_EM,
             vw: self.layout.page_width,
             vh: self.layout.page_height,
             container,
+            container_height: Some(container_height),
         }
     }
 
@@ -2032,20 +2183,26 @@ impl<'a> HtmlRenderer<'a> {
             if let Some(len) = style.width {
                 block_style.width = Some(resolve(len));
             }
-            if let Some(len) = style.height {
-                block_style.height = Some(resolve(len));
+            if let Some(len) = style.height
+                && let Some(v) = len.resolve_height_ctx(&ctx)
+            {
+                block_style.height = Some(v);
             }
             if let Some(len) = style.min_width {
                 block_style.min_width = Some(resolve(len));
             }
-            if let Some(len) = style.min_height {
-                block_style.min_height = Some(resolve(len));
+            if let Some(len) = style.min_height
+                && let Some(v) = len.resolve_height_ctx(&ctx)
+            {
+                block_style.min_height = Some(v);
             }
             if let Some(len) = style.max_width {
                 block_style.max_width = Some(resolve(len));
             }
-            if let Some(len) = style.max_height {
-                block_style.max_height = Some(resolve(len));
+            if let Some(len) = style.max_height
+                && let Some(v) = len.resolve_height_ctx(&ctx)
+            {
+                block_style.max_height = Some(v);
             }
             if let Some(len) = style.letter_spacing {
                 block_style.letter_spacing = resolve(len);
@@ -2102,12 +2259,11 @@ impl<'a> HtmlRenderer<'a> {
                 let entry = if let Some(cached) = cached {
                     Some(cached)
                 } else {
-                    let path = if let Some(base) = &self.base_dir {
-                        base.join(url)
-                    } else {
-                        std::path::PathBuf::from(url)
-                    };
-                    match crate::image::load_from_path(&path) {
+                    match crate::image::load_from_source(
+                        url,
+                        self.base_dir.as_deref(),
+                        self.fetcher.as_ref(),
+                    ) {
                         Ok(img_data) => {
                             let intrinsic_width = img_data.width as f32;
                             let intrinsic_height = img_data.height as f32;
@@ -2181,6 +2337,159 @@ impl<'a> HtmlRenderer<'a> {
             }
         }
     }
+}
+
+/// Walk a `<table>`'s direct `<colgroup>` / `<col>` descendants in
+/// document order and produce one `ColStyle` per column.
+///
+/// Per CSS 2.1 §17.3 the column track is built from:
+///
+///  - bare `<col>` children of the `<table>`, and
+///  - `<col>` children inside `<colgroup>` (an empty `<colgroup>` with a
+///    `span` attribute contributes that many default-styled columns).
+///
+/// `<col span="N">` replicates the same `ColStyle` N times so the layout
+/// pass sees one entry per logical column. Column index is consumed by
+/// `layout_table` to look up width hints / backgrounds / borders.
+///
+/// `<col>` inherits properties from its enclosing `<colgroup>` per the
+/// usual CSS inheritance rules — we apply the colgroup's parsed
+/// properties first, then let the `<col>`'s inline style override.
+pub(crate) fn extract_col_styles(table_handle: &Handle) -> Vec<css::ColStyle> {
+    fn col_element_span(handle: &Handle) -> u32 {
+        let NodeData::Element { attrs, .. } = &handle.data else {
+            return 1;
+        };
+        let attrs = attrs.borrow();
+        for attr in attrs.iter() {
+            if attr.name.local.as_ref() == "span"
+                && let Ok(n) = attr.value.trim().parse::<u32>()
+                && n >= 1
+            {
+                return n;
+            }
+        }
+        1
+    }
+
+    fn col_style_for(handle: &Handle, parent: Option<&css::ColStyle>) -> css::ColStyle {
+        let mut style = parent.cloned().unwrap_or_default();
+        // Legacy HTML `width` attribute on <col> / <colgroup>. Recognised
+        // only when there is no inline `style` width — inline style wins
+        // per HTML5 §15.3.6.
+        if let NodeData::Element { attrs, .. } = &handle.data {
+            let attrs = attrs.borrow();
+            for attr in attrs.iter() {
+                if attr.name.local.as_ref() == "width"
+                    && let Some(len) = parse_legacy_width_attr(&attr.value)
+                {
+                    style.width = Some(len);
+                }
+            }
+        }
+        if let Some(inline) = extract_style_attr(handle) {
+            if let Some(w) = inline.width {
+                style.width = Some(w);
+            }
+            if let Some(bg) = inline.background_color {
+                // <col background-color> alpha is a v1 cut: column
+                // backgrounds paint opaque-only for now. Drop the alpha
+                // channel coming out of `parse_css_color`.
+                style.background_color = Some(css::rgb_only(bg));
+            }
+            // border-* longhands are folded into a single ColBorder if any
+            // of width/color/style are non-default. Use the fallback length
+            // context so em/rem/vw/vh widths don't collapse to zero (a 0
+            // em_base would zero them out; LengthContext::fallback supplies
+            // the spec-default 12pt em + Letter viewport).
+            let bw = inline
+                .border_width
+                .map(|len| len.resolve_ctx(&css::LengthContext::fallback()));
+            if bw.is_some() || inline.border_color.is_some() || inline.border_style.is_some() {
+                let prev = style.border;
+                style.border = Some(css::ColBorder {
+                    width: bw.unwrap_or_else(|| prev.map_or(1.0, |b| b.width)),
+                    color: inline
+                        .border_color
+                        .map(css::rgb_only)
+                        .or(prev.map(|b| b.color))
+                        .unwrap_or((0.0, 0.0, 0.0)),
+                    style: inline
+                        .border_style
+                        .or(prev.map(|b| b.style))
+                        .unwrap_or(css::BorderStyle::Solid),
+                });
+            }
+        }
+        style
+    }
+
+    let mut out: Vec<css::ColStyle> = Vec::new();
+    let NodeData::Element { name, .. } = &table_handle.data else {
+        return out;
+    };
+    if name.local.as_ref() != "table" {
+        return out;
+    }
+
+    for child in table_handle.children.borrow().iter() {
+        let NodeData::Element { name: cname, .. } = &child.data else {
+            continue;
+        };
+        let tag = cname.local.as_ref();
+        if tag == "colgroup" {
+            let group_style = col_style_for(child, None);
+            let cg_children = child.children.borrow();
+            let mut had_cols = false;
+            for col in cg_children.iter() {
+                if let NodeData::Element { name: gn, .. } = &col.data
+                    && gn.local.as_ref() == "col"
+                {
+                    had_cols = true;
+                    let cs = col_style_for(col, Some(&group_style));
+                    let span = col_element_span(col);
+                    for _ in 0..span {
+                        out.push(cs.clone());
+                    }
+                }
+            }
+            // An empty <colgroup> with a `span` produces that many
+            // default-styled columns inheriting only the group's style.
+            if !had_cols {
+                let span = col_element_span(child);
+                for _ in 0..span {
+                    out.push(group_style.clone());
+                }
+            }
+        } else if tag == "col" {
+            // Bare <col> child of <table> (HTML5 allows this — the table
+            // builds an anonymous colgroup around the run).
+            let cs = col_style_for(child, None);
+            let span = col_element_span(child);
+            for _ in 0..span {
+                out.push(cs.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Parse the legacy HTML `width` attribute (e.g. `width="30%"` or
+/// `width="100"`). Bare numbers default to CSS pixels per HTML5 §15.3.5.
+fn parse_legacy_width_attr(value: &str) -> Option<css::CssLength> {
+    let v = value.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if let Some(num) = v.strip_suffix('%')
+        && let Ok(n) = num.trim().parse::<f32>()
+    {
+        return Some(css::CssLength::Pct(n));
+    }
+    if let Ok(n) = v.parse::<f32>() {
+        return Some(css::CssLength::Px(n));
+    }
+    None
 }
 
 /// Recursively walk a `<table>` subtree and collect `TableRow`s from any
@@ -2290,7 +2599,7 @@ fn build_table_cell(
         padding_left: 6.0,
         // Default cell border so tables look like tables
         border_width: 1.0,
-        border_color: Some((0.6, 0.6, 0.6)),
+        border_color: Some((0.6, 0.6, 0.6, 1.0)),
         border_style: Some(css::BorderStyle::Solid),
         text_align: if is_header {
             crate::layout::TextAlign::Center
@@ -2370,7 +2679,7 @@ fn collect_cell_text(
     runs: &mut Vec<TextRun>,
     font_name: &str,
     font_size: f32,
-    color: Option<(f32, f32, f32)>,
+    color: Option<(f32, f32, f32, f32)>,
 ) {
     match &handle.data {
         NodeData::Text { contents } => {
@@ -2420,8 +2729,14 @@ fn collect_cell_text(
 
 /// Result of rendering a DOM: page style from `@page`, plus any non-fatal
 /// warnings produced along the way (e.g. image load failures).
+///
+/// `page_rules` is the list of all `@page` rules in source order; the
+/// PDF emitter walks them with `Stylesheet::resolve_page_style` to
+/// build the per-page style at each page-break boundary, honoring the
+/// CSS Paged Media L3 §4.4 specificity tuple.
 pub struct RenderOutcome {
     pub page_style: css::PageStyle,
+    pub page_rules: Vec<css::PageRule>,
     pub warnings: Vec<String>,
 }
 
@@ -2430,17 +2745,27 @@ pub fn render_dom_to_layout(
     document: &Handle,
     layout: &mut LayoutInner,
     base_dir: Option<&std::path::Path>,
+    fetcher: std::sync::Arc<dyn crate::url_fetcher::UrlFetcher>,
 ) -> RenderOutcome {
-    let css_text = extract_style_blocks(document);
+    let author_css = extract_style_blocks(document);
+    // Prepend the user-agent stylesheet (CSS Cascading 4 §6.2: UA
+    // origin is consulted before author origin). Concatenating into a
+    // single parse keeps the existing cascade engine simple — UA rules
+    // end up earlier in source order, so author rules at equal
+    // specificity win the source-order tiebreak in `match_rules_for`.
+    let mut css_text = String::with_capacity(css::USER_AGENT_STYLESHEET.len() + author_css.len());
+    css_text.push_str(css::USER_AGENT_STYLESHEET);
+    css_text.push_str(&author_css);
     let stylesheet = css::parse_stylesheet(&css_text);
     let page_style = stylesheet.page_style.clone();
+    let page_rules = stylesheet.page_rules.clone();
 
     // Build the @font-face runtime: parse each declared face, attempt
     // its src list, extract measurement metrics, and stash the lookup on
     // the renderer plus the bytes on `LayoutInner` so the embed pipeline
     // picks them up at PDF write time.
     let (registered, lookup, mut face_warnings) =
-        font_face::build_font_face_registry(&stylesheet.font_faces, base_dir);
+        font_face::build_font_face_registry(&stylesheet.font_faces, base_dir, fetcher.as_ref());
     let mut metrics_map: std::collections::BTreeMap<
         String,
         crate::font_metrics::CustomFontMetrics,
@@ -2459,18 +2784,33 @@ pub fn render_dom_to_layout(
             surviving_lookup.retain(|_, name| name != &rf.name);
         }
     }
+    // WS-1B: stash measurement metrics for the bundled fallback face
+    // under the `__pdfun_fallback` key so layout's `measure_str` can
+    // size text routed onto the fallback (either via map_css_font_family
+    // or via show_text_for's split-and-promote). Lazy: only populate
+    // when the bundled feature is on; layout falls back to zero-width
+    // for individual fallback chunks otherwise.
+    #[cfg(feature = "bundled-fallback-font")]
+    {
+        if let Ok(m) = crate::font_metrics::extract_custom_font_metrics(crate::FALLBACK_FONT_BYTES)
+        {
+            metrics_map.insert(crate::FALLBACK_FONT_NAME.to_string(), m);
+        }
+    }
     crate::font_metrics::set_font_face_metrics(metrics_map);
     layout.font_face_registered = surviving;
 
     let mut renderer = HtmlRenderer::new(layout, stylesheet);
     renderer.base_dir = base_dir.map(std::path::Path::to_path_buf);
     renderer.font_face_lookup = surviving_lookup;
+    renderer.fetcher = fetcher;
     renderer.walk_node(document, 0, 0, 1, &[]);
     renderer.flush();
     let mut warnings = face_warnings;
     warnings.append(&mut renderer.warnings);
     RenderOutcome {
         page_style,
+        page_rules,
         warnings,
     }
 }
@@ -2507,4 +2847,88 @@ pub fn extract_title(handle: &Handle) -> Option<String> {
         _ => {}
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use markup5ever_rcdom::RcDom;
+
+    /// Walk an `RcDom` and return the first `<table>` found, depth-first.
+    fn first_table(handle: &Handle) -> Option<Handle> {
+        if let NodeData::Element { name, .. } = &handle.data
+            && name.local.as_ref() == "table"
+        {
+            return Some(handle.clone());
+        }
+        for child in handle.children.borrow().iter() {
+            if let Some(t) = first_table(child) {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    /// Parse `html` into an `RcDom` and run `f` against the first `<table>`
+    /// handle. Keeps the `RcDom` alive across the closure since
+    /// `markup5ever_rcdom`'s `Drop` impl clears children to break `Rc`
+    /// cycles — returning the bare `Handle` after `parse_html` would
+    /// hand back a node whose children were torn down.
+    fn with_first_table<F: FnOnce(&Handle)>(html: &str, f: F) {
+        let dom: RcDom = crate::dom::parse_html(html);
+        let table = first_table(&dom.document).expect("expected a <table> element");
+        f(&table);
+        drop(dom);
+    }
+
+    #[test]
+    fn extracts_col_styles_from_colgroup() {
+        let html = "<table><colgroup>\
+            <col style=\"width:30%\">\
+            <col style=\"width:70%\">\
+            </colgroup><tr><td>a</td><td>b</td></tr></table>";
+        with_first_table(html, |table| {
+            let cols = extract_col_styles(table);
+            assert_eq!(cols.len(), 2);
+            assert!(
+                matches!(cols[0].width, Some(css::CssLength::Pct(v)) if (v - 30.0).abs() < 1e-3)
+            );
+            assert!(
+                matches!(cols[1].width, Some(css::CssLength::Pct(v)) if (v - 70.0).abs() < 1e-3)
+            );
+        });
+    }
+
+    #[test]
+    fn missing_colgroup_produces_default_styles() {
+        // A table without a <colgroup>/<col> declaration produces an empty
+        // Vec<ColStyle> — the layout pass falls through to the existing
+        // intrinsic algorithm.
+        let html = "<table><tr><td>a</td><td>b</td></tr></table>";
+        with_first_table(html, |table| {
+            let cols = extract_col_styles(table);
+            assert!(
+                cols.is_empty(),
+                "expected zero col styles when no <colgroup>; got {} entries",
+                cols.len()
+            );
+        });
+    }
+
+    #[test]
+    fn col_span_replicates_style() {
+        // `background-color` (longhand) — the `background` shorthand isn't
+        // parsed by `parse_inline_style` yet (a separate workstream).
+        let html = "<table><colgroup>\
+            <col span=\"3\" style=\"width:10%; background-color: yellow\">\
+            </colgroup><tr><td>a</td><td>b</td><td>c</td></tr></table>";
+        with_first_table(html, |table| {
+            let cols = extract_col_styles(table);
+            assert_eq!(cols.len(), 3);
+            for c in &cols {
+                assert!(matches!(c.width, Some(css::CssLength::Pct(v)) if (v - 10.0).abs() < 1e-3));
+                assert_eq!(c.background_color, Some((1.0, 1.0, 0.0)));
+            }
+        });
+    }
 }

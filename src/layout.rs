@@ -8,16 +8,81 @@ use crate::css;
 use crate::font_metrics;
 use crate::{BUILTIN_FONTS, PageContent, PdfDocument, PdfOp, RegisteredFont};
 
-/// Emit the right "show text" operator for a font: built-in fonts use
-/// `Tj` with a `(WinAnsi)` literal string, but `@font-face` faces are
-/// embedded as Type0 / `CIDFontType2` / Identity-H — for those we have
-/// to emit a `Vec<char>` that the page writer remaps into 16-bit glyph
-/// IDs.
-fn show_text_for(font_name: &str, text: String) -> PdfOp {
-    if font_name.starts_with("Custom-") {
-        PdfOp::ShowGlyphs(text.chars().collect())
-    } else {
-        PdfOp::ShowText(text)
+/// Push the right sequence of ops to render `text` at `font_size` using
+/// `font_name` as the active face. For embedded faces (`Custom-*`,
+/// `__pdfun_fallback`) this is a single `ShowGlyphs`. For built-in
+/// (Type1, `WinAnsi`-encoded) faces, runs whose every codepoint is in the
+/// `WinAnsi` repertoire emit a `ShowText` with the transcoded bytes.
+///
+/// Mixed runs (e.g. `"Café ☑ done"` on Helvetica) are split via
+/// [`crate::split_at_non_winansi`] and the non-`WinAnsi` chunks promoted
+/// onto the bundled `__pdfun_fallback` Identity-H face — emitting an
+/// in-line `Tf` switch + `ShowGlyphs` then switching back. WS-1B
+/// guarantees the surrounding `BeginText`/`EndText` brackets stay
+/// intact; PDF allows `Tf` inside a text object.
+///
+/// When the `bundled-fallback-font` feature is disabled, non-`WinAnsi`
+/// chunks fall back to per-char '?' substitution (the WS-1A bound).
+fn push_show_text(page: &mut PageContent, font_name: &str, font_size: f32, text: &str) {
+    if crate::is_embedded_font(font_name) {
+        page.operations
+            .push(PdfOp::ShowGlyphs(text.chars().collect()));
+        return;
+    }
+    // Built-in path: split into alternating WinAnsi / non-WinAnsi
+    // chunks. A pure-WinAnsi run (the common case) collapses into a
+    // single chunk and emits exactly one `ShowText`.
+    let chunks = crate::split_at_non_winansi(text);
+    if chunks.is_empty() {
+        return;
+    }
+    let only_winansi = chunks
+        .iter()
+        .all(|c| matches!(c, crate::RunChunk::WinAnsi(_)));
+    if only_winansi {
+        // Hot path: avoid re-walking `text` — go straight through the
+        // WS-1A transcoder. `transcode_with_fallback` is idempotent
+        // here because every char is mappable.
+        page.operations
+            .push(PdfOp::ShowText(crate::transcode_with_fallback(text)));
+        return;
+    }
+    // Mixed run. Lazy-register the fallback name on this page's
+    // `fonts_used` so the PDF resource dict carries it; the actual
+    // `RegisteredFont` entry is populated centrally in
+    // `LayoutInner::finish` once we know any page hit this path.
+    let fallback = crate::FALLBACK_FONT_NAME;
+    let fallback_available = cfg!(feature = "bundled-fallback-font");
+    if fallback_available && !page.fonts_used.iter().any(|n| n == fallback) {
+        page.fonts_used.push(fallback.to_string());
+    }
+    for chunk in chunks {
+        match chunk {
+            crate::RunChunk::WinAnsi(s) => {
+                page.operations
+                    .push(PdfOp::ShowText(crate::transcode_with_fallback(s)));
+            }
+            crate::RunChunk::NonWinAnsi(s) => {
+                if fallback_available {
+                    // Switch to the fallback face for this chunk, then
+                    // switch back. PDF §9.4.3 allows `Tf` inside `BT…ET`.
+                    page.operations.push(PdfOp::SetFont {
+                        name: fallback.to_string(),
+                        size: font_size,
+                    });
+                    page.operations.push(PdfOp::ShowGlyphs(s.chars().collect()));
+                    page.operations.push(PdfOp::SetFont {
+                        name: font_name.to_string(),
+                        size: font_size,
+                    });
+                } else {
+                    // Feature off: bound the damage as WS-1A did —
+                    // `transcode_with_fallback` substitutes '?' per char.
+                    page.operations
+                        .push(PdfOp::ShowText(crate::transcode_with_fallback(s)));
+                }
+            }
+        }
     }
 }
 
@@ -77,8 +142,12 @@ pub enum TextAlign {
 
 #[derive(Clone)]
 pub struct BlockStyle {
-    pub color: Option<(f32, f32, f32)>,
-    pub background_color: Option<(f32, f32, f32)>,
+    /// Foreground color in RGBA. The alpha channel composes with
+    /// `BlockStyle::opacity` per `WS-2`'s rules: leaf blocks multiply
+    /// `opacity * color_alpha`; group blocks render through a Form
+    /// `XObject` `/Group` and the leaves keep their own α.
+    pub color: Option<(f32, f32, f32, f32)>,
+    pub background_color: Option<(f32, f32, f32, f32)>,
     pub margin_top: f32,
     pub margin_right: f32,
     pub margin_bottom: f32,
@@ -88,7 +157,7 @@ pub struct BlockStyle {
     pub padding_bottom: f32,
     pub padding_left: f32,
     pub border_width: f32,
-    pub border_color: Option<(f32, f32, f32)>,
+    pub border_color: Option<(f32, f32, f32, f32)>,
     pub border_style: Option<css::BorderStyle>,
     pub text_align: TextAlign,
     pub page_break_before: Option<css::PageBreak>,
@@ -257,6 +326,40 @@ impl Default for BlockStyle {
     }
 }
 
+/// Resolve a block's outer (padding-box) height after applying CSS
+/// `height`, `min-height`, and `max-height`. `natural` is the height
+/// the block would occupy with `height: auto` — i.e.
+/// `padding_top + content_height + padding_bottom`.
+///
+/// When `height` is set it replaces the content portion. With
+/// `box-sizing: content-box` (CSS default) the resolved padding-box
+/// height is `padding_top + height + padding_bottom`; with
+/// `border-box`, `height` already covers padding and border, so the
+/// padding-box height is `height - 2 * border_width`. `min-height`
+/// extends and `max-height` clamps the result, with `max-height`
+/// winning over `min-height` when they conflict (CSS 2.1 §10.7).
+pub(crate) fn resolve_box_height(style: &BlockStyle, natural: f32) -> f32 {
+    let mut box_height = if let Some(h) = style.height {
+        match style.box_sizing {
+            css::BoxSizing::ContentBox => style.padding_top + h + style.padding_bottom,
+            css::BoxSizing::BorderBox => (h - 2.0 * style.border_width).max(0.0),
+        }
+    } else {
+        natural
+    };
+    if let Some(min_h) = style.min_height
+        && box_height < min_h
+    {
+        box_height = min_h;
+    }
+    if let Some(max_h) = style.max_height
+        && box_height > max_h
+    {
+        box_height = max_h;
+    }
+    box_height
+}
+
 impl BlockStyle {
     fn has_any_styling(&self) -> bool {
         self.color.is_some()
@@ -289,8 +392,9 @@ pub struct TextRun {
     pub font_name: String,
     #[pyo3(get)]
     pub font_size: f32,
-    #[pyo3(get)]
-    pub color: Option<(f32, f32, f32)>,
+    /// RGBA. The Python constructor accepts a 3-tuple `(r, g, b)` for
+    /// backward compatibility (alpha defaults to 1.0).
+    pub color: Option<(f32, f32, f32, f32)>,
     pub text_decoration: Option<css::TextDecoration>,
     pub link_url: Option<String>,
     /// Baseline offset in points. Positive raises the glyphs (superscript),
@@ -305,9 +409,9 @@ pub struct TextRun {
     pub inline_block_width: Option<f32>,
     /// Background color for an inline-block atom — draws a filled rect
     /// behind the text.
-    pub inline_block_bg: Option<(f32, f32, f32)>,
-    /// Stroked border `(width_pt, (r, g, b))` for an inline-block atom.
-    pub inline_block_border: Option<(f32, (f32, f32, f32))>,
+    pub inline_block_bg: Option<(f32, f32, f32, f32)>,
+    /// Stroked border `(width_pt, (r, g, b, a))` for an inline-block atom.
+    pub inline_block_border: Option<(f32, (f32, f32, f32, f32))>,
     /// Horizontal padding (in points) added inside an inline-block atom
     /// — used when centering the text inside its fixed width.
     pub inline_block_padding_x: f32,
@@ -322,9 +426,20 @@ impl TextRun {
             text,
             font_name: font_name.to_string(),
             font_size: font_size as f32,
-            color: color.map(rgb_to_f32),
+            color: color.map(|c| {
+                let (r, g, b) = rgb_to_f32(c);
+                (r, g, b, 1.0)
+            }),
             ..Default::default()
         }
+    }
+
+    /// Read-only Python view of the run's foreground color as a
+    /// `(r, g, b)` tuple. Drops the internal alpha channel for back-compat
+    /// with the existing Python API.
+    #[getter]
+    fn color(&self) -> Option<(f32, f32, f32)> {
+        self.color.map(|(r, g, b, _)| (r, g, b))
     }
 }
 
@@ -378,6 +493,21 @@ pub struct Table {
     pub default_line_height: Option<f32>,
     pub caption: Option<Box<Paragraph>>,
     pub border_collapse: css::BorderCollapseValue,
+    /// Per-column style records built from `<colgroup>` / `<col>` (CSS
+    /// 2.1 §17.3). `None` when no `<colgroup>` was declared, in which
+    /// case the layout falls through to its intrinsic algorithm.
+    /// `Some(empty)` means the table had a colgroup but no columns
+    /// (treated the same as `None`).
+    pub col_styles: Option<Vec<css::ColStyle>>,
+    /// CSS `table-layout` (CSS 2.1 §17.5.2). `Auto` (default) treats
+    /// `<col width>` as a preferred-width hint bounded below by the
+    /// content's min-width; `Fixed` pins column widths to their hints.
+    // The `clippy::struct_field_names` lint flags this because the field
+    // name `table_layout` starts with the struct name `Table`. Renaming
+    // away from `table_layout` would diverge from the CSS property
+    // spelling — keep it.
+    #[allow(clippy::struct_field_names)]
+    pub table_layout: css::TableLayoutValue,
 }
 
 pub struct ImageBlock {
@@ -400,6 +530,26 @@ pub enum Block {
     ContainerStart(BlockStyle),
     /// Marks the end of a container opened by `ContainerStart`.
     ContainerEnd(BlockStyle),
+}
+
+/// One entry on the transparency-group capture stack. Pushed when
+/// entering an `opacity < 1` container so subsequent child draw ops
+/// are diverted into a new `Vec<PdfOp>` instead of the page's main
+/// stream. Popped on exit, at which point the captured ops are wrapped
+/// into a Form `XObject` (Transparency Group) and the page emits a
+/// `gs + Do` pair to apply the parent's α and invoke the group.
+struct TransparencyCapture {
+    opacity: f32,
+    /// Saved page operations Vec from before the capture began —
+    /// restored on exit (with a `Do` op appended for the captured
+    /// `XObject`).
+    saved_ops: Vec<PdfOp>,
+    /// Saved `images_used` snapshot — restored on exit; the captured
+    /// `XObject` takes ownership of any image refs added in between.
+    saved_images_used: Vec<usize>,
+    /// y-coordinate of the page cursor when the capture began. Used
+    /// to compute the Form `XObject`'s `/BBox`.
+    capture_start_y: f32,
 }
 
 /// Mutable state threaded through the recursive box-tree walker in
@@ -432,6 +582,18 @@ struct RenderState {
     /// area shifted and narrowed to avoid the float. Floats drop out of
     /// this list when the cursor advances past their bottom.
     active_floats: Vec<ActiveFloat>,
+    /// Stack of currently-open transparency-group captures. A non-empty
+    /// stack means the current page's `operations` Vec is the *innermost*
+    /// capture's ops, NOT the real page stream. Pop on container exit
+    /// to fold the captured ops into a `FormXObjectData`.
+    transparency_captures: Vec<TransparencyCapture>,
+    /// Stack of `(start_cursor_y, start_page_count)` snapshots, one per
+    /// open container. Used by `exit_container_node` to enforce a
+    /// container's explicit `height`: if the container's children
+    /// consumed less vertical space than `height` and stayed on the
+    /// same page, the cursor advances by the difference so the
+    /// container reserves its full extent.
+    container_size_stack: Vec<(f32, usize)>,
 }
 
 /// A float currently affecting the layout in a block formatting context.
@@ -455,13 +617,13 @@ struct StyledWord {
     text: String,
     font_name: String,
     font_size: f32,
-    color: Option<(f32, f32, f32)>,
+    color: Option<(f32, f32, f32, f32)>,
     text_decoration: Option<css::TextDecoration>,
     link_url: Option<String>,
     baseline_shift: f32,
     inline_block_width: Option<f32>,
-    inline_block_bg: Option<(f32, f32, f32)>,
-    inline_block_border: Option<(f32, (f32, f32, f32))>,
+    inline_block_bg: Option<(f32, f32, f32, f32)>,
+    inline_block_border: Option<(f32, (f32, f32, f32, f32))>,
     inline_block_padding_x: f32,
 }
 
@@ -469,14 +631,14 @@ struct LineSegment {
     text: String,
     font_name: String,
     font_size: f32,
-    color: Option<(f32, f32, f32)>,
+    color: Option<(f32, f32, f32, f32)>,
     width: f32,
     text_decoration: Option<css::TextDecoration>,
     link_url: Option<String>,
     baseline_shift: f32,
     inline_block_width: Option<f32>,
-    inline_block_bg: Option<(f32, f32, f32)>,
-    inline_block_border: Option<(f32, (f32, f32, f32))>,
+    inline_block_bg: Option<(f32, f32, f32, f32)>,
+    inline_block_border: Option<(f32, (f32, f32, f32, f32))>,
     inline_block_padding_x: f32,
 }
 
@@ -507,6 +669,29 @@ fn collapse_margins(a: f32, b: f32) -> f32 {
 /// that the resulting collapsed advance equals `collapse(pending, curr_top)`.
 fn collapsed_top_delta(pending: f32, curr_top: f32) -> f32 {
     collapse_margins(pending, curr_top) - pending
+}
+
+/// Compute the `(dx, dy)` translation a `position: relative` box should
+/// apply to itself per CSS 2.1 § 9.4.3.
+///
+/// `dx` is `+left` if `left` is set, otherwise `-right` if `right` is set,
+/// else 0. `dy` (in PDF coords, where positive is up) is `-top` if `top` is
+/// set, otherwise `+bottom` if `bottom` is set, else 0. The percent
+/// resolution against the containing block has already happened upstream
+/// (see `html_render::length_context`) so the offsets arrive as resolved
+/// `Option<f32>` points.
+pub(crate) fn relative_offset(style: &BlockStyle) -> (f32, f32) {
+    let dx = if let Some(l) = style.position_left {
+        l
+    } else {
+        -style.position_right.unwrap_or(0.0)
+    };
+    let dy = if let Some(t) = style.position_top {
+        -t
+    } else {
+        style.position_bottom.unwrap_or(0.0)
+    };
+    (dx, dy)
 }
 
 /// Extra per-line spacing applied during wrapping. `letter_spacing` is
@@ -846,8 +1031,259 @@ fn measure_cell_intrinsic(cell: &TableCell) -> Result<(f32, f32), String> {
     Ok((min_width, max_width))
 }
 
+/// Resolve a `<col>` width hint to a point value in the context of the
+/// table's containing area. Percent hints resolve against `container`.
+/// Other length units use a fallback `LengthContext` (rem/vw/vh inside
+/// table column hints aren't yet contextual — see TODO).
+fn resolve_col_hint(hint: Option<css::CssLength>, container: f32) -> Option<f32> {
+    let len = hint?;
+    let ctx = css::LengthContext {
+        em: 12.0,
+        rem: 12.0,
+        vw: css::LengthContext::DEFAULT_VW,
+        vh: css::LengthContext::DEFAULT_VH,
+        container,
+        container_height: None,
+    };
+    Some(len.resolve_ctx(&ctx))
+}
+
+/// Resolve `<col>` width hints to per-column point values (or `None`
+/// where no hint was given). Percent hints use `container_width` as the
+/// reference. Test-only helper — production code uses `resolve_col_hint`
+/// per-column inline with the layout pass.
+#[cfg(test)]
+pub(crate) fn resolve_col_hints(
+    col_styles: &[css::ColStyle],
+    container_width: f32,
+) -> Vec<Option<f32>> {
+    col_styles
+        .iter()
+        .map(|cs| resolve_col_hint(cs.width, container_width))
+        .collect()
+}
+
+/// CSS 2.1 §17.5.2 column-width resolution.
+///
+/// Two modes:
+///
+/// - **`auto`** (default): explicit column hints raise the column's
+///   *preferred* width, but `col_min` is **left at the content
+///   minimum**. This way a long unbreakable word (a URL, a hash) in a
+///   column hinted to `width: 10%` still claims its real intrinsic
+///   minimum and never clips. Per CSS 2.1 §17.5.2.2, also preserves the
+///   invariant `col_max[i] >= col_preferred[i]`.
+/// - **`fixed`**: column widths are pinned to their hints. Cells cannot
+///   widen the column (overflow or wrap). Hint-less columns split the
+///   leftover space evenly. CSS 2.1 §17.5.2.1.
+///
+/// Percent hints exceeding 100% in `auto` mode are scaled proportionally
+/// down to fit so a malformed `[60%, 60%]` still uses the table's full
+/// area instead of overflowing — matches Blink and `WeasyPrint`.
+pub(crate) fn apply_col_hints_auto(
+    col_min: &[f32],
+    col_max: &mut [f32],
+    col_preferred: &mut [f32],
+    hints: &[Option<f32>],
+) {
+    debug_assert_eq!(col_min.len(), col_max.len());
+    debug_assert_eq!(col_min.len(), col_preferred.len());
+    debug_assert_eq!(col_min.len(), hints.len());
+    for (i, hint) in hints.iter().enumerate() {
+        // `col_preferred[i]` starts at the intrinsic max-content; an
+        // explicit hint overrides only if it's *larger* than the
+        // content's min-width — content-min is the floor either way.
+        if let Some(h) = *hint {
+            let pref = h.max(col_min[i]);
+            col_preferred[i] = pref;
+            if col_max[i] < pref {
+                col_max[i] = pref;
+            }
+        }
+    }
+}
+
+/// `table-layout: fixed` — pin column widths to hints, even-split
+/// leftover area among hint-less columns. Returns the resolved widths.
+pub(crate) fn apply_col_hints_fixed(
+    column_count: usize,
+    hints: &[Option<f32>],
+    container_width: f32,
+) -> Vec<f32> {
+    let mut widths = vec![0.0_f32; column_count];
+    let mut hinted_total = 0.0_f32;
+    let mut unhinted = 0_usize;
+    for (i, w) in widths.iter_mut().enumerate() {
+        match hints.get(i).copied().flatten() {
+            Some(h) => {
+                *w = h;
+                hinted_total += h;
+            }
+            None => unhinted += 1,
+        }
+    }
+    if unhinted > 0 {
+        let leftover = (container_width - hinted_total).max(0.0);
+        let share = leftover / unhinted as f32;
+        for (i, w) in widths.iter_mut().enumerate() {
+            if hints.get(i).copied().flatten().is_none() {
+                *w = share;
+            }
+        }
+    } else if hinted_total > container_width && hinted_total > 0.0 {
+        // Total hints overflow the container — scale proportionally
+        // so the table still fits. (CSS 2.1 §17.5.2.1 doesn't prescribe
+        // this but every UA does it.)
+        let scale = container_width / hinted_total;
+        for w in &mut widths {
+            *w *= scale;
+        }
+    }
+    widths
+}
+
+/// Pre-process auto-mode percent hints so their sum doesn't exceed
+/// `container_width`. Per Blink / `WeasyPrint`, `[60%, 60%]` resolves to
+/// `[300pt, 300pt]` of a 600pt area, not `[360, 360]` overflowing.
+/// Acts in-place on the resolved hint values.
+pub(crate) fn scale_overlong_percent_hints(hints: &mut [Option<f32>], container_width: f32) {
+    let total: f32 = hints.iter().filter_map(|h| *h).sum();
+    if total > container_width && total > 0.0 {
+        let scale = container_width / total;
+        for v in hints.iter_mut().flatten() {
+            *v *= scale;
+        }
+    }
+}
+
 fn rgb_to_f32(c: (f64, f64, f64)) -> (f32, f32, f32) {
     (c.0 as f32, c.1 as f32, c.2 as f32)
+}
+
+// ── WS-2: alpha plumbing helpers ────────────────────────────
+//
+// `parse_css_color` returns `(r, g, b, a)`. The fill / stroke `PdfOp`s
+// only carry `(r, g, b)`; the alpha channel is materialized by emitting
+// a `SetAlpha` op (an `ExtGState` `ca`/`CA` reference) immediately
+// before the color is set. These helpers keep the dozens of emission
+// sites in this file a single line: split the tuple, emit the alpha
+// gate if α < 1.0, then fall through to the existing color op.
+
+/// Split a 4-tuple RGBA color into `((r, g, b), a)`. The fill / stroke
+/// `PdfOp`s consume the `(r, g, b)` half; the alpha is fed to
+/// `push_alpha_if_translucent`.
+#[inline]
+pub(crate) fn split_rgba(c: (f32, f32, f32, f32)) -> ((f32, f32, f32), f32) {
+    ((c.0, c.1, c.2), c.3)
+}
+
+/// Drop the alpha channel of a 4-tuple color. Used at sites that don't
+/// carry alpha through the rendering pipeline (e.g. column rules,
+/// margin-box `color`, `<col>` backgrounds). Test-only today; the
+/// `css::rgb_only` variant is the cascade-side equivalent and is what
+/// production code calls. Kept here as the layout-side counterpart so
+/// future rendering paths that need to drop alpha at draw time have
+/// the seam ready.
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn rgb_only4(c: (f32, f32, f32, f32)) -> (f32, f32, f32) {
+    (c.0, c.1, c.2)
+}
+
+/// Compose a leaf paint's effective alpha as `opacity * color_alpha`.
+/// Per ISO 32000-1 §11.3.7 + CSS Compositing & Blending L1 §4 this is
+/// **only valid for leaf paints** (a box with no descendants drawn in
+/// the same pass). For an `opacity < 1` block that contains descendants,
+/// the renderer wraps the subtree in a Form `XObject` `/Group` and
+/// applies the parent opacity on the surrounding stream — see
+/// `needs_transparency_group`. Multiplying through to leaves makes
+/// overlapping translucent children show through each other incorrectly.
+///
+/// pdfun's current container path always wraps `opacity < 1` in a
+/// Transparency Group (see `enter_container_node`), so this helper is
+/// not on the runtime hot path — it stays as a documented predicate
+/// + unit-tested seam for any future leaf-fast-path optimization.
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn effective_leaf_alpha(opacity: f32, color_alpha: f32) -> f32 {
+    (opacity * color_alpha).clamp(0.0, 1.0)
+}
+
+/// Whether a block that has `opacity < 1` and `has_descendant_draws`
+/// must be rendered through a Form `XObject` Transparency Group rather
+/// than via leaf-alpha multiplication. `opacity >= 1.0` always returns
+/// `false` (no group needed); otherwise the rule is "any descendant
+/// draws -> group" so that overlapping translucent children composite
+/// correctly per CSS Compositing & Blending L1 §4.
+///
+/// Today's container code applies the group rule unconditionally for
+/// `opacity < 1` containers — `has_descendant_draws == false` is a
+/// micro-optimization left for a follow-up; this helper is the seam.
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn needs_transparency_group(opacity: f32, has_descendant_draws: bool) -> bool {
+    opacity < 1.0 && has_descendant_draws
+}
+
+/// Push a `PdfOp::SetAlpha` op iff `alpha < 1.0`. Always sets both `ca`
+/// (non-stroking) and `CA` (stroking) to the same value via the existing
+/// `SetAlpha` op — per ISO 32000-1 §11.3.7 they are independent and a
+/// stale `CA` from a prior op carries through if not reset.
+#[inline]
+pub(crate) fn push_alpha_if_translucent(ops: &mut Vec<PdfOp>, alpha: f32) {
+    if alpha < 1.0 {
+        ops.push(PdfOp::SetAlpha { alpha });
+    }
+}
+
+/// Collect the unique opacities referenced inside a captured Form
+/// `XObject`'s op stream. Mirrors `collect_alphas_in_ops` in `lib.rs` —
+/// duplicated here because the `lib.rs` helper takes `&[lib::PdfOp]`
+/// (same type, but we don't expose it via re-export).
+#[inline]
+pub(crate) fn collect_alphas_in_captured_ops(ops: &[PdfOp]) -> Vec<f32> {
+    let mut out: Vec<f32> = Vec::new();
+    for op in ops {
+        if let PdfOp::SetAlpha { alpha } = op
+            && !out.iter().any(|a| (a - alpha).abs() < 1e-6)
+        {
+            out.push(*alpha);
+        }
+    }
+    out
+}
+
+/// Collect the indices of any nested `DrawFormXObject` ops referenced
+/// from inside a captured Form `XObject`. The `XObject`'s `/Resources
+/// /XObject` dict needs to bind every nested `/Fm<idx>` so the inner
+/// invocation resolves.
+#[inline]
+pub(crate) fn captured_form_xobject_indices(ops: &[PdfOp]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    for op in ops {
+        if let PdfOp::DrawFormXObject { index } = op
+            && !out.contains(index)
+        {
+            out.push(*index);
+        }
+    }
+    out
+}
+
+/// Collect the font names referenced by `SetFont` ops inside a
+/// captured op stream — used to bind `/F<idx>` resources on the Form
+/// `XObject` so the group is a self-contained PDF object.
+#[inline]
+pub(crate) fn captured_fonts_in_ops(ops: &[PdfOp]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for op in ops {
+        if let PdfOp::SetFont { name, .. } = op
+            && !out.contains(name)
+        {
+            out.push(name.clone());
+        }
+    }
+    out
 }
 
 fn resolve_margin_box_content(
@@ -1089,12 +1525,19 @@ pub struct LayoutInner {
     pub column_count: u32,
     pub column_gap: f32,
     pub column_rule_width: f32,
-    pub column_rule_color: Option<(f32, f32, f32)>,
+    /// Column-rule color (CSS Multi-column 1 §8). Alpha is parsed (so
+    /// `rgba()` survives the cascade) but only the RGB channel is rendered
+    /// today — column rules paint opaque.
+    pub column_rule_color: Option<(f32, f32, f32, f32)>,
     pub images: Vec<crate::image::ImageData>,
     /// `@page` margin boxes parsed from the stylesheet. Empty by default.
     /// Stamped onto every page after the main render loop completes so
     /// that `counter(pages)` can resolve to the final page count.
     pub margin_boxes: css::MarginBoxes,
+    /// All `@page` rules parsed from the stylesheet (in source order).
+    /// Used by `resolve_page_style_for` to compute the per-page width,
+    /// height, margin, and margin-box state. CSS Paged Media L3 §4.4.
+    pub page_rules: Vec<css::PageRule>,
     /// Collected `position: fixed` blocks. Stamped onto every page in
     /// `finish()` so the box appears across the full document.
     fixed_blocks: Vec<FixedBlock>,
@@ -1128,9 +1571,60 @@ impl LayoutInner {
             column_rule_color: None,
             images: Vec::new(),
             margin_boxes: css::MarginBoxes::default(),
+            page_rules: Vec::new(),
             fixed_blocks: Vec::new(),
             font_face_registered: Vec::new(),
         }
+    }
+
+    /// Resolve the effective `@page` style for `page_num` (1-indexed).
+    /// Walks every `@page` rule that matches the page (per CSS Paged
+    /// Media L3 §4.4) and merges declarations in ascending specificity
+    /// order. `total_pages` is unused by every v1 pseudo (`:first`,
+    /// `:left`, `:right`, `:nth(N)`, `:blank`) — it's accepted for
+    /// future-compat with selectors that depend on the document's total
+    /// length.
+    pub fn resolve_page_style_for(&self, page_num: usize, total_pages: usize) -> css::PageStyle {
+        let mut indexed: Vec<(usize, &css::PageRule)> = self
+            .page_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.selector.matches(page_num, total_pages))
+            .collect();
+        indexed.sort_by_key(|(idx, r)| (r.selector.specificity(), *idx));
+        let mut merged = css::PageStyle::default();
+        for (_, rule) in indexed {
+            css::merge_page_style_pub(&mut merged, &rule.decls);
+        }
+        merged
+    }
+
+    /// Apply the resolved per-page style to `self.margin_*` and
+    /// `self.page_{width,height}`. Called immediately before opening a
+    /// new page so the new page-frame is sized correctly. Returns the
+    /// resolved style so callers (e.g. `stamp_margin_boxes`) can also
+    /// pull the per-page margin-box declarations.
+    pub fn apply_page_style_for(&mut self, page_num: usize, total_pages: usize) -> css::PageStyle {
+        let resolved = self.resolve_page_style_for(page_num, total_pages);
+        if let Some(w) = resolved.width {
+            self.page_width = w;
+        }
+        if let Some(h) = resolved.height {
+            self.page_height = h;
+        }
+        if let Some(m) = resolved.margin_top {
+            self.margin_top = m;
+        }
+        if let Some(m) = resolved.margin_right {
+            self.margin_right = m;
+        }
+        if let Some(m) = resolved.margin_bottom {
+            self.margin_bottom = m;
+        }
+        if let Some(m) = resolved.margin_left {
+            self.margin_left = m;
+        }
+        resolved
     }
 
     pub fn push_paragraph(&mut self, para: Paragraph) {
@@ -1185,6 +1679,15 @@ impl LayoutInner {
         if !self.font_face_registered.is_empty() {
             doc.registered_fonts.append(&mut self.font_face_registered);
         }
+
+        // Apply per-page CSS resolution for page 1 before opening the
+        // first page. Subsequent pages re-resolve at each break in
+        // `advance_column_or_page`. CSS Paged Media L3 §4.4.
+        if !self.page_rules.is_empty() {
+            // `total_pages` is unused by every v1 pseudo-class.
+            let _ = self.apply_page_style_for(1, 1);
+        }
+
         let content_width = self.page_width - self.margin_left - self.margin_right;
         let content_top = self.page_height - self.margin_top;
         let blocks = std::mem::take(&mut self.blocks);
@@ -1217,6 +1720,8 @@ impl LayoutInner {
             pending_bottom: 0.0,
             pending_container_top: 0.0,
             active_floats: Vec::new(),
+            transparency_captures: Vec::new(),
+            container_size_stack: Vec::new(),
         };
 
         let tree = crate::box_tree::unflatten_blocks(blocks);
@@ -1239,6 +1744,22 @@ impl LayoutInner {
         // already include their SaveState/Translate/RestoreState wrapper,
         // so no additional scoping is needed.
         self.stamp_fixed_blocks(doc);
+
+        // Lazy-register the bundled fallback face if any page emitted a
+        // run that promoted to it. Done last so a document that never
+        // hits a non-WinAnsi codepoint pays zero parse cost. Idempotent
+        // — `register_fallback_if_needed` early-returns if the entry
+        // already exists.
+        let fallback_used = doc.pages.iter().any(|p| {
+            let page = p.lock().unwrap();
+            page.fonts_used
+                .iter()
+                .any(|n| n == crate::FALLBACK_FONT_NAME)
+        });
+        if fallback_used {
+            crate::register_fallback_if_needed(&mut doc.registered_fonts)
+                .map_err(|e| format!("fallback font registration failed: {e}"))?;
+        }
 
         Ok(())
     }
@@ -1397,9 +1918,9 @@ impl LayoutInner {
             &mut state.cursor_y,
             &mut state.current_col,
             state.col_count,
-            state.col_width,
-            state.col_gap,
-            state.content_top,
+            &mut state.col_width,
+            &mut state.col_gap,
+            &mut state.content_top,
             &mut state.pending_bottom,
         )
     }
@@ -1418,9 +1939,9 @@ impl LayoutInner {
             &mut state.cursor_y,
             &mut state.current_col,
             state.col_count,
-            state.col_width,
-            state.col_gap,
-            state.content_top,
+            &mut state.col_width,
+            &mut state.col_gap,
+            &mut state.content_top,
             &mut state.pending_bottom,
         );
     }
@@ -1434,9 +1955,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
         }
         let cx = self.col_x(state.current_col, state);
@@ -1476,15 +1997,44 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_bottom = 0.0;
             state.pending_container_top = 0.0;
         }
         state.pending_container_top =
             collapse_margins(state.pending_container_top, bb.style.margin_top);
+        // Snapshot the cursor and page count so `exit_container_node`
+        // can enforce an explicit `height` if the container's children
+        // didn't fill it. Pushed unconditionally — the exit reads the
+        // value only when `bb.style.height.is_some()`.
+        state
+            .container_size_stack
+            .push((state.cursor_y, doc.pages.len()));
+
+        // WS-2: an `opacity < 1` container with drawn descendants
+        // renders through a Form XObject Transparency Group (CSS
+        // Compositing & Blending L1 §4 + ISO 32000-1 §11.6.5).
+        // Multiplying through to leaves makes overlapping translucent
+        // children show through each other incorrectly, so we have to
+        // capture the subtree's ops into a separate stream and replay
+        // them inside a /Group XObject.
+        if let Some(alpha) = bb.style.opacity
+            && alpha < 1.0
+        {
+            let mut page = state.current_page.lock().unwrap();
+            let saved_ops = std::mem::take(&mut page.operations);
+            let saved_images_used = std::mem::take(&mut page.images_used);
+            drop(page);
+            state.transparency_captures.push(TransparencyCapture {
+                opacity: alpha,
+                saved_ops,
+                saved_images_used,
+                capture_start_y: state.cursor_y,
+            });
+        }
     }
 
     fn exit_container_node(
@@ -1494,6 +2044,97 @@ impl LayoutInner {
         child_rendered: bool,
         state: &mut RenderState,
     ) {
+        // Pop the size snapshot pushed in `enter_container_node`. If the
+        // container has an explicit `height` and didn't cross a page
+        // boundary, advance the cursor so the container reserves its
+        // full height — matching `render_paragraph_block`'s leaf-level
+        // behavior. When a page break did happen mid-container, we
+        // don't try to enforce: the natural-vs-explicit comparison
+        // would need a per-page running total we don't keep.
+        if let Some((start_y, start_pages)) = state.container_size_stack.pop()
+            && let Some(height) = bb.style.height
+            && doc.pages.len() == start_pages
+        {
+            let consumed = (start_y - state.cursor_y).max(0.0);
+            let remaining = height - consumed;
+            if remaining > 0.0 {
+                let available = state.cursor_y - self.margin_bottom;
+                if remaining <= available {
+                    state.cursor_y -= remaining;
+                } else {
+                    // The container's leftover height would push past
+                    // the bottom margin; flip to a fresh page so the
+                    // next sibling lands cleanly. We deliberately drop
+                    // the residual extra (paged media is finite — a
+                    // 20in `height` on a Letter page caps at the page).
+                    self.advance_column_or_page(
+                        &mut state.current_page,
+                        doc,
+                        &mut state.cursor_y,
+                        &mut state.current_col,
+                        state.col_count,
+                        &mut state.col_width,
+                        &mut state.col_gap,
+                        &mut state.content_top,
+                    );
+                    state.pending_bottom = 0.0;
+                    state.pending_container_top = 0.0;
+                }
+            }
+        }
+        // Pair with `enter_container_node`'s capture: fold the diverted
+        // ops into a `FormXObjectData`, restore the saved page stream,
+        // and append `gs + DrawFormXObject` so the group composites at
+        // the parent's α.
+        let has_capture = bb
+            .style
+            .opacity
+            .is_some_and(|a| a < 1.0 && !state.transparency_captures.is_empty());
+        if has_capture {
+            let capture = state
+                .transparency_captures
+                .pop()
+                .expect("transparency_captures non-empty (just checked)");
+            let mut page = state.current_page.lock().unwrap();
+            // Take the captured ops + images_used (the diverted state)
+            // and restore the saved (parent) state.
+            let captured_ops = std::mem::take(&mut page.operations);
+            let captured_images = std::mem::take(&mut page.images_used);
+            page.operations = capture.saved_ops;
+            page.images_used = capture.saved_images_used;
+            // Defensive: if the subtree drew nothing, skip allocating
+            // an empty XObject — emit nothing, the leaf path's no-op
+            // semantics already cover this case.
+            if !captured_ops.is_empty() {
+                let alphas = collect_alphas_in_captured_ops(&captured_ops);
+                let bbox = [0.0_f32, 0.0_f32, page.width as f32, page.height as f32];
+                let nested_xobjects = captured_form_xobject_indices(&captured_ops);
+                let fonts_used = captured_fonts_in_ops(&captured_ops);
+                page.form_xobjects.push(crate::FormXObjectData {
+                    bbox,
+                    operations: captured_ops,
+                    fonts_used,
+                    images_used: captured_images,
+                    nested_xobjects,
+                    alphas,
+                });
+                let xobject_index = page.form_xobjects.len() - 1;
+                // Apply the parent's α on the surrounding stream and
+                // invoke the group. ISO 32000-1 §11.3.7: both `ca` AND
+                // `CA` get set together via `SetAlpha`.
+                page.operations.push(PdfOp::SaveState);
+                push_alpha_if_translucent(&mut page.operations, capture.opacity);
+                page.operations.push(PdfOp::DrawFormXObject {
+                    index: xobject_index,
+                });
+                page.operations.push(PdfOp::RestoreState);
+            }
+            // Restore cursor invariant: the diverted ops moved
+            // `cursor_y`; we leave it as-is because the captured boxes
+            // really did consume that vertical space.
+            let _ = capture.capture_start_y;
+        }
+
         // Non-empty containers: the child/parent margin_bottom collapse is
         // already partially accounted for by pending_bottom (the child's
         // trailing margin). Empty containers self-collapse top+bottom into
@@ -1519,9 +2160,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_bottom = 0.0;
             state.pending_container_top = 0.0;
@@ -1548,9 +2189,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_container_top = 0.0;
         }
@@ -1664,23 +2305,13 @@ impl LayoutInner {
 
         let block_text_height = wrapped_lines.len() as f32 * line_height;
         let natural_box_height = style.padding_top + block_text_height + style.padding_bottom;
-        // Clamp to min/max-height. The content still top-aligns inside the
-        // padded box — min-height extends the background/border rect down
-        // but does not shift the text. (CSS actually lets height: auto
-        // grow to content, so only min-height ever extends downward; we
-        // still honor max-height by clipping the drawn rect — any text
-        // that would have hung below the clamped edge just spills out.)
-        let mut box_height = natural_box_height;
-        if let Some(min_h) = style.min_height
-            && box_height < min_h
-        {
-            box_height = min_h;
-        }
-        if let Some(max_h) = style.max_height
-            && box_height > max_h
-        {
-            box_height = max_h;
-        }
+        // Honor explicit `height` and clamp to `min-height` / `max-height`.
+        // Content still top-aligns inside the padded box — these properties
+        // resize the background/border rect but do not shift text.
+        // Overflow is `visible` by default (CSS 2.1 §11.1.1) so any line
+        // that would have hung below the clamped edge spills out, matching
+        // Blink/WebKit/Gecko behavior.
+        let box_height = resolve_box_height(style, natural_box_height);
         let top_delta = collapsed_top_delta(state.pending_bottom, style.margin_top);
         let block_total_height = top_delta + box_height + style.margin_bottom;
 
@@ -1703,9 +2334,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_bottom = 0.0;
         }
@@ -1728,7 +2359,10 @@ impl LayoutInner {
         }
 
         let is_relative_positioned = style.position == css::Position::Relative
-            && (style.position_top.is_some() || style.position_left.is_some());
+            && (style.position_top.is_some()
+                || style.position_left.is_some()
+                || style.position_right.is_some()
+                || style.position_bottom.is_some());
         let is_absolute_or_fixed = matches!(
             style.position,
             css::Position::Absolute | css::Position::Fixed
@@ -1794,8 +2428,7 @@ impl LayoutInner {
             // by (+left, -top) without disturbing flow. Emit the translation
             // inside the save/restore so siblings are unaffected.
             if is_relative_positioned {
-                let dx = style.position_left.unwrap_or(0.0);
-                let dy = -style.position_top.unwrap_or(0.0);
+                let (dx, dy) = relative_offset(style);
                 if dx != 0.0 || dy != 0.0 {
                     page.operations.push(PdfOp::Translate { dx, dy });
                 }
@@ -1849,7 +2482,9 @@ impl LayoutInner {
             page.operations.push(PdfOp::Fill);
         }
 
-        if let Some((r, g, b)) = style.background_color {
+        if let Some(bg) = style.background_color {
+            let ((r, g, b), a) = split_rgba(bg);
+            push_alpha_if_translucent(&mut page.operations, a);
             page.operations.push(PdfOp::SetFillColor { r, g, b });
             emit_rect_path(
                 &mut page.operations,
@@ -1862,38 +2497,79 @@ impl LayoutInner {
         }
 
         if style.border_width > 0.0 && !matches!(style.border_style, Some(css::BorderStyle::None)) {
-            let (r, g, b) = style.border_color.unwrap_or((0.0, 0.0, 0.0));
+            let ((r, g, b), a) = split_rgba(style.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
+            push_alpha_if_translucent(&mut page.operations, a);
             page.operations.push(PdfOp::SetStrokeColor { r, g, b });
-            page.operations
-                .push(PdfOp::SetLineWidth(style.border_width));
 
-            match style.border_style {
-                Some(css::BorderStyle::Dashed) => {
-                    let dash = style.border_width * 3.0;
-                    let gap = style.border_width * 2.0;
-                    page.operations.push(PdfOp::SetDashPattern {
-                        array: vec![dash, gap],
-                        phase: 0.0,
-                    });
+            // CSS Backgrounds & Borders 3 §5.3: `double` paints two parallel
+            // lines with a gap between them, the sum of which equals
+            // `border-width`. We split the band into thirds: outer line / gap
+            // / inner line, each ~1/3 of the total width. Each line is drawn
+            // as a stroked rectangle whose stroke is centred on the mid-line
+            // of its third, so a stroke of width w/3 covers exactly that
+            // third.
+            if matches!(style.border_style, Some(css::BorderStyle::Double)) {
+                let bw = style.border_width;
+                let line_w = bw / 3.0;
+                page.operations.push(PdfOp::SetLineWidth(line_w));
+                // Outer rectangle: path mid-line is bw/6 inside the outer
+                // edge, so the stroke covers [0, bw/3] of the band.
+                let outer_inset = bw / 6.0;
+                emit_rect_path(
+                    &mut page.operations,
+                    box_x + outer_inset,
+                    cursor_y - box_height + outer_inset,
+                    (box_width - 2.0 * outer_inset).max(0.0),
+                    (box_height - 2.0 * outer_inset).max(0.0),
+                );
+                page.operations.push(PdfOp::Stroke);
+                // Inner rectangle: path mid-line is 5*bw/6 inside the outer
+                // edge, so the stroke covers [2*bw/3, bw] of the band.
+                let inner_inset = bw * 5.0 / 6.0;
+                let iw = (box_width - 2.0 * inner_inset).max(0.0);
+                let ih = (box_height - 2.0 * inner_inset).max(0.0);
+                if iw > 0.0 && ih > 0.0 {
+                    emit_rect_path(
+                        &mut page.operations,
+                        box_x + inner_inset,
+                        cursor_y - box_height + inner_inset,
+                        iw,
+                        ih,
+                    );
+                    page.operations.push(PdfOp::Stroke);
                 }
-                Some(css::BorderStyle::Dotted) => {
-                    let dot = style.border_width;
-                    page.operations.push(PdfOp::SetDashPattern {
-                        array: vec![dot, dot * 2.0],
-                        phase: 0.0,
-                    });
+            } else {
+                page.operations
+                    .push(PdfOp::SetLineWidth(style.border_width));
+
+                match style.border_style {
+                    Some(css::BorderStyle::Dashed) => {
+                        let dash = style.border_width * 3.0;
+                        let gap = style.border_width * 2.0;
+                        page.operations.push(PdfOp::SetDashPattern {
+                            array: vec![dash, gap],
+                            phase: 0.0,
+                        });
+                    }
+                    Some(css::BorderStyle::Dotted) => {
+                        let dot = style.border_width;
+                        page.operations.push(PdfOp::SetDashPattern {
+                            array: vec![dot, dot * 2.0],
+                            phase: 0.0,
+                        });
+                    }
+                    _ => {}
                 }
-                _ => {}
+
+                emit_rect_path(
+                    &mut page.operations,
+                    box_x,
+                    cursor_y - box_height,
+                    box_width,
+                    box_height,
+                );
+                page.operations.push(PdfOp::Stroke);
             }
-
-            emit_rect_path(
-                &mut page.operations,
-                box_x,
-                cursor_y - box_height,
-                box_width,
-                box_height,
-            );
-            page.operations.push(PdfOp::Stroke);
         }
 
         // CSS Backgrounds & Borders 3 §7: inset shadows paint inside the
@@ -1980,7 +2656,9 @@ impl LayoutInner {
             page.operations.push(PdfOp::ClipNonzero);
         }
 
-        if let Some((r, g, b)) = style.color {
+        if let Some(c) = style.color {
+            let ((r, g, b), a) = split_rgba(c);
+            push_alpha_if_translucent(&mut page.operations, a);
             page.operations.push(PdfOp::SetFillColor { r, g, b });
         }
 
@@ -2004,7 +2682,9 @@ impl LayoutInner {
                     text_x_base - marker_gap - marker_width
                 };
 
-                if let Some((r, g, b)) = marker.color {
+                if let Some(c) = marker.color {
+                    let ((r, g, b), a) = split_rgba(c);
+                    push_alpha_if_translucent(&mut page.operations, a);
                     page.operations.push(PdfOp::SetFillColor { r, g, b });
                 }
                 page.operations.push(PdfOp::BeginText);
@@ -2016,8 +2696,7 @@ impl LayoutInner {
                     x: marker_x,
                     y: baseline_y,
                 });
-                page.operations
-                    .push(show_text_for(&marker.font_name, marker.text.clone()));
+                push_show_text(&mut page, &marker.font_name, marker.font_size, &marker.text);
                 page.operations.push(PdfOp::EndText);
             }
 
@@ -2065,7 +2744,9 @@ impl LayoutInner {
             let mut x = text_x_base + align_offset;
 
             for segment in &line.segments {
-                if let Some((r, g, b)) = segment.color {
+                if let Some(c) = segment.color {
+                    let ((r, g, b), a) = split_rgba(c);
+                    push_alpha_if_translucent(&mut page.operations, a);
                     page.operations.push(PdfOp::SetFillColor { r, g, b });
                 }
 
@@ -2080,8 +2761,10 @@ impl LayoutInner {
                 let (atom_x, text_offset_x) = if let Some(atom_w) = segment.inline_block_width {
                     let atom_x = x + (segment.width - atom_w);
                     // Paint background.
-                    if let Some((r, g, b)) = segment.inline_block_bg {
+                    if let Some(bg_c) = segment.inline_block_bg {
+                        let ((r, g, b), a) = split_rgba(bg_c);
                         page.operations.push(PdfOp::SaveState);
+                        push_alpha_if_translucent(&mut page.operations, a);
                         page.operations.push(PdfOp::SetFillColor { r, g, b });
                         page.operations.push(PdfOp::Rectangle {
                             x: atom_x,
@@ -2095,12 +2778,16 @@ impl LayoutInner {
                         // preserve the previously set fill color in our
                         // op stream model (SaveState does preserve it
                         // in PDF, but we re-set to be safe).
-                        if let Some((r, g, b)) = segment.color {
+                        if let Some(c) = segment.color {
+                            let ((r, g, b), a) = split_rgba(c);
+                            push_alpha_if_translucent(&mut page.operations, a);
                             page.operations.push(PdfOp::SetFillColor { r, g, b });
                         }
                     }
-                    if let Some((bw, (br, bg_, bb))) = segment.inline_block_border {
+                    if let Some((bw, border_c)) = segment.inline_block_border {
+                        let ((br, bg_, bb), ba) = split_rgba(border_c);
                         page.operations.push(PdfOp::SaveState);
+                        push_alpha_if_translucent(&mut page.operations, ba);
                         page.operations.push(PdfOp::SetStrokeColor {
                             r: br,
                             g: bg_,
@@ -2115,7 +2802,9 @@ impl LayoutInner {
                         });
                         page.operations.push(PdfOp::Stroke);
                         page.operations.push(PdfOp::RestoreState);
-                        if let Some((r, g, b)) = segment.color {
+                        if let Some(c) = segment.color {
+                            let ((r, g, b), a) = split_rgba(c);
+                            push_alpha_if_translucent(&mut page.operations, a);
                             page.operations.push(PdfOp::SetFillColor { r, g, b });
                         }
                     }
@@ -2133,8 +2822,12 @@ impl LayoutInner {
                     x: atom_x + text_offset_x,
                     y: seg_y,
                 });
-                page.operations
-                    .push(show_text_for(&segment.font_name, segment.text.clone()));
+                push_show_text(
+                    &mut page,
+                    &segment.font_name,
+                    segment.font_size,
+                    &segment.text,
+                );
                 page.operations.push(PdfOp::EndText);
 
                 if let Some(url) = &segment.link_url {
@@ -2155,7 +2848,9 @@ impl LayoutInner {
                     let stroke_width = (segment.font_size * 0.05).max(0.5);
 
                     page.operations.push(PdfOp::SaveState);
-                    if let Some((r, g, b)) = segment.color {
+                    if let Some(c) = segment.color {
+                        let ((r, g, b), a) = split_rgba(c);
+                        push_alpha_if_translucent(&mut page.operations, a);
                         page.operations.push(PdfOp::SetStrokeColor { r, g, b });
                     }
                     page.operations.push(PdfOp::SetLineWidth(stroke_width));
@@ -2250,9 +2945,9 @@ impl LayoutInner {
                 &mut state.cursor_y,
                 &mut state.current_col,
                 state.col_count,
-                state.col_width,
-                state.col_gap,
-                state.content_top,
+                &mut state.col_width,
+                &mut state.col_gap,
+                &mut state.content_top,
             );
             state.pending_bottom = 0.0;
         }
@@ -2282,14 +2977,51 @@ impl LayoutInner {
     /// total page count for `counter(pages)`. Each of the six supported
     /// positions (top/bottom × left/center/right) gets a single baseline
     /// of text inside the printable margin strip.
-    fn stamp_margin_boxes(&self, doc: &mut PdfDocument) {
-        let boxes = &self.margin_boxes;
-        if !boxes.any() {
+    ///
+    /// Per CSS Paged Media L3 §4.4 the margin-box content cascades
+    /// per-property across `@page` rules — `@page :first { @top-left { … } }`
+    /// only overlays the properties it sets, leaving the rest of
+    /// `@top-left`'s properties from the base `@page` intact. This is
+    /// achieved by calling `resolve_page_style_for(page_num)` per page
+    /// and reading the merged margin boxes from the result.
+    fn stamp_margin_boxes(&mut self, doc: &mut PdfDocument) {
+        // If there are no `@page` rules, we may still have a top-level
+        // `margin_boxes` field set by a non-CSS API consumer — fall back
+        // to the universal slot in that case.
+        let has_any_rule_box = self.page_rules.iter().any(|r| r.decls.margin_boxes.any());
+        if !has_any_rule_box && !self.margin_boxes.any() {
             return;
         }
         let total_pages = doc.pages.len();
+        // Snapshot pages from `doc.pages` length so we don't borrow
+        // `doc` mutably and immutably at once. We resolve the per-page
+        // boxes ahead of the loop because `resolve_page_style_for`
+        // reads `self.page_rules` which can't overlap a mut borrow on
+        // `self.margin_boxes`/`self.render_margin_box`.
+        let resolved: Vec<css::MarginBoxes> = (1..=total_pages)
+            .map(|page_num| {
+                if self.page_rules.is_empty() {
+                    self.margin_boxes.clone()
+                } else {
+                    self.resolve_page_style_for(page_num, total_pages)
+                        .margin_boxes
+                }
+            })
+            .collect();
         for (idx, page_arc) in doc.pages.iter().enumerate() {
             let page_num = idx + 1;
+            let boxes = &resolved[idx];
+            if !boxes.any() {
+                continue;
+            }
+            // The page-frame size and margins for *this* page are what
+            // determine where the margin-strip lives; refresh
+            // `self.{page_width,page_height,margin_*}` for this page
+            // before rendering so the strip math lines up. (No-op if
+            // `page_rules` is empty.)
+            if !self.page_rules.is_empty() {
+                let _ = self.apply_page_style_for(page_num, total_pages);
+            }
             let mut page = page_arc.lock().unwrap();
             let positions = [
                 (&boxes.top_left, css::MarginBoxPosition::TopLeft),
@@ -2392,7 +3124,7 @@ impl LayoutInner {
             size: font_size,
         });
         page.operations.push(PdfOp::SetTextPosition { x, y });
-        page.operations.push(show_text_for(&font_name, text));
+        push_show_text(page, &font_name, font_size, &text);
         page.operations.push(PdfOp::EndText);
         // Restore default fill color to black so later ops (if any) see
         // a predictable state. Since margin boxes are stamped last, this
@@ -2413,9 +3145,9 @@ impl LayoutInner {
         cursor_y: &mut f32,
         current_col: &mut u32,
         col_count: u32,
-        col_width: f32,
-        col_gap: f32,
-        content_top: f32,
+        col_width: &mut f32,
+        col_gap: &mut f32,
+        content_top: &mut f32,
         pending_bottom: &mut f32,
     ) -> Result<(), String> {
         if table.rows.is_empty() {
@@ -2426,53 +3158,99 @@ impl LayoutInner {
             return Ok(());
         }
 
+        // Snapshot the column geometry at the start of the table — if a
+        // page-break advances us mid-table, `advance_column_or_page`
+        // will have rewritten the caller's geometry to the new page's,
+        // but the table's intrinsic-width math wants the geometry it
+        // started with. (Spanning a table across pages with mismatched
+        // margins is a v1 cut; tracked separately.)
+        let col_width_v: f32 = *col_width;
+        let col_gap_v: f32 = *col_gap;
+        let content_top_v: f32 = *content_top;
+        // Snapshot `margin_left` so the col-position closure doesn't
+        // hold an immutable borrow of `self` across the mutable borrow
+        // we need when calling `advance_column_or_page` mid-table.
+        let margin_left_v: f32 = self.margin_left;
+
         // column_width helper (reused)
-        let col_x_for = |col: u32| -> f32 { self.margin_left + col as f32 * (col_width + col_gap) };
+        let col_x_for =
+            |col: u32| -> f32 { margin_left_v + col as f32 * (col_width_v + col_gap_v) };
 
         // Total available width for the table within the current column
-        let table_area_width = col_width - table.style.margin_left - table.style.margin_right;
+        let table_area_width = col_width_v - table.style.margin_left - table.style.margin_right;
 
-        // Measure intrinsic min and max widths per column
-        let mut col_min = vec![0.0_f32; column_count];
-        let mut col_max = vec![0.0_f32; column_count];
-        for row in &table.rows {
-            for (idx, cell) in row.cells.iter().enumerate() {
-                if idx >= column_count {
-                    break;
-                }
-                let (cmin, cmax) = measure_cell_intrinsic(cell)?;
-                let h_pad = cell.style.padding_left + cell.style.padding_right;
-                if cmin + h_pad > col_min[idx] {
-                    col_min[idx] = cmin + h_pad;
-                }
-                if cmax + h_pad > col_max[idx] {
-                    col_max[idx] = cmax + h_pad;
-                }
+        // Resolve <col> width hints (percent → pt, length → pt). The
+        // hint vector is sized to `column_count` even if the colgroup
+        // declared fewer / more <col>s — extra entries are dropped, and
+        // missing entries are filled with `None`.
+        let mut col_hints: Vec<Option<f32>> = vec![None; column_count];
+        if let Some(col_styles) = &table.col_styles {
+            for (h, cs) in col_hints.iter_mut().zip(col_styles.iter()) {
+                *h = resolve_col_hint(cs.width, table_area_width);
             }
+            scale_overlong_percent_hints(&mut col_hints, table_area_width);
         }
 
-        // Distribute widths: use max if they fit; else scale proportionally down to min
-        let sum_max: f32 = col_max.iter().sum();
-        let sum_min: f32 = col_min.iter().sum();
-        let col_widths: Vec<f32> = if sum_max <= table_area_width {
-            // Space to spare: distribute the extra proportionally from max
-            let extra = table_area_width - sum_max;
-            if sum_max > 0.0 {
-                col_max.iter().map(|&w| w + extra * (w / sum_max)).collect()
-            } else {
-                vec![table_area_width / column_count as f32; column_count]
-            }
-        } else if sum_min >= table_area_width {
-            col_min.clone()
+        let col_widths: Vec<f32> = if matches!(table.table_layout, css::TableLayoutValue::Fixed) {
+            // CSS 2.1 §17.5.2.1 — column widths come from the hints
+            // (or an even share for hint-less columns); cell content
+            // does not widen them.
+            apply_col_hints_fixed(column_count, &col_hints, table_area_width)
         } else {
-            // Interpolate between min and max
-            let slack = table_area_width - sum_min;
-            let range = sum_max - sum_min;
-            col_min
-                .iter()
-                .zip(col_max.iter())
-                .map(|(&lo, &hi)| lo + slack * ((hi - lo) / range))
-                .collect()
+            // Auto layout — measure intrinsic widths from cell content,
+            // then let `<col>` hints raise the *preferred* width but
+            // never push col_min above the content's intrinsic minimum
+            // (CSS 2.1 §17.5.2.2; see `apply_col_hints_auto` for the
+            // long-URL bug-prevention rationale).
+            let mut col_min = vec![0.0_f32; column_count];
+            let mut col_max = vec![0.0_f32; column_count];
+            for row in &table.rows {
+                for (idx, cell) in row.cells.iter().enumerate() {
+                    if idx >= column_count {
+                        break;
+                    }
+                    let (cmin, cmax) = measure_cell_intrinsic(cell)?;
+                    let h_pad = cell.style.padding_left + cell.style.padding_right;
+                    if cmin + h_pad > col_min[idx] {
+                        col_min[idx] = cmin + h_pad;
+                    }
+                    if cmax + h_pad > col_max[idx] {
+                        col_max[idx] = cmax + h_pad;
+                    }
+                }
+            }
+
+            let mut col_preferred = col_max.clone();
+            apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &col_hints);
+
+            // Distribute widths between content min and (now-hinted)
+            // preferred max. The existing intrinsic-distribution rules
+            // apply with `col_max` widened by the hint pass.
+            let sum_max: f32 = col_preferred.iter().sum();
+            let sum_min: f32 = col_min.iter().sum();
+            if sum_max <= table_area_width {
+                // Space to spare: distribute the extra proportionally
+                let extra = table_area_width - sum_max;
+                if sum_max > 0.0 {
+                    col_preferred
+                        .iter()
+                        .map(|&w| w + extra * (w / sum_max))
+                        .collect()
+                } else {
+                    vec![table_area_width / column_count as f32; column_count]
+                }
+            } else if sum_min >= table_area_width {
+                col_min.clone()
+            } else {
+                // Interpolate between min and preferred-max
+                let slack = table_area_width - sum_min;
+                let range = sum_max - sum_min;
+                col_min
+                    .iter()
+                    .zip(col_preferred.iter())
+                    .map(|(&lo, &hi)| lo + slack * ((hi - lo) / range))
+                    .collect()
+            }
         };
 
         let table_actual_width: f32 = col_widths.iter().sum();
@@ -2493,7 +3271,7 @@ impl LayoutInner {
             row_bottoms: Vec<f32>,
             // Max border width and first non-None color encountered in the band.
             max_border_width: f32,
-            border_color: Option<(f32, f32, f32)>,
+            border_color: Option<(f32, f32, f32, f32)>,
             has_border: bool,
         }
         let mut collapse_band: Option<CollapseBand> = None;
@@ -2506,7 +3284,7 @@ impl LayoutInner {
             if !band.has_border || band.row_bottoms.is_empty() {
                 return;
             }
-            let (r, g, b) = band.border_color.unwrap_or((0.0, 0.0, 0.0));
+            let ((r, g, b), a) = split_rgba(band.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
             let w = band.max_border_width;
             let total_w: f32 = col_widths.iter().sum();
             let bottom_y = *band
@@ -2514,6 +3292,7 @@ impl LayoutInner {
                 .last()
                 .expect("row_bottoms non-empty (checked above)");
             let height = band.top_y - bottom_y;
+            push_alpha_if_translucent(&mut page.operations, a);
             page.operations.push(PdfOp::SetStrokeColor { r, g, b });
             page.operations.push(PdfOp::SetLineWidth(w));
             // Outer rectangle
@@ -2590,7 +3369,7 @@ impl LayoutInner {
                 .fold(0.0_f32, f32::max);
 
             // Page-break check: move the entire row to next column/page if it doesn't fit
-            if *cursor_y - row_height < self.margin_bottom && *cursor_y < content_top {
+            if *cursor_y - row_height < self.margin_bottom && *cursor_y < content_top_v {
                 // Flush any pending collapse band before moving on.
                 if is_collapse && let Some(band) = collapse_band.take() {
                     let mut page = current_page.lock().unwrap();
@@ -2629,6 +3408,31 @@ impl LayoutInner {
                 }
             }
 
+            // Paint <col> backgrounds before cell backgrounds. Per CSS
+            // 2.1 §17.5.1, the painter's order is table → col-group →
+            // col → row-group → row → cell, so column backgrounds sit
+            // beneath the row/cell backgrounds. Drawn per-row to keep
+            // the geometry simple — the column rectangle is just the
+            // cells' rectangle.
+            if let Some(col_styles) = &table.col_styles {
+                let mut x_running = cell_x;
+                for (idx, &cwidth) in col_widths.iter().enumerate() {
+                    if let Some(cs) = col_styles.get(idx)
+                        && let Some((r, g, b)) = cs.background_color
+                    {
+                        page.operations.push(PdfOp::SetFillColor { r, g, b });
+                        page.operations.push(PdfOp::Rectangle {
+                            x: x_running,
+                            y: row_bottom,
+                            width: cwidth,
+                            height: row_height,
+                        });
+                        page.operations.push(PdfOp::Fill);
+                    }
+                    x_running += cwidth;
+                }
+            }
+
             for (idx, cell) in row.cells.iter().enumerate() {
                 if idx >= column_count {
                     break;
@@ -2636,7 +3440,9 @@ impl LayoutInner {
                 let cwidth = col_widths[idx];
 
                 // Cell background
-                if let Some((r, g, b)) = cell.style.background_color {
+                if let Some(bg_c) = cell.style.background_color {
+                    let ((r, g, b), a) = split_rgba(bg_c);
+                    push_alpha_if_translucent(&mut page.operations, a);
                     page.operations.push(PdfOp::SetFillColor { r, g, b });
                     page.operations.push(PdfOp::Rectangle {
                         x: cell_x,
@@ -2653,7 +3459,9 @@ impl LayoutInner {
                 let cell_has_border = cell.style.border_width > 0.0
                     && !matches!(cell.style.border_style, Some(css::BorderStyle::None));
                 if !is_collapse && cell_has_border {
-                    let (r, g, b) = cell.style.border_color.unwrap_or((0.0, 0.0, 0.0));
+                    let ((r, g, b), a) =
+                        split_rgba(cell.style.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
+                    push_alpha_if_translucent(&mut page.operations, a);
                     page.operations.push(PdfOp::SetStrokeColor { r, g, b });
                     page.operations
                         .push(PdfOp::SetLineWidth(cell.style.border_width));
@@ -2667,7 +3475,9 @@ impl LayoutInner {
                 }
 
                 // Set text color
-                if let Some((r, g, b)) = cell.style.color {
+                if let Some(c) = cell.style.color {
+                    let ((r, g, b), a) = split_rgba(c);
+                    push_alpha_if_translucent(&mut page.operations, a);
                     page.operations.push(PdfOp::SetFillColor { r, g, b });
                 } else {
                     page.operations.push(PdfOp::SetFillColor {
@@ -2700,7 +3510,9 @@ impl LayoutInner {
                     };
                     let mut x = text_x_base + align_offset;
                     for segment in &line.segments {
-                        if let Some((r, g, b)) = segment.color {
+                        if let Some(c) = segment.color {
+                            let ((r, g, b), a) = split_rgba(c);
+                            push_alpha_if_translucent(&mut page.operations, a);
                             page.operations.push(PdfOp::SetFillColor { r, g, b });
                         }
                         page.operations.push(PdfOp::BeginText);
@@ -2710,8 +3522,12 @@ impl LayoutInner {
                         });
                         page.operations
                             .push(PdfOp::SetTextPosition { x, y: baseline_y });
-                        page.operations
-                            .push(show_text_for(&segment.font_name, segment.text.clone()));
+                        push_show_text(
+                            &mut page,
+                            &segment.font_name,
+                            segment.font_size,
+                            &segment.text,
+                        );
                         page.operations.push(PdfOp::EndText);
                         x += segment.width;
                     }
@@ -2773,15 +3589,74 @@ impl LayoutInner {
         cursor_y: &mut f32,
         current_col: &mut u32,
         col_count: u32,
-        col_width: f32,
-        col_gap: f32,
-        content_top: f32,
+        col_width: &mut f32,
+        col_gap: &mut f32,
+        content_top: &mut f32,
         pending_bottom: &mut f32,
     ) {
-        let col_x_for = |col: u32| -> f32 { self.margin_left + col as f32 * (col_width + col_gap) };
+        // Snapshot the column geometry — see `render_table` for the
+        // rationale (mid-block page breaks may rewrite the caller's
+        // refs to the new page's geometry).
+        let col_width_v: f32 = *col_width;
+        let col_gap_v: f32 = *col_gap;
+        let content_top_v: f32 = *content_top;
+        let margin_left_v: f32 = self.margin_left;
+        let col_x_for =
+            |col: u32| -> f32 { margin_left_v + col as f32 * (col_width_v + col_gap_v) };
+
+        let is_absolute_or_fixed = matches!(
+            img.style.position,
+            css::Position::Absolute | css::Position::Fixed
+        );
+
+        // CSS 2.1 §9.6: absolutely-positioned images paint at coordinates
+        // computed from the page (initial containing block). We use the
+        // raw natural width/height — no column shrink-to-fit, no margin
+        // collapsing, and the in-flow cursor is left untouched so siblings
+        // don't shift.
+        //
+        // Scope (matches the current div/abs implementation): containing
+        // block = page; `right` resolves against the page's right edge,
+        // not "nearest positioned ancestor". This is sufficient for the
+        // COBRA cover image (`right: 0.02in`) but does not cover the full
+        // CSS 2.1 §10.3.7 abs-pos sizing algorithm yet.
+        if is_absolute_or_fixed {
+            let draw_w = img.width;
+            let draw_h = img.height;
+            let target_left_x = if let Some(l) = img.style.position_left {
+                l + img.style.margin_left
+            } else if let Some(r) = img.style.position_right {
+                self.page_width - r - draw_w - img.style.margin_right
+            } else {
+                col_x_for(*current_col) + img.style.margin_left
+            };
+            let target_top_y = if let Some(t) = img.style.position_top {
+                self.page_height - t - img.style.margin_top
+            } else if let Some(b) = img.style.position_bottom {
+                b + draw_h + img.style.margin_bottom
+            } else {
+                *cursor_y
+            };
+            let y_bottom = target_top_y - draw_h;
+
+            let mut page = current_page.lock().unwrap();
+            if !page.images_used.contains(&img.image_index) {
+                page.images_used.push(img.image_index);
+            }
+            page.operations.push(PdfOp::DrawImage {
+                index: img.image_index,
+                x: target_left_x,
+                y: y_bottom,
+                width: draw_w,
+                height: draw_h,
+            });
+            // Don't advance `cursor_y` or update `pending_bottom` —
+            // out-of-flow images leave the in-flow geometry alone.
+            return;
+        }
 
         // Scale down if wider than column content width
-        let box_width = col_width - img.style.margin_left - img.style.margin_right;
+        let box_width = col_width_v - img.style.margin_left - img.style.margin_right;
         let (draw_w, draw_h) = if img.width > box_width && img.width > 0.0 {
             let scale = box_width / img.width;
             (box_width, img.height * scale)
@@ -2793,7 +3668,7 @@ impl LayoutInner {
         let total_height = top_delta + draw_h + img.style.margin_bottom;
 
         // Page-break check
-        if *cursor_y - total_height < self.margin_bottom && *cursor_y < content_top {
+        if *cursor_y - total_height < self.margin_bottom && *cursor_y < content_top_v {
             self.advance_column_or_page(
                 current_page,
                 doc,
@@ -2811,14 +3686,23 @@ impl LayoutInner {
         let x = col_x_for(*current_col) + img.style.margin_left;
         let y_bottom = *cursor_y - draw_h;
 
+        // CSS 2.1 §9.4.3: `position: relative` shifts the painted image
+        // by `relative_offset(...)` without disturbing the cursor. The
+        // shift is applied only to the emitted DrawImage coordinates.
+        let (rel_dx, rel_dy) = if img.style.position == css::Position::Relative {
+            relative_offset(&img.style)
+        } else {
+            (0.0, 0.0)
+        };
+
         let mut page = current_page.lock().unwrap();
         if !page.images_used.contains(&img.image_index) {
             page.images_used.push(img.image_index);
         }
         page.operations.push(PdfOp::DrawImage {
             index: img.image_index,
-            x,
-            y: y_bottom,
+            x: x + rel_dx,
+            y: y_bottom + rel_dy,
             width: draw_w,
             height: draw_h,
         });
@@ -2830,25 +3714,54 @@ impl LayoutInner {
 
     /// Advance to the next column, or if already in the last column,
     /// draw rules on the current page and start a new one.
+    ///
+    /// When opening a new page, this re-resolves the per-page `@page`
+    /// style (CSS Paged Media L3 §4.4) so margins, page size, and
+    /// margin-box content can vary across pages (e.g. `:first` shrinks
+    /// page 1's margins, `:left`/`:right` flip mirror gutters). The
+    /// caller's column-relative cursor / `col_width` state is updated
+    /// in place to reflect the freshly resolved geometry.
     #[allow(clippy::too_many_arguments)]
     fn advance_column_or_page(
-        &self,
+        &mut self,
         current_page: &mut Arc<Mutex<PageContent>>,
         doc: &mut PdfDocument,
         cursor_y: &mut f32,
         current_col: &mut u32,
         col_count: u32,
-        col_width: f32,
-        col_gap: f32,
-        content_top: f32,
+        col_width: &mut f32,
+        col_gap: &mut f32,
+        content_top: &mut f32,
     ) {
         if *current_col < col_count - 1 {
             *current_col += 1;
-            *cursor_y = content_top;
+            *cursor_y = *content_top;
         } else {
-            self.draw_column_rules(current_page, content_top, col_width, col_gap, col_count);
+            self.draw_column_rules(current_page, *content_top, *col_width, *col_gap, col_count);
+            // Re-resolve `@page` for the page we're about to open. The
+            // page index is `doc.pages.len() + 1` because the new page
+            // hasn't been pushed yet.
+            if !self.page_rules.is_empty() {
+                let next_page_num = doc.pages.len() + 1;
+                let _ = self.apply_page_style_for(next_page_num, next_page_num);
+            }
             *current_page = new_page(doc, self.page_width, self.page_height);
-            *cursor_y = content_top;
+            // Recompute column / content geometry so blocks on the new
+            // page measure against the freshly resolved margins.
+            let new_content_width = self.page_width - self.margin_left - self.margin_right;
+            let (new_col_w, new_col_g) = if col_count > 1 {
+                let gap_total = (col_count - 1) as f32 * self.column_gap;
+                (
+                    (new_content_width - gap_total) / col_count as f32,
+                    self.column_gap,
+                )
+            } else {
+                (new_content_width, 0.0)
+            };
+            *col_width = new_col_w;
+            *col_gap = new_col_g;
+            *content_top = self.page_height - self.margin_top;
+            *cursor_y = *content_top;
             *current_col = 0;
         }
     }
@@ -2866,7 +3779,8 @@ impl LayoutInner {
         }
         let mut page = page.lock().unwrap();
         page.operations.push(PdfOp::SaveState);
-        let (r, g, b) = self.column_rule_color.unwrap_or((0.75, 0.75, 0.75));
+        let ((r, g, b), a) = split_rgba(self.column_rule_color.unwrap_or((0.75, 0.75, 0.75, 1.0)));
+        push_alpha_if_translucent(&mut page.operations, a);
         page.operations.push(PdfOp::SetStrokeColor { r, g, b });
         page.operations
             .push(PdfOp::SetLineWidth(self.column_rule_width));
@@ -2956,7 +3870,10 @@ impl Layout {
             text: text.to_string(),
             font_name: font.to_string(),
             font_size: fs,
-            color: color.map(rgb_to_f32),
+            color: color.map(|c| {
+                let (r, g, b) = rgb_to_f32(c);
+                (r, g, b, 1.0)
+            }),
             ..Default::default()
         };
 
@@ -2965,13 +3882,19 @@ impl Layout {
             line_height: Some(line_height.map_or(fs * 1.2, |h| h as f32)),
             spacing_after: spacing_after as f32,
             style: BlockStyle {
-                background_color: background_color.map(rgb_to_f32),
+                background_color: background_color.map(|c| {
+                    let (r, g, b) = rgb_to_f32(c);
+                    (r, g, b, 1.0)
+                }),
                 padding_top: pad_t,
                 padding_right: pad_r,
                 padding_bottom: pad_b,
                 padding_left: pad_l,
                 border_width: border_width as f32,
-                border_color: border_color.map(rgb_to_f32),
+                border_color: border_color.map(|c| {
+                    let (r, g, b) = rgb_to_f32(c);
+                    (r, g, b, 1.0)
+                }),
                 text_align: align,
                 ..BlockStyle::default()
             },
@@ -3002,19 +3925,23 @@ impl Layout {
         let align = parse_text_align(text_align)?;
         let (pad_t, pad_r, pad_b, pad_l) = parse_padding(padding)?;
 
+        let with_alpha = |c: (f64, f64, f64)| -> (f32, f32, f32, f32) {
+            let (r, g, b) = rgb_to_f32(c);
+            (r, g, b, 1.0)
+        };
         self.inner.push_paragraph(Paragraph {
             runs,
             line_height: line_height.map(|h| h as f32),
             spacing_after: spacing_after as f32,
             style: BlockStyle {
-                color: color.map(rgb_to_f32),
-                background_color: background_color.map(rgb_to_f32),
+                color: color.map(with_alpha),
+                background_color: background_color.map(with_alpha),
                 padding_top: pad_t,
                 padding_right: pad_r,
                 padding_bottom: pad_b,
                 padding_left: pad_l,
                 border_width: border_width as f32,
-                border_color: border_color.map(rgb_to_f32),
+                border_color: border_color.map(with_alpha),
                 text_align: align,
                 ..BlockStyle::default()
             },
@@ -3036,6 +3963,142 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── T3 Rung 1: explicit `height` consumes vertical space ─────
+
+    #[test]
+    fn explicit_height_adds_padding_to_padding_box() {
+        // `height` is the content-area length under the default
+        // `box-sizing: content-box`, so the padding-box height returned
+        // by `resolve_box_height` is `padding_top + height + padding_bottom`.
+        // The natural value (the height the block would have at
+        // `height: auto`) is ignored when an explicit height is set.
+        let style = BlockStyle {
+            height: Some(792.0),
+            padding_top: 8.0,
+            padding_bottom: 8.0,
+            ..BlockStyle::default()
+        };
+        let resolved = resolve_box_height(&style, 24.0);
+        assert!((resolved - 808.0).abs() < 1e-6, "got {resolved}");
+    }
+
+    #[test]
+    fn explicit_height_clamped_by_max_height() {
+        // CSS 2.1 §10.7: `max-height` clamps any computed height,
+        // including one set by an explicit `height` declaration. With
+        // height: 1000, max-height: 500 the resolved padding-box
+        // collapses to max-height (no padding here so the math is
+        // direct).
+        let style = BlockStyle {
+            height: Some(1000.0),
+            max_height: Some(500.0),
+            ..BlockStyle::default()
+        };
+        let resolved = resolve_box_height(&style, 24.0);
+        assert!((resolved - 500.0).abs() < 1e-6, "got {resolved}");
+    }
+
+    #[test]
+    fn explicit_height_extended_by_min_height() {
+        // CSS 2.1 §10.7: `min-height` lifts any computed height that
+        // is below it, including a too-small explicit `height`. With
+        // height: 100, min-height: 200 the resolved padding-box is
+        // 200.
+        let style = BlockStyle {
+            height: Some(100.0),
+            min_height: Some(200.0),
+            ..BlockStyle::default()
+        };
+        let resolved = resolve_box_height(&style, 24.0);
+        assert!((resolved - 200.0).abs() < 1e-6, "got {resolved}");
+    }
+
+    // ── WS-2 Rung 3-4: leaf composition + group predicate ─────
+
+    #[test]
+    fn leaf_opacity_times_color_alpha() {
+        // Pure-fn: an `opacity: 0.5` block whose only paint is an
+        // `rgba(0,0,0,0.8)` background composes to α = 0.4 at the single
+        // ExtGState gate. Valid only for *leaf* boxes — see
+        // `needs_transparency_group` for the descendant case.
+        let alpha = effective_leaf_alpha(0.5, 0.8);
+        assert!((alpha - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn leaf_alpha_clamps_to_unit_range() {
+        // Out-of-range inputs (e.g. a buggy upstream computation) are
+        // clamped — paint never goes "more than opaque".
+        assert!((effective_leaf_alpha(2.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((effective_leaf_alpha(1.0, -0.5) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn opacity_one_means_no_group() {
+        // opacity=1.0: never wrap in a Form XObject regardless of
+        // descendant draws — the "fast path" stays fast.
+        assert!(!needs_transparency_group(1.0, true));
+        assert!(!needs_transparency_group(1.0, false));
+    }
+
+    #[test]
+    fn opacity_with_descendants_requires_group() {
+        // opacity<1 + has descendants drawn in the same pass: the
+        // subtree must render through a Transparency Group XObject so
+        // overlapping translucent children composite correctly per CSS
+        // Compositing & Blending L1 §4.
+        assert!(needs_transparency_group(0.5, true));
+    }
+
+    #[test]
+    fn opacity_without_descendants_uses_leaf_path() {
+        // opacity<1 but no descendants: the leaf path
+        // (`opacity * color_alpha` at the single fill/stroke op) is
+        // correct and cheaper than allocating a Form XObject.
+        assert!(!needs_transparency_group(0.5, false));
+    }
+
+    #[test]
+    fn split_rgba_separates_alpha() {
+        // Helper: drop the 4-tuple into the (rgb, alpha) shape consumed
+        // by `SetFillColor` / `SetStrokeColor` ops.
+        let ((r, g, b), a) = split_rgba((0.1, 0.2, 0.3, 0.4));
+        assert!((r - 0.1).abs() < 1e-6);
+        assert!((g - 0.2).abs() < 1e-6);
+        assert!((b - 0.3).abs() < 1e-6);
+        assert!((a - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rgb_only4_drops_alpha() {
+        let (r, g, b) = rgb_only4((0.1, 0.2, 0.3, 0.5));
+        assert!((r - 0.1).abs() < 1e-6);
+        assert!((g - 0.2).abs() < 1e-6);
+        assert!((b - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_alpha_skips_when_opaque() {
+        // α = 1.0 → no SetAlpha op is appended; the existing fill/stroke
+        // path takes over directly. Avoids spurious /Gs<N> gs noise.
+        let mut ops: Vec<PdfOp> = Vec::new();
+        push_alpha_if_translucent(&mut ops, 1.0);
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn push_alpha_emits_when_translucent() {
+        // α < 1.0 → a SetAlpha op is appended so the next color op is
+        // gated by the corresponding ExtGState entry.
+        let mut ops: Vec<PdfOp> = Vec::new();
+        push_alpha_if_translucent(&mut ops, 0.5);
+        assert_eq!(ops.len(), 1);
+        match ops[0] {
+            PdfOp::SetAlpha { alpha } => assert!((alpha - 0.5).abs() < 1e-6),
+            _ => panic!("expected SetAlpha op"),
+        }
+    }
 
     #[test]
     fn wrap_text_empty_input_returns_empty() {
@@ -3097,6 +4160,132 @@ mod tests {
         assert!(err.contains("unknown font"));
     }
 
+    // ── <col> width hint resolution (CSS 2.1 §17.5.2) ────────
+
+    #[test]
+    fn auto_layout_explicit_widths_set_preferred_not_min() {
+        // Container = 600pt, hints = 30%/10%/60%, intrinsic mins = 10pt.
+        // Auto layout must:
+        //   * raise col_preferred to the resolved hint when the hint is
+        //     larger than the content min-width
+        //   * leave col_min UNCHANGED (this is the bug-prevention assert
+        //     — the naive `col_min = col_max = hint` plan would clip a
+        //     long unbreakable word in a hinted-narrow column).
+        //   * keep col_max >= col_preferred.
+        let col_min = vec![10.0_f32; 3];
+        let mut col_max = vec![20.0_f32, 20.0, 20.0];
+        let mut col_preferred = col_max.clone();
+        let hints = vec![Some(180.0), Some(60.0), Some(360.0)]; // 30/10/60% of 600
+        let col_min_before = col_min.clone();
+        apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &hints);
+        assert_eq!(col_preferred, vec![180.0, 60.0, 360.0]);
+        // col_min was not touched — even after applying hints. This is
+        // what the long-URL test below relies on.
+        assert_eq!(col_min, col_min_before);
+        for i in 0..3 {
+            assert!(
+                col_max[i] >= col_preferred[i],
+                "col_max[{i}]={} should be >= col_preferred[{i}]={}",
+                col_max[i],
+                col_preferred[i]
+            );
+        }
+
+        // Bug-prevention assert: a long word with min-width 80 in
+        // column 1 (hinted to 60) must not be clipped to 60.
+        // col_min is the floor for col_preferred, so the column gets
+        // its real intrinsic minimum (80) regardless of the smaller hint.
+        let col_min2 = vec![10.0_f32, 80.0, 10.0];
+        let mut col_max2 = vec![20.0_f32, 80.0, 20.0];
+        let mut col_preferred2 = col_max2.clone();
+        let hints2 = vec![Some(180.0), Some(60.0), Some(360.0)];
+        apply_col_hints_auto(&col_min2, &mut col_max2, &mut col_preferred2, &hints2);
+        assert!(
+            col_preferred2[1] >= 80.0,
+            "long word in column 1 (min 80, hint 60) was clipped to {}",
+            col_preferred2[1]
+        );
+    }
+
+    #[test]
+    fn percents_summing_over_100_scale_down() {
+        // [60%, 60%] of a 600pt table area would naively resolve to
+        // [360, 360] = 720pt — overflowing the table. Per Blink and
+        // WeasyPrint, percents over 100% scale proportionally so the
+        // table still fits its container.
+        let cs = vec![
+            css::ColStyle {
+                width: Some(css::CssLength::Pct(60.0)),
+                ..Default::default()
+            },
+            css::ColStyle {
+                width: Some(css::CssLength::Pct(60.0)),
+                ..Default::default()
+            },
+        ];
+        let mut hints = resolve_col_hints(&cs, 600.0);
+        assert!((hints[0].unwrap() - 360.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 360.0).abs() < 1e-3);
+        scale_overlong_percent_hints(&mut hints, 600.0);
+        assert!((hints[0].unwrap() - 300.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 300.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn explicit_length_widths_are_honored() {
+        // `<col style="width: 100pt">` resolves to 100pt regardless of
+        // the table's container width — only `%` is container-relative.
+        let cs = vec![
+            css::ColStyle {
+                width: Some(css::CssLength::Pt(100.0)),
+                ..Default::default()
+            },
+            css::ColStyle {
+                width: Some(css::CssLength::Px(100.0)), // 100 CSS px = 75 PDF pt
+                ..Default::default()
+            },
+            css::ColStyle::default(),
+        ];
+        let hints = resolve_col_hints(&cs, 600.0);
+        assert!((hints[0].unwrap() - 100.0).abs() < 1e-3);
+        assert!((hints[1].unwrap() - 75.0).abs() < 1e-3);
+        assert!(hints[2].is_none());
+    }
+
+    #[test]
+    fn unspecified_columns_share_remainder() {
+        // Auto layout, hints = [Some(50%=300pt), None, None] in a 600pt
+        // table. Column 0 takes 300pt; the remaining 300pt is shared
+        // between col 1 and col 2 according to their intrinsic widths.
+        // The math is delegated to the existing intrinsic-width pass —
+        // here we just verify col_preferred[0] is pinned to the hint
+        // floor and col_preferred[1..] are untouched (so the existing
+        // distribution logic owns those two).
+        let col_min = vec![10.0_f32, 10.0, 10.0];
+        let mut col_max = vec![100.0_f32, 100.0, 100.0];
+        let mut col_preferred = col_max.clone();
+        let hints = vec![Some(300.0), None, None];
+        apply_col_hints_auto(&col_min, &mut col_max, &mut col_preferred, &hints);
+        assert!((col_preferred[0] - 300.0).abs() < 1e-3);
+        assert!((col_preferred[1] - 100.0).abs() < 1e-3);
+        assert!((col_preferred[2] - 100.0).abs() < 1e-3);
+
+        // In fixed mode, hint-less columns split the leftover equally:
+        // [Some(300), None, None] of a 600pt area -> [300, 150, 150].
+        let widths = apply_col_hints_fixed(3, &hints, 600.0);
+        assert_eq!(widths, vec![300.0, 150.0, 150.0]);
+    }
+
+    #[test]
+    fn fixed_layout_pins_column_widths() {
+        // CSS 2.1 §17.5.2.1 — `table-layout: fixed` pins the column
+        // widths to the hints. Cell content does not widen the column,
+        // even if the intrinsic max-content is much larger than the hint.
+        let hints = vec![Some(180.0), Some(60.0), Some(360.0)];
+        let widths = apply_col_hints_fixed(3, &hints, 600.0);
+        assert_eq!(widths, vec![180.0, 60.0, 360.0]);
+    }
+
     // ── margin collapse (Stage B1) ──────────────────────────
     #[test]
     fn collapse_two_positives_picks_the_larger() {
@@ -3133,5 +4322,141 @@ mod tests {
     fn collapsed_top_delta_handles_negatives() {
         // Prior -5 spent, new top 3 -> effective -2, need -2-(-5)=+3 more.
         assert!((collapsed_top_delta(-5.0, 3.0) - 3.0).abs() < 1e-6);
+    }
+
+    // ── relative_offset (CSS 2.1 § 9.4.3) ────────────────────
+    #[test]
+    fn relative_offset_zero_when_no_offsets_set() {
+        let style = BlockStyle::default();
+        let (dx, dy) = relative_offset(&style);
+        assert!(dx.abs() < 1e-6);
+        assert!(dy.abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_left_positive_dx() {
+        let style = BlockStyle {
+            position_left: Some(15.0),
+            ..Default::default()
+        };
+        let (dx, dy) = relative_offset(&style);
+        assert!((dx - 15.0).abs() < 1e-6);
+        assert!(dy.abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_top_negative_dy_for_pdf_axis() {
+        // CSS top grows downward; PDF y grows upward — invert the sign.
+        let style = BlockStyle {
+            position_top: Some(10.0),
+            ..Default::default()
+        };
+        let (dx, dy) = relative_offset(&style);
+        assert!(dx.abs() < 1e-6);
+        assert!((dy + 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_right_falls_back_when_left_absent() {
+        // `right: 5pt` with no `left` shifts the box left by 5pt.
+        let style = BlockStyle {
+            position_right: Some(5.0),
+            ..Default::default()
+        };
+        let (dx, _) = relative_offset(&style);
+        assert!((dx + 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_left_wins_over_right() {
+        // When both are set, `left` wins (CSS 2.1 §9.4.3 LTR rule).
+        let style = BlockStyle {
+            position_left: Some(7.0),
+            position_right: Some(99.0),
+            ..Default::default()
+        };
+        let (dx, _) = relative_offset(&style);
+        assert!((dx - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_offset_bottom_falls_back_when_top_absent() {
+        let style = BlockStyle {
+            position_bottom: Some(8.0),
+            ..Default::default()
+        };
+        let (_, dy) = relative_offset(&style);
+        assert!((dy - 8.0).abs() < 1e-6);
+    }
+
+    // ── CSS Backgrounds & Borders 3 §5.3: `border-style: double` ───
+
+    /// Helper: render a single paragraph with the given border style and
+    /// return the count of `Stroke` ops emitted on the resulting page.
+    /// We inspect page operations directly (rather than the serialised
+    /// content stream) so the assertion is independent of low-level
+    /// content-stream formatting.
+    fn count_strokes_for_border_style(border_style: css::BorderStyle) -> usize {
+        let mut doc = PdfDocument {
+            pages: Vec::new(),
+            registered_fonts: Vec::new(),
+            images: Vec::new(),
+            title: None,
+            author: None,
+            subject: None,
+            keywords: None,
+            creator: None,
+            warnings: Vec::new(),
+            headings: Vec::new(),
+            anchors: std::collections::HashMap::new(),
+        };
+        let mut layout = LayoutInner::new(36.0, 36.0, 36.0, 36.0, 612.0, 792.0);
+        let style = BlockStyle {
+            border_width: 8.0,
+            border_color: Some((0.0, 0.0, 0.0, 1.0)),
+            border_style: Some(border_style),
+            ..BlockStyle::default()
+        };
+        layout.push_paragraph(Paragraph {
+            runs: vec![TextRun {
+                text: "x".to_string(),
+                font_name: "Helvetica".to_string(),
+                font_size: 12.0,
+                ..TextRun::default()
+            }],
+            line_height: None,
+            spacing_after: 0.0,
+            style,
+            marker: None,
+            is_hr: false,
+            white_space: css::WhiteSpace::default(),
+            tag: None,
+            anchor_id: None,
+        });
+        layout.finish(&mut doc).expect("layout finish");
+        let page = doc.pages[0].lock().unwrap();
+        page.operations
+            .iter()
+            .filter(|op| matches!(op, PdfOp::Stroke))
+            .count()
+    }
+
+    #[test]
+    fn double_border_emits_two_strokes() {
+        // CSS BB3 §5.3: `border-style: double` paints two parallel lines
+        // separated by a gap. The renderer expresses this as two stroked
+        // rectangles, one for the outer line and one for the inner line.
+        // A `solid` border is the control: it emits exactly one Stroke
+        // op (single rectangle path).
+        let solid_strokes = count_strokes_for_border_style(css::BorderStyle::Solid);
+        let double_strokes = count_strokes_for_border_style(css::BorderStyle::Double);
+        assert_eq!(
+            solid_strokes, 1,
+            "solid border should emit exactly one stroke op (got {solid_strokes})"
+        );
+        assert_eq!(
+            double_strokes, 2,
+            "double border should emit exactly two stroke ops, one per parallel line (got {double_strokes})"
+        );
     }
 }

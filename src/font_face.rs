@@ -13,7 +13,7 @@
 //! contribute a warning to the doc but never abort the build.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::RegisteredFont;
 use crate::css::{FontFaceRule, FontFaceSrc, FontStyle, FontWeight, SrcFormat, SrcKind};
@@ -81,33 +81,44 @@ fn format_label(format: &SrcFormat) -> String {
 }
 
 /// Resolve a single `url(...)` value to bytes, honoring `base_url` for
-/// relative paths. HTTP/HTTPS schemes are explicitly rejected — we have
-/// no network client and don't intend to grow one in this layer.
-fn load_url_bytes(url: &str, base_url: Option<&Path>) -> Result<Vec<u8>, FontFaceLoadWarning> {
-    let lower = url.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        return Err(FontFaceLoadWarning::UnsupportedScheme(url.to_string()));
+/// relative paths. Routes through the supplied `UrlFetcher` so HTTP(S)
+/// schemes work when the `http-fetch` feature is enabled. The default
+/// (file-only) fetcher returns the canonical "feature not enabled"
+/// error, which we map back into `UnsupportedScheme` so existing
+/// callers see no behavior change.
+fn load_url_bytes(
+    url: &str,
+    base_url: Option<&Path>,
+    fetcher: &dyn crate::url_fetcher::UrlFetcher,
+) -> Result<Vec<u8>, FontFaceLoadWarning> {
+    match fetcher.fetch(url, base_url) {
+        Ok(res) => Ok(res.bytes),
+        Err(e) => {
+            // Heuristic: if the failure is the canonical feature gate
+            // for an http(s) URL, surface it as UnsupportedScheme so
+            // the existing "scheme not supported" warning text is
+            // unchanged. Otherwise it's a genuine I/O failure.
+            let lower = url.to_ascii_lowercase();
+            let looks_http = lower.starts_with("http://") || lower.starts_with("https://");
+            if looks_http && e.contains("http-fetch feature not enabled") {
+                Err(FontFaceLoadWarning::UnsupportedScheme(url.to_string()))
+            } else {
+                Err(FontFaceLoadWarning::Io(e))
+            }
+        }
     }
-    let path_str = url.strip_prefix("file://").unwrap_or(url);
-    let path = Path::new(path_str);
-    let resolved: PathBuf = if path.is_absolute() {
-        path.to_path_buf()
-    } else if let Some(base) = base_url {
-        base.join(path)
-    } else {
-        path.to_path_buf()
-    };
-    std::fs::read(&resolved).map_err(|e| FontFaceLoadWarning::Io(e.to_string()))
 }
 
 /// Walk `srcs` in order, returning the bytes from the first source we
 /// can actually load. Any source we can't handle (unsupported format,
-/// HTTP url, `local()`) contributes a warning that we keep around so the
-/// caller can surface the *last* failure if every entry falls through.
+/// HTTP url with the feature off, `local()`) contributes a warning that
+/// we keep around so the caller can surface the *last* failure if every
+/// entry falls through.
 #[allow(dead_code)]
 pub fn resolve_font_face_src(
     srcs: &[FontFaceSrc],
     base_url: Option<&Path>,
+    fetcher: &dyn crate::url_fetcher::UrlFetcher,
 ) -> Result<Vec<u8>, FontFaceLoadWarning> {
     if srcs.is_empty() {
         return Err(FontFaceLoadWarning::NoSources);
@@ -121,7 +132,7 @@ pub fn resolve_font_face_src(
         }
         match &src.kind {
             SrcKind::DataUri(bytes) => return Ok(bytes.clone()),
-            SrcKind::Url(url) => match load_url_bytes(url, base_url) {
+            SrcKind::Url(url) => match load_url_bytes(url, base_url, fetcher) {
                 Ok(b) => return Ok(b),
                 Err(w) => last_warning = w,
             },
@@ -194,13 +205,14 @@ pub fn resolve_font_face_for_cascade(
 pub fn build_font_face_registry(
     face_rules: &[FontFaceRule],
     base_url: Option<&Path>,
+    fetcher: &dyn crate::url_fetcher::UrlFetcher,
 ) -> (Vec<RegisteredFont>, FontFaceLookup, Vec<String>) {
     let mut registered: Vec<RegisteredFont> = Vec::new();
     let mut lookup: FontFaceLookup = HashMap::new();
     let mut warnings: Vec<String> = Vec::new();
 
     for rule in face_rules {
-        match resolve_font_face_src(&rule.src, base_url) {
+        match resolve_font_face_src(&rule.src, base_url, fetcher) {
             Ok(data) => {
                 let name = format!("Custom-{}", registered.len());
                 let weight = rule.weight.unwrap_or(FontWeight::Normal);
@@ -240,7 +252,8 @@ mod tests {
     #[test]
     fn resolve_picks_first_data_uri() {
         let srcs = vec![data_uri(b"hello")];
-        let bytes = resolve_font_face_src(&srcs, None).expect("loads");
+        let bytes =
+            resolve_font_face_src(&srcs, None, &crate::url_fetcher::DefaultFetcher).expect("loads");
         assert_eq!(bytes, b"hello");
     }
 
@@ -253,7 +266,8 @@ mod tests {
             },
             data_uri(b"abc"),
         ];
-        let bytes = resolve_font_face_src(&srcs, None).expect("loads second");
+        let bytes = resolve_font_face_src(&srcs, None, &crate::url_fetcher::DefaultFetcher)
+            .expect("loads second");
         assert_eq!(bytes, b"abc");
     }
 
@@ -263,7 +277,8 @@ mod tests {
             kind: SrcKind::Url("https://example.com/font.ttf".to_string()),
             format: None,
         }];
-        let err = resolve_font_face_src(&srcs, None).expect_err("rejects");
+        let err = resolve_font_face_src(&srcs, None, &crate::url_fetcher::DefaultFetcher)
+            .expect_err("rejects");
         assert!(matches!(err, FontFaceLoadWarning::UnsupportedScheme(_)));
     }
 
@@ -273,7 +288,8 @@ mod tests {
             kind: SrcKind::Local("Helvetica".to_string()),
             format: None,
         }];
-        let err = resolve_font_face_src(&srcs, None).expect_err("rejects");
+        let err = resolve_font_face_src(&srcs, None, &crate::url_fetcher::DefaultFetcher)
+            .expect_err("rejects");
         assert!(matches!(err, FontFaceLoadWarning::UnsupportedLocal(_)));
     }
 
@@ -282,8 +298,7 @@ mod tests {
         let mut dir = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         dir.push(format!("pdfun-test-{}-{}", std::process::id(), nanos));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("font.bin");
@@ -295,7 +310,8 @@ mod tests {
             kind: SrcKind::Url("font.bin".to_string()),
             format: None,
         }];
-        let bytes = resolve_font_face_src(&srcs, Some(&dir)).expect("loads");
+        let bytes = resolve_font_face_src(&srcs, Some(&dir), &crate::url_fetcher::DefaultFetcher)
+            .expect("loads");
         assert_eq!(bytes, payload);
 
         let _ = std::fs::remove_file(&path);
@@ -316,7 +332,8 @@ mod tests {
     #[test]
     fn single_rule_registers_as_custom_0() {
         let rules = vec![rule_with(vec![data_uri(b"AAA")], "MyFont")];
-        let (registered, lookup, warnings) = build_font_face_registry(&rules, None);
+        let (registered, lookup, warnings) =
+            build_font_face_registry(&rules, None, &crate::url_fetcher::DefaultFetcher);
         assert!(warnings.is_empty());
         assert_eq!(registered.len(), 1);
         assert_eq!(registered[0].name, "Custom-0");
@@ -332,7 +349,8 @@ mod tests {
         regular.weight = Some(FontWeight::Numeric(400));
         let mut bold = rule_with(vec![data_uri(b"B")], "F");
         bold.weight = Some(FontWeight::Numeric(700));
-        let (registered, lookup, warnings) = build_font_face_registry(&[regular, bold], None);
+        let (registered, lookup, warnings) =
+            build_font_face_registry(&[regular, bold], None, &crate::url_fetcher::DefaultFetcher);
         assert!(warnings.is_empty());
         assert_eq!(registered.len(), 2);
         assert_eq!(registered[0].name, "Custom-0");
@@ -395,6 +413,37 @@ mod tests {
         );
     }
 
+    /// Stand-in fetcher for the font-face HTTP test. Feeds back canned
+    /// bytes for any URL, so we can assert the resolver uses whatever
+    /// the fetcher returns regardless of scheme.
+    struct CannedFetcher(Vec<u8>);
+    impl crate::url_fetcher::UrlFetcher for CannedFetcher {
+        fn fetch(
+            &self,
+            _url: &str,
+            _base_dir: Option<&Path>,
+        ) -> Result<crate::url_fetcher::FetchedResource, String> {
+            Ok(crate::url_fetcher::FetchedResource {
+                bytes: self.0.clone(),
+                mime: None,
+                redirected_url: None,
+            })
+        }
+    }
+
+    #[test]
+    fn font_face_http_url_resolves_via_fetcher() {
+        // With a custom fetcher that returns bytes for any URL, an
+        // HTTP src works regardless of the http-fetch feature flag.
+        let srcs = vec![FontFaceSrc {
+            kind: SrcKind::Url("https://example.com/font.ttf".to_string()),
+            format: None,
+        }];
+        let fetcher = CannedFetcher(b"TTF-bytes".to_vec());
+        let bytes = resolve_font_face_src(&srcs, None, &fetcher).expect("loads via fetcher");
+        assert_eq!(bytes, b"TTF-bytes");
+    }
+
     #[test]
     fn failed_rule_does_not_register_but_emits_warning() {
         let bad = rule_with(
@@ -404,7 +453,8 @@ mod tests {
             }],
             "F",
         );
-        let (registered, lookup, warnings) = build_font_face_registry(&[bad], None);
+        let (registered, lookup, warnings) =
+            build_font_face_registry(&[bad], None, &crate::url_fetcher::DefaultFetcher);
         assert!(registered.is_empty());
         assert!(lookup.is_empty());
         assert_eq!(warnings.len(), 1);

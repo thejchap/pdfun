@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 125/133 behaviors implemented · 120/133 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 129/137 behaviors implemented · 121/137 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -43,7 +43,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| Unordered list (ul, li) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::ul_renders_item_text` |
+| Unordered list (ul, li) | — | ✅ | ✅ | ✅ (3) `tests/test_html.py::ul_renders_item_text`, `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::ul_padding_left_shifts_bullet_rightward` |
 | Ordered list (ol, li) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::ol_has_numbered_markers` |
 | Nested lists | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::nested_ul` |
 | Definition list (dl, dt, dd) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::dl_renders_term_and_definition` |
@@ -108,8 +108,8 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
 | margin (shorthand + four sides) | 8.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::margin_top_renders` |
-| padding (shorthand + four sides) | 8.4 | ✅ | ✅ | ✅ (1) `tests/visual/padding_border.html` |
-| border / border-width / border-color / border-style | 8.5 | ✅ | ✅ | ✅ (1) `tests/visual/padding_border.html` |
+| padding (shorthand + four sides) | 8.4 | ✅ | ✅ | ✅ (3) `tests/visual/padding_border.html`, `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::ul_padding_left_shifts_bullet_rightward` |
+| border / border-width / border-color / border-style | 8.5 | ✅ | ✅ | ✅ (2) `tests/visual/padding_border.html`, `tests/test_html.py::inline_border_double_paints_two_lines` |
 | Margin collapse: adjacent siblings | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/margin_collapse_siblings.html` |
 | Margin collapse: parent / first child | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/margin_collapse_parent_child.html` |
 | Margin collapse: empty blocks | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::empty_block_self_collapses` |
@@ -126,17 +126,17 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | float: right with text wrap | 9.5.1 | ✅ | ✅ | ✅ (1) `tests/visual/float_right.html` |
 | clear property | 9.5.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::clear_both_drops_below_floats` |
 | position: static | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::position_static_ignores_offsets` |
-| position: relative | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::relative_top_shifts_box_down` |
-| position: absolute | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page` |
+| position: relative | 9.3.1 | ✅ | ✅ | ✅ (4) `tests/test_html.py::relative_top_shifts_box_down`, `tests/test_html.py::relative_left_pt_offsets_against_resolved_value`, `tests/test_html.py::relative_left_percent_resolves_against_container_width`, `tests/test_html.py::relative_right_falls_back_when_left_absent` |
+| position: absolute | 9.3.1 | ✅ | ✅ | ✅ (3) `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page`, `tests/test_html.py::absolute_img_with_right_lands_at_page_edge`, `tests/test_html.py::absolute_img_is_removed_from_normal_flow` |
 | position: fixed | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::fixed_paints_on_every_page` |
-| top / right / bottom / left offsets | 9.3.2 | ✅ | ✅ | ✅ (3) `tests/test_html.py::relative_top_shifts_box_down`, `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page`, `tests/test_html.py::fixed_paints_on_every_page` |
+| top / right / bottom / left offsets | 9.3.2 | ✅ | ✅ | ✅ (8) `tests/test_html.py::relative_top_shifts_box_down`, `tests/test_html.py::relative_left_pt_offsets_against_resolved_value`, `tests/test_html.py::relative_left_percent_resolves_against_container_width`, `tests/test_html.py::relative_right_falls_back_when_left_absent`, `tests/test_html.py::absolute_with_top_left_positions_box_relative_to_page`, `tests/test_html.py::absolute_img_with_right_lands_at_page_edge`, `tests/test_html.py::absolute_img_is_removed_from_normal_flow`, `tests/test_html.py::fixed_paints_on_every_page` |
 
 ## CSS 2.1 §10 — Visual formatting model details
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
 | width / min-width / max-width | 10.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::img_width_preserves_aspect_ratio` |
-| height / min-height / max-height | 10.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::min_height_expands_short_block` |
+| height / min-height / max-height | 10.5 | ✅ | ✅ | ✅ (2) `tests/test_html.py::min_height_expands_short_block`, `tests/test_html.py::length_height_pushes_next_sibling_to_new_page` |
 | box-sizing (content-box, border-box) | 10.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::border_box_vs_content_box_differ` |
 | line-height | 10.8 | ✅ | ✅ | ✅ (1) `tests/test_html.py::line_height_inherits_through_div` |
 | vertical-align (table cells: top, middle, bottom) | 10.8 | ✅ | ✅ | ✅ (1) `tests/test_html.py::vertical_align_top_matches_default` |
@@ -153,7 +153,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 |----------|:------:|:----------:|:-----:|:-------|
 | @page (size, margins) | 13.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::at_page_size_letter` |
 | page-break-before / page-break-after | 13.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/page_break.html` |
-| page-break-inside | 13.3.1 | ✅ | ✅ | ✅ (3) `tests/test_html.py::page_break_inside_avoid_parses`, `tests/test_html.py::break_inside_avoid_alias_accepted`, `tests/test_html.py::page_break_inside_avoid_pushes_overflow_to_next_page` |
+| page-break-inside | 13.3.1 | ✅ | ✅ | ✅ (4) `tests/test_html.py::page_break_inside_avoid_parses`, `tests/test_html.py::break_inside_avoid_alias_accepted`, `tests/test_html.py::page_break_inside_avoid_pushes_overflow_to_next_page`, `tests/test_html.py::length_height_pushes_next_sibling_to_new_page` |
 | orphans / widows | 13.3.2 | ✅ | ✅ | ✅ (3) `tests/test_html.py::orphans_integer_parses`, `tests/test_html.py::widows_integer_parses`, `tests/test_html.py::orphans_and_widows_via_stylesheet` |
 
 ## CSS 2.1 §14 — Colors and backgrounds
@@ -209,7 +209,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| rgba() function | 4.2.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::rgba_accepts_alpha_component` |
+| rgba() function | 4.2.1 | ✅ | ✅ | ✅ (2) `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::rgba_accepts_alpha_component` |
 | hsl() function | 4.2.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::hsl_red_renders` |
 | hsla() function | 4.2.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::hsla_accepts_alpha_component` |
 | opacity property | 3.2 | ✅ | ✅ | ✅ (1) `tests/visual/opacity.html` |
@@ -282,6 +282,10 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Table of contents | — | ✅ | ✅ | ✅ (7) `tests/test_html.py::toc_true_prepends_heading_list`, `tests/test_html.py::toc_emits_internal_link_per_heading`, `tests/test_html.py::toc_isolates_itself_on_dedicated_page`, `tests/test_html.py::toc_string_sets_custom_title`, `tests/test_html.py::toc_preserves_existing_heading_ids`, `tests/test_html.py::toc_false_is_a_no_op`, `tests/test_html.py::toc_on_empty_document_no_op` |
 | Custom font embedding (CIDFont + ToUnicode) | — | ✅ | ✅ | ✅ (1) `tests/test_pdfun.py::register_font_returns_name` |
 | Font subsetting (only used glyphs embedded) | — | ✅ | ✅ | ✅ (1) `tests/test_pdfun.py::embedded_font_has_widths` |
+| PDF WinAnsiEncoding text emission for built-in fonts | ISO 32000-1 Annex D.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::winansi_chars_in_text_op` |
+| Auto-promote non-WinAnsi runs onto a Type0/CID fallback face | ISO 32000-1 §9.7 | ✅ | ✅ | ⚠️ untested |
+| Page-level Transparency Group + Form XObject groups for opacity<1 with descendants | ISO 32000-1 §11.6.5 | ✅ | ✅ | ⚠️ untested |
+| Pluggable URL fetcher trait for <img>/background-image/@font-face url() | — | ✅ | ✅ | ⚠️ untested |
 | Stream compression | — | ✅ | ✅ | ⚠️ untested |
 | PDF encryption | — | 🟡 | ❌ | — |
 | PDF/A compliance | — | ✅ | ❌ | — |
