@@ -1,0 +1,12 @@
+<style>@page { size: A4; }</style>
+<!-- spec: CSS 2.1 §6.4.3; behaviors: cascade-specificity -->
+<style>
+  p { color: red; }                 /* 0,0,0,1 */
+  .blue { color: blue; }            /* 0,0,1,0 — wins over plain p */
+  p#named { color: green; }         /* 0,1,0,1 — wins over class */
+  p[data-x="y"] { color: orange; }  /* 0,0,1,1 — wins over class but not id */
+</style>
+<p>Default red.</p>
+<p class="blue">Blue (class beats element).</p>
+<p class="blue" id="named">Green (id beats class).</p>
+<p class="blue" data-x="y">Orange (attr+element beats class).</p>

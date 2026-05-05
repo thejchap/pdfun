@@ -1,0 +1,99 @@
+<!-- spec: realworld; behaviors: integration-readme-style -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pdfun — README fixture</title>
+<style>
+  @page { size: Letter; margin: 16mm 20mm; }
+  body { font-family: Liberation Sans, sans-serif; color: #24292f; line-height: 1.5; max-width: 760px; margin: 0 auto; font-size: 12px; }
+  h1 { border-bottom: 1px solid #d8dee4; padding-bottom: 6px; font-size: 26px; }
+  h2 { border-bottom: 1px solid #eaecef; padding-bottom: 4px; font-size: 18px; margin-top: 24px; }
+  h3 { font-size: 14px; margin-top: 18px; }
+  a { color: #0969da; }
+  code { font-family: Liberation Mono, monospace; background: #f6f8fa; padding: 1px 4px; border-radius: 4px; font-size: 0.9em; }
+  pre {
+    background: #f6f8fa;
+    padding: 12px 14px;
+    border-radius: 6px;
+    font-family: Liberation Mono, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    overflow: auto;
+  }
+  pre code { background: transparent; padding: 0; }
+  table { border-collapse: collapse; margin: 12px 0; }
+  th, td { border: 1px solid #d0d7de; padding: 6px 12px; text-align: left; }
+  thead th { background: #f6f8fa; }
+  blockquote {
+    margin: 0 0 12px;
+    padding: 0 12px;
+    color: #57606a;
+    border-left: 3px solid #d0d7de;
+  }
+  ul { padding-left: 22px; }
+  li { margin-bottom: 3px; }
+  .badges span {
+    display: inline-block;
+    padding: 2px 8px;
+    background: #1f883d;
+    color: #fff;
+    border-radius: 4px;
+    font-size: 11px;
+    margin-right: 4px;
+  }
+  .badges span.warn { background: #bf8700; }
+  .badges span.info { background: #0969da; }
+</style>
+</head>
+<body>
+<h1>pdfun</h1>
+<p class="badges">
+  <span>build passing</span>
+  <span class="info">python 3.12+</span>
+  <span class="warn">alpha</span>
+</p>
+<p>A pure-Rust HTML/CSS to PDF renderer with Python bindings. No system
+  dependencies — drop it into a virtualenv and ship.</p>
+
+<h2>Installation</h2>
+<pre><code>uv add pdfun
+# or:
+pip install pdfun</code></pre>
+
+<h2>Quick start</h2>
+<pre><code>from pdfun import HtmlDocument
+
+doc = HtmlDocument(string="&lt;h1&gt;Hello, pdfun!&lt;/h1&gt;")
+doc.write_pdf("hello.pdf")</code></pre>
+
+<h2>Features</h2>
+<ul>
+  <li>CSS 2.1 box model: margins, padding, borders, border-radius, box-sizing</li>
+  <li>Typography: font-family, weight, style, line-height, decoration</li>
+  <li>Paged media: <code>@page</code>, page-break-*, orphans/widows</li>
+  <li>Tables, lists, images (PNG/JPEG)</li>
+  <li>Auto-generated table of contents</li>
+</ul>
+
+<h2>Comparison</h2>
+<table>
+  <thead>
+    <tr><th>Feature</th><th>pdfun</th><th>WeasyPrint</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Pure Rust core</td><td>yes</td><td>no</td></tr>
+    <tr><td>System deps</td><td>none</td><td>Pango</td></tr>
+    <tr><td>CSS 2.1 box model</td><td>full</td><td>full</td></tr>
+    <tr><td>Flexbox</td><td>not yet</td><td>partial</td></tr>
+  </tbody>
+</table>
+
+<blockquote>This README is a synthetic fixture for visual regression
+  testing — it exercises headings, code blocks, tables, blockquotes, and
+  badges all together.</blockquote>
+
+<h2>License</h2>
+<p>MIT. See <a href="LICENSE">LICENSE</a>.</p>
+</body>
+</html>

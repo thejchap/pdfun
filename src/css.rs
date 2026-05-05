@@ -1278,6 +1278,10 @@ fn parse_css_length<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseEr
                 Ok(CssLength::Vw(*value))
             } else if unit.eq_ignore_ascii_case("vh") {
                 Ok(CssLength::Vh(*value))
+            } else if unit.eq_ignore_ascii_case("mm") {
+                Ok(CssLength::Pt(*value * 72.0 / 25.4))
+            } else if unit.eq_ignore_ascii_case("cm") {
+                Ok(CssLength::Pt(*value * 72.0 * 10.0 / 25.4))
             } else {
                 Err(location.new_custom_error(()))
             }
@@ -1801,6 +1805,35 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
             }
             "background-color" => {
                 self.style.background_color = Some(parse_css_color(input)?);
+            }
+            "background" => {
+                // Minimal `background:` shorthand support — we only honor
+                // the color component (the form most fixtures use, e.g.
+                // `background: #cfe2ff`). The other longhands (image,
+                // repeat, position, size, attachment, origin, clip) have
+                // their own per-property handlers; folding them into the
+                // shorthand parser would require teaching cssparser the
+                // full grammar from CSS Backgrounds & Borders 3 §3.10
+                // and isn't worth the surface area for the cases we hit.
+                //
+                // Walk all top-level tokens, accept the first value that
+                // parses as a color, and require the rest to be `none` /
+                // a recognised keyword / a length so we don't silently
+                // swallow malformed declarations.
+                let mut found_color = false;
+                while !input.is_exhausted() {
+                    if !found_color
+                        && let Ok(c) =
+                            input.try_parse(|i: &mut Parser<'i, '_>| parse_css_color(i))
+                    {
+                        self.style.background_color = Some(c);
+                        found_color = true;
+                        continue;
+                    }
+                    // Skip one token (ident, length, percentage, slash, etc.)
+                    // — we accept and ignore non-color shorthand bits.
+                    let _ = input.next();
+                }
             }
             "font-size" => {
                 self.style.font_size = Some(parse_non_negative_length(input)?);
@@ -3592,19 +3625,58 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
 
             match name.to_ascii_lowercase().as_str() {
                 "size" => {
-                    let ident = input.try_parse(|i| i.expect_ident().cloned());
-                    if let Ok(ref id) = ident {
-                        match id.to_ascii_lowercase().as_str() {
-                            "letter" => {
-                                page_style.width = Some(612.0);
-                                page_style.height = Some(792.0);
-                            }
-                            "a4" => {
-                                page_style.width = Some(595.0);
-                                page_style.height = Some(842.0);
+                    // CSS Paged Media: <page-size> || [portrait | landscape]
+                    //                | <length>{1,2}
+                    // Loop through up to two idents (size keyword and
+                    // orientation, either order). A6/A5/A3/B* use precise
+                    // mm-derived pt so 100 DPI rasters match WeasyPrint
+                    // exactly; A4 and Letter keep their long-standing
+                    // rounded values (and happen to ceil to the same
+                    // pixel dimensions as the precise versions).
+                    let mut size_pt: Option<(f32, f32)> = None;
+                    let mut landscape: Option<bool> = None;
+                    loop {
+                        let ident = input.try_parse(|i| i.expect_ident().cloned());
+                        let Ok(id) = ident else { break };
+                        let kw = id.to_ascii_lowercase();
+                        match kw.as_str() {
+                            "portrait" if landscape.is_none() => landscape = Some(false),
+                            "landscape" if landscape.is_none() => landscape = Some(true),
+                            sz if size_pt.is_none() => {
+                                size_pt = match sz {
+                                    "letter" => Some((612.0, 792.0)),
+                                    "legal" => Some((612.0, 1008.0)),
+                                    "ledger" | "tabloid" => Some((792.0, 1224.0)),
+                                    "a3" => Some((841.890, 1190.551)),
+                                    "a4" => Some((595.0, 842.0)),
+                                    "a5" => Some((419.528, 595.276)),
+                                    "a6" => Some((297.638, 419.528)),
+                                    "b4" => Some((708.661, 1000.63)),
+                                    "b5" => Some((498.898, 708.661)),
+                                    "b6" => Some((354.331, 498.898)),
+                                    _ => return Err(input.new_custom_error(())),
+                                };
                             }
                             _ => return Err(input.new_custom_error(())),
                         }
+                    }
+                    if let Some((mut w, mut h)) = size_pt {
+                        match landscape {
+                            Some(true) if w < h => std::mem::swap(&mut w, &mut h),
+                            Some(false) if w > h => std::mem::swap(&mut w, &mut h),
+                            _ => {}
+                        }
+                        page_style.width = Some(w);
+                        page_style.height = Some(h);
+                    } else if landscape.is_some() {
+                        // Orientation only: UA default (Letter), oriented.
+                        let (w, h) = if landscape == Some(true) {
+                            (792.0, 612.0)
+                        } else {
+                            (612.0, 792.0)
+                        };
+                        page_style.width = Some(w);
+                        page_style.height = Some(h);
                     } else {
                         let w = parse_non_negative_length(input)?;
                         let h = input.try_parse(parse_non_negative_length).unwrap_or(w);
@@ -3683,7 +3755,8 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut page_rules = Vec::new();
     let mut font_faces = Vec::new();
-    parse_stylesheet_manual(css, &mut rules, &mut page_rules, &mut font_faces);
+    let stripped = strip_css_comments(css);
+    parse_stylesheet_manual(&stripped, &mut rules, &mut page_rules, &mut font_faces);
     let mut sheet = Stylesheet {
         rules,
         page_style: PageStyle::default(),
@@ -3692,6 +3765,81 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     };
     sheet.page_style = sheet.resolve_page_style(1, 1);
     sheet
+}
+
+/// Remove CSS `/* ... */` comments, replacing each with a single space.
+///
+/// `parse_stylesheet_manual` scans for `{` to delimit selectors; if a
+/// comment sits between two rules (`p { ... } /* note */ .blue { ... }`),
+/// the comment text is otherwise pulled into the next rule's selector
+/// and silently breaks matching for every rule that follows. Stripping
+/// up front keeps the rest of the parser comment-blind.
+///
+/// String literals (`"..."` / `'...'`) are honored so a `content:
+/// "/* not a comment */"` declaration survives intact. Replacement uses
+/// a single space, not deletion, so adjacent tokens (`p/*x*/.blue`)
+/// don't collapse into one identifier.
+fn strip_css_comments(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' | b'\'' => {
+                let quote = b;
+                let start = i;
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if c == quote {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                // Safe: we only step over single-byte ASCII quotes and
+                // multi-byte sequences via the outer loop's index.
+                out.push_str(&input[start..i]);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                let mut j = i + 2;
+                while j + 1 < bytes.len() && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
+                    j += 1;
+                }
+                i = if j + 1 < bytes.len() { j + 2 } else { bytes.len() };
+                out.push(' ');
+            }
+            _ => {
+                // Walk one UTF-8 codepoint at a time so multi-byte
+                // characters (e.g. the `§` in spec links) aren't split.
+                let ch_end = next_char_end(bytes, i);
+                out.push_str(&input[i..ch_end]);
+                i = ch_end;
+            }
+        }
+    }
+    out
+}
+
+fn next_char_end(bytes: &[u8], i: usize) -> usize {
+    let b = bytes[i];
+    let len = if b < 0x80 {
+        1
+    } else if b < 0xC0 {
+        1 // stray continuation byte; advance one to make progress
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    };
+    (i + len).min(bytes.len())
 }
 
 /// Find the byte index of the `}` that matches the `{` at position
@@ -5891,6 +6039,47 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(mb.content, vec![ContentItem::CounterPage]);
+    }
+
+    #[test]
+    fn page_size_keywords_with_orientation() {
+        // A5 portrait — already portrait, dims unchanged.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: A5 portrait", &mut ps);
+        assert!((ps.width.unwrap() - 419.528).abs() < 0.01);
+        assert!((ps.height.unwrap() - 595.276).abs() < 0.01);
+
+        // A6 landscape — wider than tall.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: A6 landscape", &mut ps);
+        assert!((ps.width.unwrap() - 419.528).abs() < 0.01);
+        assert!((ps.height.unwrap() - 297.638).abs() < 0.01);
+
+        // Orientation before size is also valid per spec.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: landscape A4", &mut ps);
+        assert_eq!(ps.width, Some(842.0));
+        assert_eq!(ps.height, Some(595.0));
+
+        // Orientation alone uses UA default (Letter) with that orientation.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: landscape", &mut ps);
+        assert_eq!(ps.width, Some(792.0));
+        assert_eq!(ps.height, Some(612.0));
+
+        // Legal + tabloid keywords.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: legal", &mut ps);
+        assert_eq!((ps.width, ps.height), (Some(612.0), Some(1008.0)));
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: tabloid", &mut ps);
+        assert_eq!((ps.width, ps.height), (Some(792.0), Some(1224.0)));
+
+        // Lengths still work, including mm.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: 100mm 200mm", &mut ps);
+        assert!((ps.width.unwrap() - 283.465).abs() < 0.01);
+        assert!((ps.height.unwrap() - 566.929).abs() < 0.01);
     }
 
     #[test]

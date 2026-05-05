@@ -64,6 +64,14 @@ jobs:
         shell: pwsh
         run: Copy-Item .venv/Scripts/python.exe .venv/Scripts/python3.exe
       - run: uv run --python ${{ matrix.python-version }} tryke test
+      - name: Upload visual regression report
+        if: always() && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-regression-report
+          path: target/visual-report
+          if-no-files-found: ignore
+          retention-days: 14
 
   ci:
     if: always()
