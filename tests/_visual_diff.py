@@ -17,8 +17,12 @@ import fitz
 from pdfun import HtmlDocument
 
 DEFAULT_DPI = 100
-CHANNEL_TOL = 12
-SUBSAMPLE_STEP = 4
+# channel_tol applies to the *block-mean* RGB after shrinking, so the
+# right value here is roughly "the smallest mean-color shift that should
+# count as a real regression". 40 catches color/structural diffs while
+# tolerating font-hinting noise that smooths to ~10-25 channel drift.
+CHANNEL_TOL = 40
+DIFF_SHRINK_LEVEL = 3  # 8x downsample (each block of 8x8 pixels averaged)
 VISUAL_DIR = Path(__file__).parent / "visual"
 REF_DIR = VISUAL_DIR / "ref"
 TOLERANCES_PATH = VISUAL_DIR / "tolerances.toml"
@@ -47,44 +51,67 @@ def tolerant_pixel_diff(
     expected_png: bytes,
     *,
     channel_tol: int = CHANNEL_TOL,
-    subsample: int = SUBSAMPLE_STEP,
+    shrink_level: int = DIFF_SHRINK_LEVEL,
+    ink_threshold: int = 240,
 ) -> float:
-    """Fraction of (subsampled) pixels whose RGB channels differ by > tol.
+    """Fraction of *inked* downsampled blocks whose colors differ.
 
-    Subsampling is essential for keeping the diff cheap in pure Python — a
-    100 DPI A4 page is still ~900 K pixels. Sampling every Nth pixel gives
-    a fine-enough estimate for tolerance gating while running in well under
-    a second per fixture. The actual and reference PNGs are still written
-    at full resolution for the report.
+    Two-step structure:
+
+    1. **Shrink** both images by ``2^shrink_level`` in each dimension.
+       Each output pixel is the average of a square block of source
+       pixels (fitz does this for us). Block-averaging smooths away
+       glyph anti-aliasing differences between renderers — a 1 px
+       sub-pixel shift in a font edge that would dominate raw pixel
+       diff disappears once the block-mean is computed.
+    2. **Inked-union diff** on the downsampled image. A block is "inked"
+       if any RGB channel is below ``ink_threshold`` in either image;
+       blank-on-blank blocks are skipped so background whitespace
+       can't dilute the denominator. The result is
+       ``differing / inked-in-either`` — i.e. "what fraction of the
+       page's content disagrees", which catches both layout shifts
+       (text in different positions → block flips from inked to blank)
+       and color regressions (block stays inked but mean colour shifts)
+       without flagging tiny font-hinting noise as a failure.
     """
     pix_a = fitz.Pixmap(actual_png)
     pix_b = fitz.Pixmap(expected_png)
+    if pix_a.alpha:
+        pix_a = fitz.Pixmap(pix_a, 0)
+    if pix_b.alpha:
+        pix_b = fitz.Pixmap(pix_b, 0)
+    if shrink_level > 0:
+        pix_a.shrink(shrink_level)
+        pix_b.shrink(shrink_level)
     if pix_a.width != pix_b.width or pix_a.height != pix_b.height:
         return 1.0
     samples_a = pix_a.samples
     samples_b = pix_b.samples
     stride = pix_a.n
-    pixel_count = pix_a.width * pix_a.height
-    if pixel_count == 0:
-        return 0.0
-    sampled = 0
+    inked = 0
     different = 0
-    for i in range(0, len(samples_a), stride * subsample):
-        sampled += 1
+    for i in range(0, len(samples_a), stride):
+        ar, ag, ab = samples_a[i], samples_a[i + 1], samples_a[i + 2]
+        br, bg, bb = samples_b[i], samples_b[i + 1], samples_b[i + 2]
+        a_ink = ar < ink_threshold or ag < ink_threshold or ab < ink_threshold
+        b_ink = br < ink_threshold or bg < ink_threshold or bb < ink_threshold
+        if not (a_ink or b_ink):
+            continue
+        inked += 1
         if (
-            abs(samples_a[i] - samples_b[i]) > channel_tol
-            or abs(samples_a[i + 1] - samples_b[i + 1]) > channel_tol
-            or abs(samples_a[i + 2] - samples_b[i + 2]) > channel_tol
+            abs(ar - br) > channel_tol
+            or abs(ag - bg) > channel_tol
+            or abs(ab - bb) > channel_tol
         ):
             different += 1
-    return different / sampled if sampled else 0.0
+    return different / inked if inked else 0.0
 
 
 def composite_diff_png(
     actual_png: bytes,
     ref_png: bytes,
     *,
-    channel_tol: int = CHANNEL_TOL,
+    channel_tol: int = 12,
     gap: int = 8,
 ) -> bytes:
     """Build a side-by-side composite (actual | reference | diff overlay).

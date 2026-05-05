@@ -980,6 +980,10 @@ fn parse_css_length<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseEr
                 Ok(CssLength::Vw(*value))
             } else if unit.eq_ignore_ascii_case("vh") {
                 Ok(CssLength::Vh(*value))
+            } else if unit.eq_ignore_ascii_case("mm") {
+                Ok(CssLength::Pt(*value * 72.0 / 25.4))
+            } else if unit.eq_ignore_ascii_case("cm") {
+                Ok(CssLength::Pt(*value * 72.0 * 10.0 / 25.4))
             } else {
                 Err(location.new_custom_error(()))
             }
@@ -3140,19 +3144,58 @@ fn parse_page_declarations(declarations: &str, page_style: &mut PageStyle) {
 
             match name.to_ascii_lowercase().as_str() {
                 "size" => {
-                    let ident = input.try_parse(|i| i.expect_ident().cloned());
-                    if let Ok(ref id) = ident {
-                        match id.to_ascii_lowercase().as_str() {
-                            "letter" => {
-                                page_style.width = Some(612.0);
-                                page_style.height = Some(792.0);
-                            }
-                            "a4" => {
-                                page_style.width = Some(595.0);
-                                page_style.height = Some(842.0);
+                    // CSS Paged Media: <page-size> || [portrait | landscape]
+                    //                | <length>{1,2}
+                    // Loop through up to two idents (size keyword and
+                    // orientation, either order). A6/A5/A3/B* use precise
+                    // mm-derived pt so 100 DPI rasters match WeasyPrint
+                    // exactly; A4 and Letter keep their long-standing
+                    // rounded values (and happen to ceil to the same
+                    // pixel dimensions as the precise versions).
+                    let mut size_pt: Option<(f32, f32)> = None;
+                    let mut landscape: Option<bool> = None;
+                    loop {
+                        let ident = input.try_parse(|i| i.expect_ident().cloned());
+                        let Ok(id) = ident else { break };
+                        let kw = id.to_ascii_lowercase();
+                        match kw.as_str() {
+                            "portrait" if landscape.is_none() => landscape = Some(false),
+                            "landscape" if landscape.is_none() => landscape = Some(true),
+                            sz if size_pt.is_none() => {
+                                size_pt = match sz {
+                                    "letter" => Some((612.0, 792.0)),
+                                    "legal" => Some((612.0, 1008.0)),
+                                    "ledger" | "tabloid" => Some((792.0, 1224.0)),
+                                    "a3" => Some((841.890, 1190.551)),
+                                    "a4" => Some((595.0, 842.0)),
+                                    "a5" => Some((419.528, 595.276)),
+                                    "a6" => Some((297.638, 419.528)),
+                                    "b4" => Some((708.661, 1000.63)),
+                                    "b5" => Some((498.898, 708.661)),
+                                    "b6" => Some((354.331, 498.898)),
+                                    _ => return Err(input.new_custom_error(())),
+                                };
                             }
                             _ => return Err(input.new_custom_error(())),
                         }
+                    }
+                    if let Some((mut w, mut h)) = size_pt {
+                        match landscape {
+                            Some(true) if w < h => std::mem::swap(&mut w, &mut h),
+                            Some(false) if w > h => std::mem::swap(&mut w, &mut h),
+                            _ => {}
+                        }
+                        page_style.width = Some(w);
+                        page_style.height = Some(h);
+                    } else if landscape.is_some() {
+                        // Orientation only: UA default (Letter), oriented.
+                        let (w, h) = if landscape == Some(true) {
+                            (792.0, 612.0)
+                        } else {
+                            (612.0, 792.0)
+                        };
+                        page_style.width = Some(w);
+                        page_style.height = Some(h);
                     } else {
                         let w = parse_non_negative_length(input)?;
                         let h = input.try_parse(parse_non_negative_length).unwrap_or(w);
@@ -5151,6 +5194,47 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(mb.content, vec![ContentItem::CounterPage]);
+    }
+
+    #[test]
+    fn page_size_keywords_with_orientation() {
+        // A5 portrait — already portrait, dims unchanged.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: A5 portrait", &mut ps);
+        assert!((ps.width.unwrap() - 419.528).abs() < 0.01);
+        assert!((ps.height.unwrap() - 595.276).abs() < 0.01);
+
+        // A6 landscape — wider than tall.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: A6 landscape", &mut ps);
+        assert!((ps.width.unwrap() - 419.528).abs() < 0.01);
+        assert!((ps.height.unwrap() - 297.638).abs() < 0.01);
+
+        // Orientation before size is also valid per spec.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: landscape A4", &mut ps);
+        assert_eq!(ps.width, Some(842.0));
+        assert_eq!(ps.height, Some(595.0));
+
+        // Orientation alone uses UA default (Letter) with that orientation.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: landscape", &mut ps);
+        assert_eq!(ps.width, Some(792.0));
+        assert_eq!(ps.height, Some(612.0));
+
+        // Legal + tabloid keywords.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: legal", &mut ps);
+        assert_eq!((ps.width, ps.height), (Some(612.0), Some(1008.0)));
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: tabloid", &mut ps);
+        assert_eq!((ps.width, ps.height), (Some(792.0), Some(1224.0)));
+
+        // Lengths still work, including mm.
+        let mut ps = PageStyle::default();
+        parse_page_declarations("size: 100mm 200mm", &mut ps);
+        assert!((ps.width.unwrap() - 283.465).abs() < 0.01);
+        assert!((ps.height.unwrap() - 566.929).abs() < 0.01);
     }
 
     #[test]

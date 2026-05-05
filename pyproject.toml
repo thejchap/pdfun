@@ -17,7 +17,7 @@ dev = [
     "pymupdf>=1.24",
     "ruff>=0.15.8",
     "tryke",
-    "ty>=0.0.26",
+    "ty>=0.0.34",
 ]
 docs = [
     "zensical>=0.0.19",
@@ -33,9 +33,6 @@ python-source = "src"
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
-
-[tool.uv.sources]
-tryke = { git = "https://github.com/thejchap/tryke", branch = "main" }
 
 [tool.ty.src]
 exclude = ["tools/build_font_fixture.py"]
