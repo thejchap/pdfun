@@ -251,8 +251,8 @@ wheels = [
 
 [[package]]
 name = "tryke"
-version = "0.0.12"
-source = { git = "https://github.com/thejchap/tryke?branch=main#fd7a4cefff84aab2c8e6135ed742e43b8d841e8d" }
+version = "0.0.27"
+source = { git = "https://github.com/thejchap/tryke?branch=main#d6403c8d3bed86a89e713d92ec7cf44df9b2c118" }
 
 [[package]]
 name = "ty"

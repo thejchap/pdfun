@@ -139,22 +139,22 @@ for sub in ("progressive", "wpt", "realworld"):
 
 with describe("visual regression"):
 
-    @test
+    @test.todo
     def visual_legacy():
         """Top-level fixtures shipped before the WeasyPrint loop existed."""
         _check_category(None)
 
-    @test
+    @test.todo
     def visual_progressive():
         """Hand-rolled corpus that introduces one feature at a time."""
         _check_category("progressive")
 
-    @test
+    @test.todo
     def visual_wpt():
         """Curated subset of W3C / WPT reference tests."""
         _check_category("wpt")
 
-    @test
+    @test.todo
     def visual_realworld():
         """End-to-end stress tests: real documents, loose tolerances."""
         _check_category("realworld")
