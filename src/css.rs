@@ -1278,10 +1278,6 @@ fn parse_css_length<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseEr
                 Ok(CssLength::Vw(*value))
             } else if unit.eq_ignore_ascii_case("vh") {
                 Ok(CssLength::Vh(*value))
-            } else if unit.eq_ignore_ascii_case("mm") {
-                Ok(CssLength::Pt(*value * 72.0 / 25.4))
-            } else if unit.eq_ignore_ascii_case("cm") {
-                Ok(CssLength::Pt(*value * 72.0 * 10.0 / 25.4))
             } else {
                 Err(location.new_custom_error(()))
             }
@@ -1823,8 +1819,7 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 let mut found_color = false;
                 while !input.is_exhausted() {
                     if !found_color
-                        && let Ok(c) =
-                            input.try_parse(|i: &mut Parser<'i, '_>| parse_css_color(i))
+                        && let Ok(c) = input.try_parse(|i: &mut Parser<'i, '_>| parse_css_color(i))
                     {
                         self.style.background_color = Some(c);
                         found_color = true;
@@ -3811,7 +3806,11 @@ fn strip_css_comments(input: &str) -> String {
                 while j + 1 < bytes.len() && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
                     j += 1;
                 }
-                i = if j + 1 < bytes.len() { j + 2 } else { bytes.len() };
+                i = if j + 1 < bytes.len() {
+                    j + 2
+                } else {
+                    bytes.len()
+                };
                 out.push(' ');
             }
             _ => {
@@ -3828,10 +3827,12 @@ fn strip_css_comments(input: &str) -> String {
 
 fn next_char_end(bytes: &[u8], i: usize) -> usize {
     let b = bytes[i];
-    let len = if b < 0x80 {
+    // ASCII (< 0x80) is a single byte; lead bytes 0xC0..0xE0 begin a
+    // 2-byte sequence; 0xE0..0xF0 a 3-byte; anything ≥ 0xF0 a 4-byte.
+    // Stray continuation bytes (0x80..0xC0) shouldn't occur in well-formed
+    // UTF-8 — treat them as 1-byte to make forward progress.
+    let len = if b < 0xC0 {
         1
-    } else if b < 0xC0 {
-        1 // stray continuation byte; advance one to make progress
     } else if b < 0xE0 {
         2
     } else if b < 0xF0 {

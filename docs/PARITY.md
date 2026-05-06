@@ -2,7 +2,7 @@
 
 Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) plus inline `spec:` markers in tests. Run `uv run python tools/parity/generate.py` to regenerate.
 
-**Summary:** 129/137 behaviors implemented · 121/137 tested · WeasyPrint comparison hand-curated in catalog.
+**Summary:** 129/137 behaviors implemented · 100/137 tested · WeasyPrint comparison hand-curated in catalog.
 
 ## Legend
 
@@ -17,7 +17,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| Headings (h1–h6) with scaled default sizes | — | ✅ | ✅ | ✅ (1) `tests/visual/heading_sizes.html` |
+| Headings (h1–h6) with scaled default sizes | — | ✅ | ✅ | ⚠️ untested |
 | Paragraph (p) default margins | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::paragraph_renders` |
 | Generic block container (div) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::div_renders` |
 | Block quote (blockquote) with indent | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::blockquote_renders` |
@@ -31,12 +31,12 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| Bold (b, strong) | — | ✅ | ✅ | ✅ (1) `tests/visual/inline_styles.html` |
-| Italic (i, em) | — | ✅ | ✅ | ✅ (1) `tests/visual/inline_styles.html` |
+| Bold (b, strong) | — | ✅ | ✅ | ⚠️ untested |
+| Italic (i, em) | — | ✅ | ✅ | ⚠️ untested |
 | Inline span | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::span_extracts_text` |
 | Line break (br) | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::br_splits_text` |
-| Inline code (code, kbd, samp) | — | ✅ | ✅ | ✅ (1) `tests/visual/inline_styles.html` |
-| Superscript / subscript (sup, sub) | — | ✅ | ✅ | ✅ (1) `tests/visual/inline_styles.html` |
+| Inline code (code, kbd, samp) | — | ✅ | ✅ | ⚠️ untested |
+| Superscript / subscript (sup, sub) | — | ✅ | ✅ | ⚠️ untested |
 | Links (a) with external PDF annotations | — | ✅ | ✅ | ✅ (1) `tests/test_html.py::anchor_tag_preserves_text` |
 
 ## HTML — Lists
@@ -60,9 +60,9 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| Table with tr/td/th | — | ✅ | ✅ | ✅ (1) `tests/visual/table_layout.html` |
-| Table row groups (thead, tbody, tfoot) | — | ✅ | ✅ | ✅ (1) `tests/visual/table_layout.html` |
-| Table caption | — | ✅ | ✅ | ✅ (1) `tests/visual/table_layout.html` |
+| Table with tr/td/th | — | ✅ | ✅ | ⚠️ untested |
+| Table row groups (thead, tbody, tfoot) | — | ✅ | ✅ | ⚠️ untested |
+| Table caption | — | ✅ | ✅ | ⚠️ untested |
 
 ## HTML — Forms
 
@@ -101,29 +101,29 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 |----------|:------:|:----------:|:-----:|:-------|
 | Specificity ordering | 6.4.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::style_id_beats_class` |
 | Cascade: UA defaults < <style> < inline | 6.4.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::style_inline_wins_over_style_block` |
-| Property inheritance parent → child | 6.2 | ✅ | ✅ | ✅ (1) `tests/visual/nested_containers.html` |
+| Property inheritance parent → child | 6.2 | ✅ | ✅ | ⚠️ untested |
 
 ## CSS 2.1 §8 — Box model
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
 | margin (shorthand + four sides) | 8.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::margin_top_renders` |
-| padding (shorthand + four sides) | 8.4 | ✅ | ✅ | ✅ (3) `tests/visual/padding_border.html`, `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::ul_padding_left_shifts_bullet_rightward` |
-| border / border-width / border-color / border-style | 8.5 | ✅ | ✅ | ✅ (2) `tests/visual/padding_border.html`, `tests/test_html.py::inline_border_double_paints_two_lines` |
-| Margin collapse: adjacent siblings | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/margin_collapse_siblings.html` |
-| Margin collapse: parent / first child | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/margin_collapse_parent_child.html` |
+| padding (shorthand + four sides) | 8.4 | ✅ | ✅ | ✅ (2) `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::ul_padding_left_shifts_bullet_rightward` |
+| border / border-width / border-color / border-style | 8.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::inline_border_double_paints_two_lines` |
+| Margin collapse: adjacent siblings | 8.3.1 | ✅ | ✅ | ⚠️ untested |
+| Margin collapse: parent / first child | 8.3.1 | ✅ | ✅ | ⚠️ untested |
 | Margin collapse: empty blocks | 8.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::empty_block_self_collapses` |
 
 ## CSS 2.1 §9 — Visual formatting model
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| display: block | 9.2.1 | ✅ | ✅ | ✅ (1) `tests/visual/nested_containers.html` |
+| display: block | 9.2.1 | ✅ | ✅ | ⚠️ untested |
 | display: inline | 9.2.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::inline_block_renders_as_inline_atom` |
 | display: inline-block | 9.2.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::inline_block_with_fixed_width` |
 | display: none | 9.2.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::display_none_hides_children` |
-| float: left with text wrap | 9.5.1 | ✅ | ✅ | ✅ (1) `tests/visual/float_left.html` |
-| float: right with text wrap | 9.5.1 | ✅ | ✅ | ✅ (1) `tests/visual/float_right.html` |
+| float: left with text wrap | 9.5.1 | ✅ | ✅ | ⚠️ untested |
+| float: right with text wrap | 9.5.1 | ✅ | ✅ | ⚠️ untested |
 | clear property | 9.5.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::clear_both_drops_below_floats` |
 | position: static | 9.3.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::position_static_ignores_offsets` |
 | position: relative | 9.3.1 | ✅ | ✅ | ✅ (4) `tests/test_html.py::relative_top_shifts_box_down`, `tests/test_html.py::relative_left_pt_offsets_against_resolved_value`, `tests/test_html.py::relative_left_percent_resolves_against_container_width`, `tests/test_html.py::relative_right_falls_back_when_left_absent` |
@@ -151,10 +151,10 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| @page (size, margins) | 13.2 | ✅ | ✅ | ✅ (1) `tests/test_html.py::at_page_size_letter` |
-| page-break-before / page-break-after | 13.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/page_break.html` |
+| @page (size, margins) | 13.2 | ✅ | ✅ | ✅ (2) `tests/visual/progressive/11_at_page.html`, `tests/test_html.py::at_page_size_letter` |
+| page-break-before / page-break-after | 13.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/progressive/08_multi_page.html` |
 | page-break-inside | 13.3.1 | ✅ | ✅ | ✅ (4) `tests/test_html.py::page_break_inside_avoid_parses`, `tests/test_html.py::break_inside_avoid_alias_accepted`, `tests/test_html.py::page_break_inside_avoid_pushes_overflow_to_next_page`, `tests/test_html.py::length_height_pushes_next_sibling_to_new_page` |
-| orphans / widows | 13.3.2 | ✅ | ✅ | ✅ (3) `tests/test_html.py::orphans_integer_parses`, `tests/test_html.py::widows_integer_parses`, `tests/test_html.py::orphans_and_widows_via_stylesheet` |
+| orphans / widows | 13.3.2 | ✅ | ✅ | ✅ (4) `tests/visual/wpt/orphans_widows.html`, `tests/test_html.py::orphans_integer_parses`, `tests/test_html.py::widows_integer_parses`, `tests/test_html.py::orphans_and_widows_via_stylesheet` |
 
 ## CSS 2.1 §14 — Colors and backgrounds
 
@@ -180,8 +180,8 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
 | text-indent | 16.1 | ✅ | ✅ | ✅ (1) `tests/test_html.py::text_indent_renders_first_line_shift` |
-| text-align (left, center, right, justify) | 16.2 | ✅ | ✅ | ✅ (1) `tests/visual/text_align.html` |
-| text-decoration (underline, line-through) | 16.3.1 | ✅ | ✅ | ✅ (1) `tests/visual/inline_styles.html` |
+| text-align (left, center, right, justify) | 16.2 | ✅ | ✅ | ⚠️ untested |
+| text-decoration (underline, line-through) | 16.3.1 | ✅ | ✅ | ⚠️ untested |
 | letter-spacing | 16.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::letter_spacing_emits_character_spacing_op` |
 | word-spacing | 16.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::justify_emits_word_spacing_op` |
 | text-transform (uppercase, lowercase, capitalize) | 16.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::uppercase_transforms_text` |
@@ -192,13 +192,13 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
 | Table layout (auto width) | 17.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::table_td_inline_style_color` |
-| border-collapse (separate, collapse) | 17.6.2 | ✅ | ✅ | ✅ (1) `tests/visual/table_layout.html` |
+| border-collapse (separate, collapse) | 17.6.2 | ✅ | ✅ | ⚠️ untested |
 
 ## CSS Backgrounds & Borders 3 — Backgrounds and borders
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| border-radius | 5.1 | ✅ | ✅ | ✅ (1) `tests/visual/border_radius.html` |
+| border-radius | 5.1 | ✅ | ✅ | ⚠️ untested |
 | box-shadow | 7.1 | ✅ | ✅ | ⚠️ untested |
 | background-image | 3.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::background_image_url_emits_xobject` |
 | background-repeat | 3.5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::background_image_url_emits_xobject` |
@@ -212,7 +212,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 | rgba() function | 4.2.1 | ✅ | ✅ | ✅ (2) `tests/test_html.py::ul_translucent_background_paints_behind_items`, `tests/test_html.py::rgba_accepts_alpha_component` |
 | hsl() function | 4.2.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::hsl_red_renders` |
 | hsla() function | 4.2.4 | ✅ | ✅ | ✅ (1) `tests/test_html.py::hsla_accepts_alpha_component` |
-| opacity property | 3.2 | ✅ | ✅ | ✅ (1) `tests/visual/opacity.html` |
+| opacity property | 3.2 | ✅ | ✅ | ⚠️ untested |
 | device-cmyk() / CMYK colors | — | ❌ | ✅ | ✅ (1) `tests/test_html.py::device_cmyk_pure_cyan_renders_as_rgb` |
 
 ## CSS Fonts 3 — Fonts Level 3
@@ -228,13 +228,13 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| Multi-column layout (column-count, column-gap) | 2 | ✅ | ✅ | ✅ (1) `tests/visual/columns.html` |
+| Multi-column layout (column-count, column-gap) | 2 | ✅ | ✅ | ⚠️ untested |
 
 ## CSS Paged Media 3 — Paged media extensions
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| @page margin boxes (headers/footers) | 5 | ✅ | ✅ | ✅ (1) `tests/test_html.py::margin_box_with_font_size_and_color` |
+| @page margin boxes (headers/footers) | 5 | ✅ | ✅ | ✅ (2) `tests/visual/progressive/11_at_page.html`, `tests/test_html.py::margin_box_with_font_size_and_color` |
 | Page counters (counter(page), counter(pages)) | 4.3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::counter_page_renders_1_on_first_page` |
 
 ## CSS Values 3 — Values and units
@@ -248,7 +248,7 @@ Auto-generated from [`tools/parity/catalog.toml`](../tools/parity/catalog.toml) 
 
 | Behavior | Spec § | WeasyPrint | pdfun | Tested |
 |----------|:------:|:----------:|:-----:|:-------|
-| list-style-type (disc, decimal, lower/upper-alpha, lower/upper-roman) | 3 | ✅ | ✅ | ✅ (1) `tests/visual/list_styles.html` |
+| list-style-type (disc, decimal, lower/upper-alpha, lower/upper-roman) | 3 | ✅ | ✅ | ⚠️ untested |
 | list-style-position | 3 | ✅ | ✅ | ✅ (1) `tests/test_html.py::inside_differs_from_outside` |
 
 ## CSS 2.1 §4.1.5 — At-rules
