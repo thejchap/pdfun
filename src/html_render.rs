@@ -1285,21 +1285,19 @@ impl<'a> HtmlRenderer<'a> {
             self.current_tag = Some("li".to_string());
             self.block_style = inline_style;
         } else if tag == "body" || tag == "html" {
-            if let Some(ref style) = inline_style {
-                if let Some(count) = style.column_count {
-                    self.layout.column_count = count;
-                }
-                if let Some(gap) = style.column_gap {
-                    self.layout.column_gap = gap.resolve(12.0);
-                }
-                if let Some(width) = style.column_rule_width {
-                    self.layout.column_rule_width = width.resolve(12.0);
-                }
-                if let Some(color) = style.column_rule_color {
-                    self.layout.column_rule_color = Some(color);
-                }
-            }
+            self.apply_column_props(inline_style.as_ref());
         } else if BLOCK_ELEMENTS.contains(&tag) {
+            // Stream 4 / Option A: lift the body/html restriction so any
+            // block element with `column-count` promotes the page-level
+            // multicol state. The current LayoutInner stores column flow
+            // as a single page-wide configuration (see `src/layout.rs`
+            // around the `column_count` field), so this is the minimal
+            // change that lets the `columns` fixture render with three
+            // columns. TODO(stream-4-followup): proper per-block multicol
+            // (Option B) would require tracking a multicol container in
+            // the box tree and only flowing its children into columns,
+            // leaving siblings above/below as normal single-column flow.
+            self.apply_column_props(inline_style.as_ref());
             self.flush();
             if CONTAINER_ELEMENTS.contains(&tag) {
                 // Emit a ContainerStart sentinel so the container's margins
@@ -2127,6 +2125,30 @@ impl<'a> HtmlRenderer<'a> {
     /// `emit_container_start_for` to build a container sentinel's
     /// `BlockStyle` without disturbing the single-slot `self.block_style`
     /// that `flush()` later consumes.
+    /// Promote any of the four column-related CSS properties found on
+    /// `src` to the page-level multicol state on `LayoutInner`. Called
+    /// for `<body>`/`<html>` *and* for any block element with column
+    /// declarations (Stream 4 / Option A — see comment at the call site).
+    /// Only properties actually set on `src` overwrite the layout state,
+    /// so a multicol container deeper in the tree only ratchets values
+    /// it specifies; siblings without column properties leave the state
+    /// alone.
+    fn apply_column_props(&mut self, src: Option<&ComputedStyle>) {
+        let Some(style) = src else { return };
+        if let Some(count) = style.column_count {
+            self.layout.column_count = count;
+        }
+        if let Some(gap) = style.column_gap {
+            self.layout.column_gap = gap.resolve(12.0);
+        }
+        if let Some(width) = style.column_rule_width {
+            self.layout.column_rule_width = width.resolve(12.0);
+        }
+        if let Some(color) = style.column_rule_color {
+            self.layout.column_rule_color = Some(color);
+        }
+    }
+
     fn apply_block_css_from(&mut self, block_style: &mut BlockStyle, src: Option<&ComputedStyle>) {
         let inherited = self.inherit_stack.last();
         let ctx = self.length_context();
@@ -2935,6 +2957,43 @@ mod tests {
                 cols.len()
             );
         });
+    }
+
+    /// Stream 4 / Option A: a non-body element with `column-count` should
+    /// promote the multicol state to `LayoutInner` so the page-level
+    /// column flow kicks in. Before the fix this only happened for
+    /// `<body>` / `<html>`.
+    #[test]
+    fn column_count_on_div_promotes_to_layout() {
+        let html = "<style>.cols { column-count: 3; column-gap: 20px; \
+            column-rule-width: 1px; column-rule-color: #999 }</style>\
+            <div class=\"cols\"><p>a</p><p>b</p></div>";
+        let dom: RcDom = crate::dom::parse_html(html);
+        let mut layout = LayoutInner::new(20.0, 20.0, 20.0, 20.0, 595.0, 842.0);
+        let fetcher: std::sync::Arc<dyn crate::url_fetcher::UrlFetcher> =
+            std::sync::Arc::new(crate::url_fetcher::DefaultFetcher);
+        let _ = render_dom_to_layout(&dom.document, &mut layout, None, fetcher);
+        assert_eq!(
+            layout.column_count, 3,
+            "column-count: 3 on a <div> should propagate to LayoutInner.column_count"
+        );
+        // 20px → 15.0 PDF pt (CSS px is 1/96 in, PDF pt is 1/72 in,
+        // see `CssLength::resolve_ctx`).
+        assert!(
+            (layout.column_gap - 15.0).abs() < 1e-3,
+            "column-gap should resolve to 15.0 pt (20 CSS px); got {}",
+            layout.column_gap
+        );
+        assert!(
+            (layout.column_rule_width - 0.75).abs() < 1e-3,
+            "column-rule-width should resolve to 0.75 pt (1 CSS px); got {}",
+            layout.column_rule_width
+        );
+        assert!(
+            layout.column_rule_color.is_some(),
+            "column-rule-color should propagate from a non-body element"
+        );
+        drop(dom);
     }
 
     #[test]
