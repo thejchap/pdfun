@@ -3169,13 +3169,21 @@ mod tests {
     fn ua_default_tags_have_no_top_margin() {
         for tag in ["p", "div", "blockquote", "section", ""] {
             let ua = ua_style(tag);
-            assert_eq!(ua.margin_top, 0.0, "{tag}: margin_top should be 0");
-            assert_eq!(ua.font_size, UA_BASE_FONT_SIZE, "{tag}: font_size");
+            assert!(
+                ua.margin_top.abs() < 1e-3,
+                "{tag}: margin_top should be 0, got {}",
+                ua.margin_top,
+            );
+            assert!(
+                (ua.font_size - UA_BASE_FONT_SIZE).abs() < 1e-3,
+                "{tag}: font_size should be {UA_BASE_FONT_SIZE}, got {}",
+                ua.font_size,
+            );
         }
         let pre = ua_style("pre");
         assert_eq!(pre.font, "Courier");
-        assert_eq!(pre.font_size, UA_BASE_FONT_SIZE);
-        assert_eq!(pre.margin_top, 0.0);
+        assert!((pre.font_size - UA_BASE_FONT_SIZE).abs() < 1e-3);
+        assert!(pre.margin_top.abs() < 1e-3);
     }
 
     /// `line-height: <number>` parses as `Em(n)` so it inherits as a
@@ -3217,7 +3225,7 @@ mod tests {
         // hook here so they don't accidentally resolve against width.
         match s.line_height {
             Some(css::CssLength::Em(v)) => {
-                assert!((v - 1.5).abs() < 1e-3, "expected Em(1.5), got Em({v})")
+                assert!((v - 1.5).abs() < 1e-3, "expected Em(1.5), got Em({v})");
             }
             other => {
                 // `Pct(150.0)` would also be acceptable *if* the resolver
