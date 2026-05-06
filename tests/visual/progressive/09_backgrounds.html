@@ -1,0 +1,23 @@
+<style>@page { size: A4; }</style>
+<!-- spec: CSS Backgrounds & Borders 3 §3; behaviors: bb3-background-color -->
+<style>
+  body { margin: 24px; font-family: sans-serif; }
+  .swatch { padding: 18px 14px; margin-bottom: 8px; color: #fff; font-weight: bold; }
+  .a { background-color: #0d6efd; }
+  .b { background-color: #198754; }
+  .c { background: rgb(220, 53, 69); }
+  .d { background: rgba(13, 110, 253, 0.4); color: #111; }
+  .e { background: hsl(45, 100%, 60%); color: #111; }
+  .f {
+    background: #fff;
+    color: #111;
+    border: 1px solid #ccc;
+    background-image: linear-gradient(to right, #fff 0%, #fff 49%, #ddd 51%, #ddd 100%);
+  }
+</style>
+<div class="swatch a">solid hex</div>
+<div class="swatch b">solid hex (green)</div>
+<div class="swatch c">rgb()</div>
+<div class="swatch d">rgba() partial transparency</div>
+<div class="swatch e">hsl()</div>
+<div class="swatch f">linear-gradient (may be unsupported)</div>

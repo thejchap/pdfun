@@ -1,0 +1,27 @@
+<style>@page { size: A4; }</style>
+<!-- spec: CSS 2.1 §17; behaviors: html-table, table-border-collapse -->
+<style>
+  body { margin: 24px; font-family: sans-serif; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+  th, td { border: 1px solid #999; padding: 6px 10px; text-align: left; }
+  thead th { background: #e9ecef; }
+  tfoot td { background: #f8f9fa; font-weight: bold; }
+  .separate { border-collapse: separate; border-spacing: 4px; }
+</style>
+<table>
+  <thead>
+    <tr><th>Item</th><th>Qty</th><th>Price</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Widget</td><td>3</td><td>$12.00</td></tr>
+    <tr><td>Sprocket</td><td>1</td><td>$4.50</td></tr>
+    <tr><td>Gizmo</td><td>2</td><td>$7.20</td></tr>
+  </tbody>
+  <tfoot>
+    <tr><td colspan="2">Total</td><td>$23.70</td></tr>
+  </tfoot>
+</table>
+<table class="separate">
+  <tr><th>Border-spacing</th><th>cell A</th><th>cell B</th></tr>
+  <tr><td>row 1</td><td>x</td><td>y</td></tr>
+</table>

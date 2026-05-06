@@ -1,0 +1,16 @@
+<style>@page { size: A4; }</style>
+<!-- spec: CSS 2.1 §9.5; behaviors: float-left, float-right, clear -->
+<style>
+  body { margin: 24px; font-family: sans-serif; font-size: 13px; }
+  .float-l { float: left;  width: 120px; height: 80px; background: #cfe2ff;
+             margin: 0 12px 8px 0; padding: 8px; }
+  .float-r { float: right; width: 120px; height: 80px; background: #fde2e4;
+             margin: 0 0 8px 12px; padding: 8px; }
+  .cleared { clear: both; background: #d1e7dd; padding: 8px; margin-top: 12px; }
+</style>
+<div class="float-l">Float left</div>
+<div class="float-r">Float right</div>
+<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do
+  eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad
+  minim veniam, quis nostrud exercitation ullamco laboris nisi ut.</p>
+<div class="cleared">Cleared block — should sit below both floats.</div>

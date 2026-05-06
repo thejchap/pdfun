@@ -1,0 +1,15 @@
+<style>@page { size: A4; }</style>
+<!-- spec: Selectors 4 §13.3; behaviors: sel-pseudo-nth-child -->
+<style>
+  body { font-family: sans-serif; }
+  table { border-collapse: collapse; }
+  td { padding: 4px 12px; border: 1px solid #ccc; }
+  tr:nth-child(odd)  td { background: #f1f3f5; }
+  tr:nth-child(even) td { background: #fff; }
+</style>
+<table>
+  <tr><td>row 1 (odd, gray)</td></tr>
+  <tr><td>row 2 (even, white)</td></tr>
+  <tr><td>row 3 (odd, gray)</td></tr>
+  <tr><td>row 4 (even, white)</td></tr>
+</table>

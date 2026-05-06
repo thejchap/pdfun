@@ -1,0 +1,35 @@
+<style>@page { size: A4; }</style>
+<!-- spec: CSS 2.1 §12; behaviors: html-ul, html-ol, list-style-type -->
+<style>
+  body { margin: 24px; font-family: sans-serif; }
+  ol.alpha { list-style-type: lower-alpha; }
+  ul.square { list-style-type: square; }
+</style>
+<h3>Unordered (default discs)</h3>
+<ul>
+  <li>First bullet</li>
+  <li>Second bullet
+    <ul>
+      <li>Nested</li>
+      <li>Nested two</li>
+    </ul>
+  </li>
+  <li>Third bullet</li>
+</ul>
+<h3>Square markers</h3>
+<ul class="square">
+  <li>Square A</li>
+  <li>Square B</li>
+</ul>
+<h3>Ordered (decimal)</h3>
+<ol>
+  <li>First</li>
+  <li>Second</li>
+  <li>Third</li>
+</ol>
+<h3>Lower-alpha</h3>
+<ol class="alpha">
+  <li>alpha one</li>
+  <li>alpha two</li>
+  <li>alpha three</li>
+</ol>

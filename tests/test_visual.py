@@ -1,132 +1,160 @@
-"""Visual regression tests — render HTML to PDF to PNG, compare against references."""
+"""Visual regression tests — render pdfun, diff against committed WeasyPrint refs.
+
+Each fixture under ``tests/visual/`` (any depth) is rendered with pdfun,
+rasterized per page at 100 DPI, and compared against
+``tests/visual/ref/<name>.page<N>.png`` — committed PNGs produced by
+``tools/bless_visual_refs.py`` running WeasyPrint inside a pinned Docker
+image. Per-fixture tolerances live in ``tests/visual/tolerances.toml``.
+
+Fixtures are grouped into four category-level tests so ``tryke``'s static
+discovery sees stable test names while the actual fixture list grows over
+time. Failures use soft assertions, so one bad fixture doesn't hide the
+rest. The harness always emits per-page artifacts plus a JSON line into
+``target/visual-report/results.jsonl``; an ``atexit`` hook then renders
+``target/visual-report/index.html`` (auto-refreshing every 2 s) so a
+left-open browser tab tracks progress as you iterate. Open it with::
+
+    open target/visual-report/index.html
+"""
 
 from __future__ import annotations
 
-import os
+import atexit
 from pathlib import Path
 
-import fitz
 from tryke import describe, expect, test
 
-from pdfun import HtmlDocument
+from tests._visual_diff import (
+    VISUAL_DIR,
+    discover_fixtures,
+    ensure_report_dirs,
+    fixture_path,
+    ref_path,
+    render_pdfun_pages,
+    report_actual_path,
+    tolerance_for,
+    tolerant_pixel_diff,
+)
+from tests._visual_report import append_result, reset_results, write_report
 
-VISUAL_DIR = Path(__file__).parent / "visual"
-REF_DIR = VISUAL_DIR / "ref"
-BLESS = os.environ.get("BLESS", "").strip() == "1"
-DPI = 200
-THRESHOLD = 0.001
-
-
-def render_to_png(html: str, *, dpi: int = DPI) -> bytes:
-    """HTML -> PDF -> PNG bytes (first page at given DPI)."""
-    doc = HtmlDocument(string=html)
-    pdf_bytes = doc.to_bytes()
-    fitz_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = fitz_doc[0]
-    scale = dpi / 72.0
-    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-    return pix.tobytes("png")
-
-
-def pixel_diff(img_a: bytes, img_b: bytes) -> float:
-    """Return fraction of pixels that differ between two PNGs."""
-    pix_a = fitz.Pixmap(img_a)
-    pix_b = fitz.Pixmap(img_b)
-    if pix_a.width != pix_b.width or pix_a.height != pix_b.height:
-        return 1.0
-    samples_a = pix_a.samples
-    samples_b = pix_b.samples
-    total = len(samples_a)
-    if total == 0:
-        return 0.0
-    diff_count = sum(1 for a, b in zip(samples_a, samples_b, strict=True) if a != b)
-    return diff_count / total
+ensure_report_dirs()
+reset_results()
+# tryke runs tests inside a long-lived worker process whose atexit hooks
+# may not fire when it's torn down by the runner; flush the report after
+# every category test so the on-disk report is always current.
+atexit.register(write_report)
 
 
-def _check_visual(name: str) -> None:
-    html_path = VISUAL_DIR / f"{name}.html"
-    html = html_path.read_text()
-    actual = render_to_png(html)
+def _record(
+    name: str,
+    page: int,
+    *,
+    status: str,
+    diff_pct: float | None,
+    tolerance: float,
+    actual: Path | None,
+    reference: Path | None,
+) -> None:
+    append_result(
+        {
+            "name": name,
+            "page": page,
+            "status": status,
+            "diff_pct": diff_pct,
+            "tolerance": tolerance,
+            "actual_path": str(actual) if actual else None,
+            "ref_path": str(reference) if reference else None,
+        }
+    )
 
-    ref_path = REF_DIR / f"{name}.png"
-    if not ref_path.exists() or BLESS:
-        ref_path.parent.mkdir(parents=True, exist_ok=True)
-        ref_path.write_bytes(actual)
-        return
 
-    expected = ref_path.read_bytes()
-    diff = pixel_diff(actual, expected)
-    expect(diff).to_be_less_than(THRESHOLD)
+def _check_one(name: str) -> list[str]:
+    """Render and diff a single fixture; return human-readable failure lines."""
+    html = fixture_path(name).read_text()
+    pages = render_pdfun_pages(html)
+    tol = tolerance_for(name)
+    failures: list[str] = []
+    for index, png_bytes in enumerate(pages, start=1):
+        actual_out = report_actual_path(name, index)
+        actual_out.parent.mkdir(parents=True, exist_ok=True)
+        actual_out.write_bytes(png_bytes)
+
+        ref = ref_path(name, index)
+        if not ref.exists():
+            _record(
+                name,
+                index,
+                status="MISSING-REF",
+                diff_pct=None,
+                tolerance=tol,
+                actual=actual_out,
+                reference=None,
+            )
+            continue
+
+        diff = tolerant_pixel_diff(png_bytes, ref.read_bytes())
+        status = "PASS" if diff <= tol else "FAIL"
+        _record(
+            name,
+            index,
+            status=status,
+            diff_pct=diff,
+            tolerance=tol,
+            actual=actual_out,
+            reference=ref,
+        )
+        if status == "FAIL":
+            failures.append(f"{name} page {index}: diff={diff:.4f} > tol={tol:.4f}")
+    return failures
+
+
+def _check_category(prefix: str | None) -> None:
+    """Run every fixture matching `prefix` (None means top-level fixtures only).
+
+    Soft-assertions accumulate so all failing fixtures show up in one go.
+    """
+    matched: list[str] = []
+    for name in discover_fixtures():
+        if prefix is None:
+            if "/" not in name:
+                matched.append(name)
+        elif name.startswith(prefix + "/"):
+            matched.append(name)
+
+    failures: list[str] = []
+    for name in matched:
+        failures.extend(_check_one(name))
+
+    write_report()
+    summary = "; ".join(failures) if failures else ""
+    expect(summary, name="visual_diffs").to_equal("")
+
+
+# Eagerly create the category subdirectories under tests/visual/ so that
+# discover_fixtures() returns a stable shape even when fixtures haven't
+# been authored yet — keeps the test names stable for tryke discovery.
+for sub in ("progressive", "wpt", "realworld"):
+    (VISUAL_DIR / sub).mkdir(parents=True, exist_ok=True)
 
 
 with describe("visual regression"):
 
     @test
-    def border_radius():
-        _check_visual("border_radius")
+    def visual_legacy():
+        """Top-level fixtures shipped before the WeasyPrint loop existed."""
+        _check_category(None)
 
     @test
-    def columns():
-        _check_visual("columns")
+    def visual_progressive():
+        """Hand-rolled corpus that introduces one feature at a time."""
+        _check_category("progressive")
 
     @test
-    def float_left():
-        _check_visual("float_left")
+    def visual_wpt():
+        """Curated subset of W3C / WPT reference tests."""
+        _check_category("wpt")
 
     @test
-    def float_right():
-        _check_visual("float_right")
-
-    @test
-    def heading_sizes():
-        _check_visual("heading_sizes")
-
-    @test
-    def inline_styles():
-        _check_visual("inline_styles")
-
-    @test
-    def list_styles():
-        _check_visual("list_styles")
-
-    @test
-    def margin_collapse_parent_child():
-        _check_visual("margin_collapse_parent_child")
-
-    @test
-    def margin_collapse_siblings():
-        _check_visual("margin_collapse_siblings")
-
-    @test
-    def nested_containers():
-        _check_visual("nested_containers")
-
-    @test
-    def opacity():
-        _check_visual("opacity")
-
-    @test
-    def rgba_overlap():
-        # WS-2 rung 9 + 11: two overlapping translucent panels
-        # composited through the page-level Transparency Group. The
-        # PNG snapshot is captured via MuPDF (fitz) — same backend
-        # the rest of the suite uses, so a cross-viewer Adobe / Foxit
-        # diff is out of scope here. The actionable proxy lives in
-        # `test_html.py::page_group_entry_present_when_translucent`.
-        _check_visual("rgba_overlap")
-
-    @test
-    def padding_border():
-        _check_visual("padding_border")
-
-    @test
-    def page_break():
-        _check_visual("page_break")
-
-    @test
-    def table_layout():
-        _check_visual("table_layout")
-
-    @test
-    def text_align():
-        _check_visual("text_align")
+    def visual_realworld():
+        """End-to-end stress tests: real documents, loose tolerances."""
+        _check_category("realworld")

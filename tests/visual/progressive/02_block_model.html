@@ -1,0 +1,13 @@
+<style>@page { size: A4; }</style>
+<!-- spec: CSS 2.1 §8; behaviors: html-div, css-margin, css-padding -->
+<style>
+  body { margin: 24px; font-family: sans-serif; }
+  .card {
+    margin: 12px 0;
+    padding: 16px 20px;
+    background: #eef5ff;
+    border: 2px solid #0d6efd;
+  }
+</style>
+<div class="card">First block. Padding 16/20, margin 12/0, background and border.</div>
+<div class="card">Second block. Adjacent siblings to verify spacing.</div>
