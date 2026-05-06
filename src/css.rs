@@ -251,9 +251,12 @@ pub enum Position {
     #[default]
     Static,
     Relative,
-    /// Parsed but not rendered — falls back to static.
+    /// Out of normal flow; paints relative to the initial containing
+    /// block (the page). See `layout::absolute_anchor` for the offset
+    /// resolution. Margin-edge anchored per CSS 2.1 §9.3.2.
     Absolute,
-    /// Parsed but not rendered — falls back to static.
+    /// Same as `Absolute`, but additionally replays onto every page
+    /// (`layout::FixedBlock`).
     Fixed,
 }
 

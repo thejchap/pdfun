@@ -694,6 +694,131 @@ pub(crate) fn relative_offset(style: &BlockStyle) -> (f32, f32) {
     (dx, dy)
 }
 
+/// Inputs to `absolute_anchor` describing where on the page an
+/// `Absolute`/`Fixed` box should land.
+///
+/// The paint origin we compute (`(target_left_x, target_top_y)`) is the
+/// top-left of the *border box* in PDF coordinates (y grows up). CSS
+/// `top`/`right`/`bottom`/`left` are distances from the corresponding
+/// edge of the containing block to the *margin box* edge, so we offset
+/// in by `margin_*` to land on the border-box corner where the painter
+/// expects to start. See CSS 2.1 §9.3.2 ("Box offsets").
+pub(crate) struct AbsoluteAnchorInputs {
+    pub page_width: f32,
+    pub page_height: f32,
+    pub natural_box_x: f32,
+    pub natural_top_y: f32,
+    pub box_width: f32,
+    pub box_height: f32,
+    pub margin_top: f32,
+    pub margin_right: f32,
+    pub margin_bottom: f32,
+    pub margin_left: f32,
+    pub position_top: Option<f32>,
+    pub position_right: Option<f32>,
+    pub position_bottom: Option<f32>,
+    pub position_left: Option<f32>,
+}
+
+/// Choose how many lines of a paragraph to keep on the current page when
+/// there isn't room for all of them.
+///
+/// Inputs:
+/// - `total_lines`: total wrapped lines in the paragraph.
+/// - `lines_that_fit`: how many would fit in the remaining space on the
+///   current page.
+/// - `orphans`: minimum lines that must be left at the bottom of the
+///   current page when a split occurs (CSS 2.1 §13.3.2).
+/// - `widows`: minimum lines that must be carried to the top of the next
+///   page when a split occurs.
+///
+/// Returns `Some(n)` for "render `n` lines on the current page, then split
+/// the remaining `total_lines - n` to the next page", or `None` for "push
+/// the entire block to the next page (no split)".
+///
+/// Returns `None` when:
+/// - the whole paragraph fits (`lines_that_fit >= total_lines`),
+/// - the paragraph is too short to satisfy both constraints
+///   (`total_lines < orphans + widows`),
+/// - or the available space is too small to fit at least `orphans` lines.
+///
+/// Otherwise we honor both constraints by clamping `lines_that_fit` into
+/// `[orphans, total_lines - widows]`.
+///
+/// Currently invoked from `render_paragraph_node`'s pagination preflight
+/// (the `avoid_split` branch). When the helper says "split", the paint
+/// loop emits the first `n` lines, advances to the next page, then
+/// restarts at the first line of the second fragment. Border, background,
+/// and inset shadows are emitted on the *first* fragment only — splitting
+/// a decorated box across pages requires a separate pass we haven't
+/// written yet (see CSS Fragmentation 3 §4.2 "box decoration break").
+pub(crate) fn split_lines_for_page(
+    total_lines: usize,
+    lines_that_fit: usize,
+    orphans: u32,
+    widows: u32,
+) -> Option<usize> {
+    let orphans = orphans.max(1) as usize;
+    let widows = widows.max(1) as usize;
+    if total_lines <= lines_that_fit {
+        return None;
+    }
+    if total_lines < orphans + widows {
+        return None;
+    }
+    if lines_that_fit < orphans {
+        return None;
+    }
+    let max_on_first = total_lines - widows;
+    let n = lines_that_fit.min(max_on_first);
+    if n < orphans {
+        return None;
+    }
+    Some(n)
+}
+
+/// Resolve the page-relative paint origin and translation delta for an
+/// `Absolute`/`Fixed` block.
+///
+/// Returns `(target_left_x, target_top_y, dx, dy)` where `dx`/`dy` is
+/// the translation that should be emitted (so `natural + delta = target`).
+/// Coordinates are in PDF points with origin at the page's bottom-left.
+///
+/// Per CSS 2.1 §10:
+/// - When neither `top` nor `bottom` is set, the box stays at its
+///   natural in-flow vertical position (`static` position).
+/// - When neither `left` nor `right` is set, similarly for horizontal.
+/// - `top: T` anchors the *margin* edge `T` below the page top, so the
+///   border-box top sits at `page_height - T - margin_top`.
+/// - `bottom: B` anchors the margin edge `B` above the page bottom, so
+///   the border-box top sits at `B + margin_bottom + box_height`.
+/// - `left: L` anchors the margin edge `L` from the left, so the
+///   border-box left sits at `L + margin_left`.
+/// - `right: R` anchors the margin edge `R` from the right, so the
+///   border-box left sits at `page_width - R - margin_right - box_width`.
+pub(crate) fn absolute_anchor(input: &AbsoluteAnchorInputs) -> (f32, f32, f32, f32) {
+    let target_left_x = if let Some(l) = input.position_left {
+        l + input.margin_left
+    } else if let Some(r) = input.position_right {
+        input.page_width - r - input.margin_right - input.box_width
+    } else {
+        input.natural_box_x
+    };
+    let target_top_y = if let Some(t) = input.position_top {
+        input.page_height - t - input.margin_top
+    } else if let Some(b) = input.position_bottom {
+        b + input.margin_bottom + input.box_height
+    } else {
+        input.natural_top_y
+    };
+    (
+        target_left_x,
+        target_top_y,
+        target_left_x - input.natural_box_x,
+        target_top_y - input.natural_top_y,
+    )
+}
+
 /// Extra per-line spacing applied during wrapping. `letter_spacing` is
 /// added after every glyph, `word_spacing` after every space.
 #[derive(Clone, Copy, Default)]
@@ -2320,13 +2445,38 @@ impl LayoutInner {
         // in the remaining space. `page-break-inside: auto` opts out — the
         // block is laid out at the current cursor and may run off the
         // bottom (a known limitation until mid-paragraph splitting lands).
-        // `orphans` and `widows` are carried on the style and trivially
-        // honored: since we never split a paragraph across pages, all lines
-        // always stay together on one page.
+        // Skip the push when the block is taller than a *fresh* page
+        // would offer — pushing only loses information at the top of the
+        // current page (and produces a long blank gap before the
+        // overflowing block). `split_lines_for_page` decides whether a
+        // future splitting pass would even be feasible given the
+        // paragraph's `orphans`/`widows`; if not, we still keep
+        // together. This guarantees that a paragraph longer than one
+        // page renders *somewhere*.
+        let full_page_height = self.page_height - self.margin_top - self.margin_bottom;
         let avoid_split = !matches!(style.page_break_inside, Some(css::PageBreakInside::Auto));
+        let line_h = anon.line_height.unwrap_or(max_font_size * 1.2);
+        let lines_that_fit_after_advance = if line_h > 0.0 {
+            // Floor + max(0) → non-negative finite f32; clamp first then
+            // cast unsigned to silence clippy::cast-sign-loss.
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let n = (full_page_height / line_h).floor().max(0.0) as usize;
+            n
+        } else {
+            wrapped_lines.len()
+        };
+        let block_too_tall_for_one_page = block_total_height > full_page_height
+            && split_lines_for_page(
+                wrapped_lines.len(),
+                lines_that_fit_after_advance,
+                style.orphans,
+                style.widows,
+            )
+            .is_some();
         if avoid_split
             && state.cursor_y - block_total_height < self.margin_bottom
             && state.cursor_y < state.content_top
+            && !block_too_tall_for_one_page
         {
             self.advance_column_or_page(
                 &mut state.current_page,
@@ -2340,10 +2490,6 @@ impl LayoutInner {
             );
             state.pending_bottom = 0.0;
         }
-        // Silence dead-code warnings — these are parsed, propagated into
-        // `BlockStyle`, and trivially honored (no splitting). They'll gain
-        // real enforcement when mid-paragraph pagination is implemented.
-        let _ = (style.orphans, style.widows);
 
         let cx = self.col_x(state.current_col, state);
         let box_x = if is_float {
@@ -2368,24 +2514,28 @@ impl LayoutInner {
             css::Position::Absolute | css::Position::Fixed
         );
         // Absolute / fixed paint relative to the page (the initial
-        // containing block). Resolve target page coords and derive the
-        // translate delta from the box's natural (in-flow) position.
+        // containing block). `absolute_anchor` honors the CSS 2.1 §9.3.2
+        // margin-box convention: `top`/`left`/`right`/`bottom` measure to
+        // the *margin edge*, not the border edge that the painter uses.
         let abs_translate = if is_absolute_or_fixed {
-            let target_left_x = if let Some(l) = style.position_left {
-                l
-            } else if let Some(r) = style.position_right {
-                self.page_width - r - box_width
-            } else {
-                box_x
+            let inputs = AbsoluteAnchorInputs {
+                page_width: self.page_width,
+                page_height: self.page_height,
+                natural_box_x: box_x,
+                natural_top_y: state.cursor_y,
+                box_width,
+                box_height,
+                margin_top: style.margin_top,
+                margin_right: style.margin_right,
+                margin_bottom: style.margin_bottom,
+                margin_left: style.margin_left,
+                position_top: style.position_top,
+                position_right: style.position_right,
+                position_bottom: style.position_bottom,
+                position_left: style.position_left,
             };
-            let target_top_y = if let Some(t) = style.position_top {
-                self.page_height - t
-            } else if let Some(b) = style.position_bottom {
-                b + box_height
-            } else {
-                state.cursor_y
-            };
-            Some((target_left_x - box_x, target_top_y - state.cursor_y))
+            let (_tx, _ty, dx, dy) = absolute_anchor(&inputs);
+            Some((dx, dy))
         } else {
             None
         };
@@ -4458,5 +4608,196 @@ mod tests {
             double_strokes, 2,
             "double border should emit exactly two stroke ops, one per parallel line (got {double_strokes})"
         );
+    }
+
+    // ── S7: pagination + positioning helpers ─────────────────────
+
+    fn anchor_inputs() -> AbsoluteAnchorInputs {
+        // Defaults: a 100×50 box at the natural in-flow position
+        // (50, 700) on a Letter page (612×792). All margins zero so
+        // the spec's margin-edge offset becomes a no-op for plain
+        // top/left tests, and any non-zero margin in a test exercises
+        // the inset.
+        AbsoluteAnchorInputs {
+            page_width: 612.0,
+            page_height: 792.0,
+            natural_box_x: 50.0,
+            natural_top_y: 700.0,
+            box_width: 100.0,
+            box_height: 50.0,
+            margin_top: 0.0,
+            margin_right: 0.0,
+            margin_bottom: 0.0,
+            margin_left: 0.0,
+            position_top: None,
+            position_right: None,
+            position_bottom: None,
+            position_left: None,
+        }
+    }
+
+    #[test]
+    fn absolute_anchor_top_left_pin() {
+        // `top: 10; left: 20` lands the margin-edge at (20, page_height - 10),
+        // and with zero margins the border-box matches.
+        let inputs = AbsoluteAnchorInputs {
+            position_top: Some(10.0),
+            position_left: Some(20.0),
+            ..anchor_inputs()
+        };
+        let (tx, ty, dx, dy) = absolute_anchor(&inputs);
+        assert!((tx - 20.0).abs() < 1e-6, "tx={tx}");
+        assert!((ty - (792.0 - 10.0)).abs() < 1e-6, "ty={ty}");
+        assert!((dx - (20.0 - 50.0)).abs() < 1e-6);
+        assert!((dy - (782.0 - 700.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn absolute_anchor_right_pin_subtracts_box_width() {
+        // `right: 10; top: 20` puts the box's right margin-edge 10 from
+        // the right side, so the border-box left is at
+        // page_width - right - margin_right - box_width.
+        let inputs = AbsoluteAnchorInputs {
+            position_top: Some(20.0),
+            position_right: Some(10.0),
+            margin_right: 5.0,
+            ..anchor_inputs()
+        };
+        let (tx, _ty, _dx, _dy) = absolute_anchor(&inputs);
+        let want = 612.0 - 10.0 - 5.0 - 100.0;
+        assert!((tx - want).abs() < 1e-6, "tx={tx}, want={want}");
+    }
+
+    #[test]
+    fn absolute_anchor_bottom_pin_lifts_by_box_height() {
+        // `bottom: 30` puts the box's bottom margin-edge 30 above the
+        // page bottom; the border-box *top* (cursor anchor) is therefore
+        // at bottom + margin_bottom + box_height.
+        let inputs = AbsoluteAnchorInputs {
+            position_bottom: Some(30.0),
+            margin_bottom: 4.0,
+            ..anchor_inputs()
+        };
+        let (_tx, ty, _dx, _dy) = absolute_anchor(&inputs);
+        let want = 30.0 + 4.0 + 50.0;
+        assert!((ty - want).abs() < 1e-6, "ty={ty}, want={want}");
+    }
+
+    #[test]
+    fn absolute_anchor_no_offsets_keeps_natural_position() {
+        // When none of `top`/`right`/`bottom`/`left` is set, the box
+        // stays at its natural in-flow position (delta is zero).
+        let inputs = anchor_inputs();
+        let (tx, ty, dx, dy) = absolute_anchor(&inputs);
+        assert!((tx - 50.0).abs() < 1e-6);
+        assert!((ty - 700.0).abs() < 1e-6);
+        assert!(dx.abs() < 1e-6);
+        assert!(dy.abs() < 1e-6);
+    }
+
+    #[test]
+    fn absolute_anchor_top_left_account_for_margins() {
+        // CSS 2.1 §9.3.2: `top` / `left` measure to the *margin* edge,
+        // so a non-zero margin pushes the border box further inward.
+        let inputs = AbsoluteAnchorInputs {
+            position_top: Some(10.0),
+            position_left: Some(20.0),
+            margin_top: 4.0,
+            margin_left: 6.0,
+            ..anchor_inputs()
+        };
+        let (tx, ty, _dx, _dy) = absolute_anchor(&inputs);
+        assert!((tx - (20.0 + 6.0)).abs() < 1e-6, "tx={tx}");
+        assert!((ty - (792.0 - 10.0 - 4.0)).abs() < 1e-6, "ty={ty}");
+    }
+
+    #[test]
+    fn relative_offset_left_takes_precedence_over_right() {
+        // CSS 2.1 §9.4.3: when both `left` and `right` are set on a
+        // `position: relative` LTR box, `left` wins (per the rule
+        // that the unused offset is ignored for an over-constrained
+        // axis in LTR direction). We model that as "if `left` is
+        // present, ignore `right`".
+        let style = BlockStyle {
+            position: css::Position::Relative,
+            position_left: Some(5.0),
+            position_right: Some(99.0),
+            ..BlockStyle::default()
+        };
+        let (dx, _dy) = relative_offset(&style);
+        assert!((dx - 5.0).abs() < 1e-6, "dx={dx}");
+    }
+
+    #[test]
+    fn relative_offset_top_negates_to_pdf_y_up() {
+        // PDF coords have y increasing upward; CSS `top: T` shifts the
+        // box *downward* by T, so the PDF dy is `-T`.
+        let style = BlockStyle {
+            position: css::Position::Relative,
+            position_top: Some(7.0),
+            ..BlockStyle::default()
+        };
+        let (_dx, dy) = relative_offset(&style);
+        assert!((dy + 7.0).abs() < 1e-6, "dy={dy}");
+    }
+
+    #[test]
+    fn relative_offset_bottom_lifts_in_pdf_coords() {
+        // Same axis, opposite sign: `bottom: B` shifts the box upward
+        // by B in CSS, which is +B in PDF coords.
+        let style = BlockStyle {
+            position: css::Position::Relative,
+            position_bottom: Some(11.0),
+            ..BlockStyle::default()
+        };
+        let (_dx, dy) = relative_offset(&style);
+        assert!((dy - 11.0).abs() < 1e-6, "dy={dy}");
+    }
+
+    #[test]
+    fn split_lines_for_page_short_paragraph_does_not_split() {
+        // A 3-line paragraph with default orphans=widows=2 cannot honor
+        // both constraints in any split (would need ≥4 lines), so the
+        // function returns None ⇒ keep-together (push to next page).
+        assert_eq!(split_lines_for_page(3, 2, 2, 2), None);
+    }
+
+    #[test]
+    fn split_lines_for_page_full_fit_returns_none() {
+        // If the paragraph fits in the remaining space we never split.
+        assert_eq!(split_lines_for_page(5, 5, 2, 2), None);
+        assert_eq!(split_lines_for_page(5, 9, 2, 2), None);
+    }
+
+    #[test]
+    fn split_lines_for_page_clamps_to_widows_floor() {
+        // 10-line paragraph, 8 lines fit: clamp to 10 - widows(2) = 8
+        // on the first page so the next page receives at least 2 lines.
+        assert_eq!(split_lines_for_page(10, 8, 2, 2), Some(8));
+        // If 9 lines would fit, we still cap at 8 to honor widows.
+        assert_eq!(split_lines_for_page(10, 9, 2, 2), Some(8));
+    }
+
+    #[test]
+    fn split_lines_for_page_orphans_floor_blocks_split() {
+        // 10-line paragraph but only 1 line fits and orphans=2: any
+        // valid split would leave too few lines on the current page,
+        // so we push the whole block instead.
+        assert_eq!(split_lines_for_page(10, 1, 2, 2), None);
+    }
+
+    #[test]
+    fn split_lines_for_page_widows_one_allows_more_on_first() {
+        // CSS lets authors set widows=1 to maximise content on the
+        // first page: with 10 lines and 9 fitting we keep all 9.
+        assert_eq!(split_lines_for_page(10, 9, 2, 1), Some(9));
+    }
+
+    #[test]
+    fn split_lines_for_page_orphans_widows_zero_clamps_to_one() {
+        // CSS forbids orphans/widows < 1; the helper defends against a
+        // mis-parsed 0 by treating it as 1 (otherwise we could split
+        // off a zero-line fragment).
+        assert_eq!(split_lines_for_page(10, 5, 0, 0), Some(5));
     }
 }
