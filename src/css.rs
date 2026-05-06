@@ -5628,6 +5628,90 @@ mod tests {
         assert_eq!(style.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
+    /// Stylesheet shared by `cascade_specificity_*` tests below. Mirrors the
+    /// `tests/visual/wpt/cascade_specificity.html` fixture so the WPT regression
+    /// has direct unit-test coverage.
+    const CASCADE_FIXTURE_CSS: &str = "
+        p { color: red; }
+        .blue { color: blue; }
+        p#named { color: green; }
+        p[data-x=\"y\"] { color: orange; }
+    ";
+
+    #[test]
+    fn cascade_specificity_plain_p_is_red() {
+        // Plain <p> with no class/id/attr → only `p { color: red }` matches.
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem("p", vec![], None, vec![], vec![]);
+        let style = match_rules(&elem, &sheet);
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn cascade_specificity_class_blue_beats_type_red() {
+        // `<p class="blue">` — `.blue` (0,1,0) beats `p` (0,0,1).
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem("p", vec!["blue"], None, vec![], vec![]);
+        let style = match_rules(&elem, &sheet);
+        assert_eq!(style.color, Some((0.0, 0.0, 1.0, 1.0)));
+    }
+
+    #[test]
+    fn cascade_specificity_id_green_beats_class_blue() {
+        // `<p class="blue" id="named">` — `p#named` (1,0,1) beats `.blue` (0,1,0).
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem("p", vec!["blue"], Some("named"), vec![], vec![]);
+        let style = match_rules(&elem, &sheet);
+        // CSS named color "green" is #008000 → (0, 0.5, 0).
+        let (r, g, b, a) = style.color.expect("expected green");
+        assert!(r.abs() < 0.01, "red channel should be ~0, got {r}");
+        assert!(
+            (g - 0x80 as f32 / 255.0).abs() < 0.01,
+            "green channel should be ~0.502, got {g}"
+        );
+        assert!(b.abs() < 0.01, "blue channel should be ~0, got {b}");
+        assert!((a - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cascade_specificity_attr_orange_beats_class_blue() {
+        // `<p class="blue" data-x="y">` — `p[data-x="y"]` (0,1,1) beats `.blue` (0,1,0).
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem("p", vec!["blue"], None, vec![("data-x", "y")], vec![]);
+        let style = match_rules(&elem, &sheet);
+        // CSS named color "orange" is #ffa500 → (1, ~0.647, 0).
+        let (r, g, b, a) = style.color.expect("expected orange");
+        assert!((r - 1.0).abs() < 0.01, "red channel should be ~1, got {r}");
+        assert!(
+            (g - 0xa5 as f32 / 255.0).abs() < 0.01,
+            "green channel should be ~0.647, got {g}"
+        );
+        assert!(b.abs() < 0.01, "blue channel should be ~0, got {b}");
+        assert!((a - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cascade_specificity_id_beats_attr() {
+        // Hypothetical element with both `id="named"` and `data-x="y"`:
+        // `p#named` (1,0,1) outranks `p[data-x="y"]` (0,1,1).
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem(
+            "p",
+            vec!["blue"],
+            Some("named"),
+            vec![("data-x", "y")],
+            vec![],
+        );
+        let style = match_rules(&elem, &sheet);
+        // Should resolve to green (id wins), not orange (attr).
+        let (r, g, _b, _a) = style.color.expect("expected green");
+        assert!(r.abs() < 0.01, "red channel should be ~0 (green), got {r}");
+        assert!(
+            (g - 0x80 as f32 / 255.0).abs() < 0.01,
+            "green channel should be ~0.502, got {g}"
+        );
+    }
+
     // ── Attribute selector tests ──────────────────────────────
 
     #[test]
