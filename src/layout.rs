@@ -244,6 +244,15 @@ pub struct BlockStyle {
     /// arena index of the loaded image plus the repeat/size/position
     /// parameters needed to emit the tile grid at paint time.
     pub background_image: Option<BackgroundImageParams>,
+    /// Flat-fallback paint colour for a parsed `linear-gradient(...)`
+    /// background-image (CSS Images 3 §3.1). Today the gradient renderer
+    /// emits a single solid rect of `LinearGradient::average_rgba` on top
+    /// of `background_color`; this is the colour, resolved once per
+    /// block at style time. `None` means no gradient was declared.
+    /// TODO(stream-8b): replace with a proper PDF Axial Shading + Pattern
+    /// dictionary emit (ISO 32000-1 §8.7.4) so the painted gradient
+    /// actually traverses the stop list rather than collapsing to a flat.
+    pub background_gradient_color: Option<(f32, f32, f32, f32)>,
     /// Resolved `box-shadow` layers in CSS declaration order. Paint order
     /// is back-to-front (last layer paints first, so the first-declared
     /// shadow sits on top). Empty = no shadows.
@@ -321,6 +330,7 @@ impl Default for BlockStyle {
             position_right: None,
             position_bottom: None,
             background_image: None,
+            background_gradient_color: None,
             box_shadow: Vec::new(),
         }
     }
@@ -371,6 +381,7 @@ impl BlockStyle {
             || self.margin_left > 0.0
             || self.border_radius.is_some()
             || self.background_image.is_some()
+            || self.background_gradient_color.is_some()
             || self.needs_alpha()
     }
 
@@ -2564,16 +2575,24 @@ impl LayoutInner {
             page.fonts_used.push(marker.font_name.clone());
         }
 
+        // Stream-8: leaf paragraphs with `opacity < 1` need to render
+        // through a Form XObject Transparency Group, just like containers
+        // (CSS Compositing & Blending L1 §4 + ISO 32000-1 §11.6.5). A bare
+        // `SetAlpha` op composites every paint individually against the
+        // backdrop, so a blue background + white text becomes
+        // `0.7*white + 0.3*backdrop` blended on top of `0.7*blue +
+        // 0.3*backdrop` — a faded-blue text rather than the alpha-blended
+        // group. Capturing the leaf's draws into a /Group XObject and
+        // applying α once on the surrounding stream produces the
+        // grouped-then-composited result that browsers/WeasyPrint emit.
+        let needs_leaf_transparency_group = matches!(style.opacity, Some(a) if a < 1.0);
+        let leaf_alpha = style.opacity.unwrap_or(1.0);
+        // Snapshot the page op stream BEFORE `SaveState` so we can lift
+        // everything this paragraph emits into a Form XObject if needed.
+        let opacity_capture_start = page.operations.len();
+
         if needs_state_wrap {
             page.operations.push(PdfOp::SaveState);
-            // Apply opacity inside the save/restore so the alpha state is
-            // reverted when the block finishes. Opacity is block-level for
-            // now (no per-run inline opacity), and 1.0 is a no-op.
-            if let Some(alpha) = style.opacity
-                && alpha < 1.0
-            {
-                page.operations.push(PdfOp::SetAlpha { alpha });
-            }
             // CSS 2.1 §9.4.3: `position: relative` shifts the painted box
             // by (+left, -top) without disturbing flow. Emit the translation
             // inside the save/restore so siblings are unaffected.
@@ -2634,6 +2653,29 @@ impl LayoutInner {
 
         if let Some(bg) = style.background_color {
             let ((r, g, b), a) = split_rgba(bg);
+            push_alpha_if_translucent(&mut page.operations, a);
+            page.operations.push(PdfOp::SetFillColor { r, g, b });
+            emit_rect_path(
+                &mut page.operations,
+                box_x,
+                cursor_y - box_height,
+                box_width,
+                box_height,
+            );
+            page.operations.push(PdfOp::Fill);
+        }
+
+        // CSS Backgrounds & Borders 3 §3.3 says background-image paints
+        // over background-color (in declared layer order). Today we
+        // collapse `linear-gradient(...)` to a single solid rect filled
+        // with the stop-average colour — see
+        // `BlockStyle::background_gradient_color` for the rationale.
+        // The paint sits between `background_color` and the bitmap-image
+        // tile loop so layered declarations like
+        // `background: #fff; background-image: linear-gradient(...);` end
+        // up with the gradient on top, which is what the spec mandates.
+        if let Some(grad_color) = style.background_gradient_color {
+            let ((r, g, b), a) = split_rgba(grad_color);
             push_alpha_if_translucent(&mut page.operations, a);
             page.operations.push(PdfOp::SetFillColor { r, g, b });
             emit_rect_path(
@@ -3045,6 +3087,55 @@ impl LayoutInner {
         }
 
         if needs_state_wrap {
+            page.operations.push(PdfOp::RestoreState);
+        }
+
+        // Stream-8: after the leaf has emitted all of its draw ops, lift
+        // them into a Form XObject Transparency Group when the block has
+        // `opacity < 1`. We avoid this for fixed/absolute leaves and for
+        // floats — the existing code paths there own the captured op
+        // stream and would conflict with our diversion.
+        if needs_leaf_transparency_group
+            && !is_float
+            && !is_absolute_or_fixed
+            && page.operations.len() > opacity_capture_start
+        {
+            let captured_ops: Vec<PdfOp> = page.operations.drain(opacity_capture_start..).collect();
+            let nested_xobjects = captured_form_xobject_indices(&captured_ops);
+            let fonts_used = captured_fonts_in_ops(&captured_ops);
+            // The XObject's BBox covers the page — same as the container
+            // path's bbox. The clip happens inside the captured ops via
+            // the rect emit.
+            let bbox = [0.0_f32, 0.0_f32, page.width as f32, page.height as f32];
+            // Determine which images this leaf referenced so the XObject's
+            // /Resources /XObject dict binds them. The leaf can ref image
+            // backgrounds via `DrawImage` ops.
+            let images_used: Vec<usize> = captured_ops
+                .iter()
+                .filter_map(|op| match op {
+                    PdfOp::DrawImage { index, .. } => Some(*index),
+                    _ => None,
+                })
+                .collect();
+            let alphas = collect_alphas_in_captured_ops(&captured_ops);
+            page.form_xobjects.push(crate::FormXObjectData {
+                bbox,
+                operations: captured_ops,
+                fonts_used,
+                images_used,
+                nested_xobjects,
+                alphas,
+            });
+            let xobject_index = page.form_xobjects.len() - 1;
+            // Apply α once on the surrounding stream and invoke the
+            // group. ISO 32000-1 §11.3.7: `SetAlpha` updates both `ca`
+            // and `CA`, which is correct for `Do` since the group's
+            // composite is alpha-modulated by the current `ca`.
+            page.operations.push(PdfOp::SaveState);
+            push_alpha_if_translucent(&mut page.operations, leaf_alpha);
+            page.operations.push(PdfOp::DrawFormXObject {
+                index: xobject_index,
+            });
             page.operations.push(PdfOp::RestoreState);
         }
 

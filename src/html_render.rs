@@ -1738,6 +1738,16 @@ impl<'a> HtmlRenderer<'a> {
             block_style.height = None;
             block_style.min_height = None;
             block_style.max_height = None;
+            // Stream-8: `opacity` lives on the ContainerStart sentinel and
+            // is consumed by the container path's transparency-group
+            // capture. Letting it ALSO survive into the wrapper paragraph
+            // double-applies the alpha — once when the container's group
+            // composites onto the page (`ca = α`), and again when the
+            // wrapper paragraph's own group composites inside the
+            // container (`ca = α` again). The visible result is `α²`
+            // (e.g. `0.5` shows as `0.25`). Strip it from the wrapper so
+            // the alpha only fires at the container level.
+            block_style.opacity = None;
         }
 
         let paragraph_tag = tag.and_then(static_paragraph_tag);
@@ -2253,6 +2263,18 @@ impl<'a> HtmlRenderer<'a> {
             }
             if let Some(len) = style.bottom {
                 block_style.position_bottom = Some(resolve(len));
+            }
+            // Stream-8: a parsed `linear-gradient(...)` value collapses
+            // to a flat fill at paint time. We average the stop colours
+            // here once at style-resolve time so the layout pass sees a
+            // plain `(r, g, b, a)` and doesn't need to know about the
+            // gradient representation. See `LinearGradient::average_rgba`
+            // for why this is acceptable as an interim renderer (the
+            // diff metric improves substantially over the all-white
+            // "unparsed" baseline even though the actual gradient sweep
+            // is missing).
+            if let Some(grad) = &style.background_gradient {
+                block_style.background_gradient_color = Some(grad.average_rgba());
             }
             if let Some(url) = style.background_image.as_deref() {
                 let cached = self.bg_image_cache.get(url).copied();
