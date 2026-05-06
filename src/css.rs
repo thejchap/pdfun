@@ -2221,9 +2221,19 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 }
             }
             "line-height" => {
-                // Try length first, then bare number (treated as em)
+                // Try length first, then bare number (treated as em). CSS
+                // 2.1 §10.8.1: a percentage `line-height` resolves
+                // against the element's *font-size*, not the containing
+                // block's width — store percentages as `Em(<pct>/100)`
+                // so the standard em-base resolver does the right thing
+                // (otherwise `Pct(...)` would resolve against the page
+                // width).
                 if let Ok(len) = input.try_parse(parse_css_length) {
-                    self.style.line_height = Some(len);
+                    let normalised = match len {
+                        CssLength::Pct(v) => CssLength::Em(v / 100.0),
+                        other => other,
+                    };
+                    self.style.line_height = Some(normalised);
                 } else {
                     let n = input.expect_number()?;
                     self.style.line_height = Some(CssLength::Em(n));

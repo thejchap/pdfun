@@ -2848,10 +2848,22 @@ impl LayoutInner {
             page.operations.push(PdfOp::ClipNonzero);
         }
 
+        // Reset the fill color to a known value before drawing text. The
+        // background-fill above set the current fill to the background's
+        // colour; without an explicit text colour, PDF text would inherit
+        // that fill and become invisible against its own background.
+        // Default to black when no explicit `color` is set, matching the
+        // CSS initial value.
         if let Some(c) = style.color {
             let ((r, g, b), a) = split_rgba(c);
             push_alpha_if_translucent(&mut page.operations, a);
             page.operations.push(PdfOp::SetFillColor { r, g, b });
+        } else {
+            page.operations.push(PdfOp::SetFillColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+            });
         }
 
         let text_x_base = box_x + style.padding_left;
