@@ -1625,9 +1625,9 @@ fn parse_linear_gradient<'i>(
             let p_left = raw[start].1.unwrap();
             let p_right = raw[end].1.unwrap();
             let span = (end - start) as f32;
-            for k in (start + 1)..end {
+            for (k, slot) in raw.iter_mut().enumerate().take(end).skip(start + 1) {
                 let frac = (k - start) as f32 / span;
-                raw[k].1 = Some(p_left + (p_right - p_left) * frac);
+                slot.1 = Some(p_left + (p_right - p_left) * frac);
             }
             idx = end;
         }
@@ -1704,10 +1704,7 @@ fn parse_gradient_direction<'i>(input: &mut Parser<'i, '_>) -> Result<f32, Parse
         // Per spec, the corner version's angle depends on the box aspect
         // ratio; we approximate with the simple 45°-bisector since we
         // emit a flat colour anyway and the visual difference is nil.
-        let pair = (
-            first.to_ascii_lowercase(),
-            s2.to_ascii_lowercase(),
-        );
+        let pair = (first.to_ascii_lowercase(), s2.to_ascii_lowercase());
         let normalized = match (pair.0.as_str(), pair.1.as_str()) {
             ("top", "right") | ("right", "top") => 45.0,
             ("bottom", "right") | ("right", "bottom") => 135.0,

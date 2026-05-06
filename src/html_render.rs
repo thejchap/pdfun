@@ -121,7 +121,7 @@ struct UaStyle {
     font: &'static str,
     font_size: f32,
     /// Bottom-edge gap after the block, in points. For headings this is
-    /// the em-relative WeasyPrint UA default already resolved against
+    /// the em-relative `WeasyPrint` UA default already resolved against
     /// `font_size`. Layout treats this as a non-collapsing post-block
     /// spacing, equivalent to a `padding-bottom` rather than a CSS
     /// `margin-bottom`.
@@ -129,7 +129,7 @@ struct UaStyle {
     /// UA top-margin in points. Currently informational only — layout
     /// does not yet honour first-child margin collapse, so adding the
     /// UA top margin to the cascade would shift every fixture's first
-    /// block by ~1em without a matching shift in the WeasyPrint
+    /// block by ~1em without a matching shift in the `WeasyPrint`
     /// reference. Kept here so future work can plumb it through once
     /// parent/child collapse lands (CSS 2.1 §8.3.1).
     #[allow(dead_code)]
@@ -154,7 +154,7 @@ fn static_paragraph_tag(tag: &str) -> Option<&'static str> {
 
 /// Default font-size for body text and the base for em-relative heading
 /// computations (12pt = 16px at the conventional 96 dpi mapping, which
-/// matches WeasyPrint's default).
+/// matches `WeasyPrint`'s default).
 const UA_BASE_FONT_SIZE: f32 = 12.0;
 
 fn ua_style(tag: &str) -> UaStyle {
@@ -2150,7 +2150,7 @@ impl<'a> HtmlRenderer<'a> {
     ///
     /// Author/inherited values that are themselves em-relative are
     /// resolved against the UA default — this is approximate for nested
-    /// `font-size: 1.2em` chains but matches WeasyPrint's behaviour for
+    /// `font-size: 1.2em` chains but matches `WeasyPrint`'s behaviour for
     /// the (very common) case of a single `body { font-size: ... }`.
     fn resolve_em_base(&self) -> f32 {
         let tag = self.current_tag.as_deref().unwrap_or("");
