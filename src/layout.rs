@@ -339,20 +339,23 @@ impl Default for BlockStyle {
 /// Resolve a block's outer (padding-box) height after applying CSS
 /// `height`, `min-height`, and `max-height`. `natural` is the height
 /// the block would occupy with `height: auto` — i.e.
-/// `padding_top + content_height + padding_bottom`.
+/// `padding_top + content_height + padding_bottom + 2 * border_width`.
 ///
 /// When `height` is set it replaces the content portion. With
-/// `box-sizing: content-box` (CSS default) the resolved padding-box
-/// height is `padding_top + height + padding_bottom`; with
-/// `border-box`, `height` already covers padding and border, so the
-/// padding-box height is `height - 2 * border_width`. `min-height`
-/// extends and `max-height` clamps the result, with `max-height`
-/// winning over `min-height` when they conflict (CSS 2.1 §10.7).
+/// `box-sizing: content-box` (CSS default) the resolved border-box
+/// height is `padding_top + height + padding_bottom + 2 * border_width`;
+/// with `border-box`, `height` already covers padding and border, so it
+/// is used as-is. `min-height` extends and `max-height` clamps the
+/// result, with `max-height` winning over `min-height` when they
+/// conflict (CSS 2.1 §10.7). Returns the **border-box height** — the
+/// full visible extent including border thickness on top and bottom.
 pub(crate) fn resolve_box_height(style: &BlockStyle, natural: f32) -> f32 {
     let mut box_height = if let Some(h) = style.height {
         match style.box_sizing {
-            css::BoxSizing::ContentBox => style.padding_top + h + style.padding_bottom,
-            css::BoxSizing::BorderBox => (h - 2.0 * style.border_width).max(0.0),
+            css::BoxSizing::ContentBox => {
+                style.padding_top + h + style.padding_bottom + 2.0 * style.border_width
+            }
+            css::BoxSizing::BorderBox => h.max(0.0),
         }
     } else {
         natural
@@ -2389,6 +2392,7 @@ impl LayoutInner {
             - style.margin_left
             - style.margin_right
             - h_padding
+            - h_border
             - float_left
             - float_right;
         let mut text_area_width = match style.width {
@@ -2397,7 +2401,7 @@ impl LayoutInner {
                 // Shrink-to-fit — we don't actually have a proper
                 // min-content measurement pass yet, so use a third of
                 // the column as a reasonable default for floats.
-                ((state.col_width / 3.0) - h_padding).max(0.0)
+                ((state.col_width / 3.0) - h_padding - h_border).max(0.0)
             }
             None => available_text_width,
         };
@@ -2412,7 +2416,14 @@ impl LayoutInner {
         } else {
             text_area_width = text_area_width.min(available_text_width).max(0.0);
         }
-        let box_width = text_area_width + h_padding;
+        // `box_width` / `box_height` are the **border-box** dimensions —
+        // i.e. the full visible extent of the block including border
+        // thickness on all four sides. The padding-box is recovered by
+        // shrinking these by `border_width` on each axis (used by
+        // background-image clip, overflow clip, inset shadows). The
+        // content-area width is `text_area_width` and starts at
+        // `box_x + border_width + padding_left`.
+        let box_width = text_area_width + h_padding + h_border;
 
         let spacing = SpacingOpts {
             letter_spacing: style.letter_spacing,
@@ -2440,7 +2451,12 @@ impl LayoutInner {
         let line_height = anon.line_height.unwrap_or(max_font_size * 1.2);
 
         let block_text_height = wrapped_lines.len() as f32 * line_height;
-        let natural_box_height = style.padding_top + block_text_height + style.padding_bottom;
+        // Border-box height: padding + content + padding + border on top
+        // and bottom. `resolve_box_height` returns a border-box value
+        // too (see its docs) so the explicit-height path stays
+        // consistent.
+        let natural_box_height =
+            style.padding_top + block_text_height + style.padding_bottom + 2.0 * style.border_width;
         // Honor explicit `height` and clamp to `min-height` / `max-height`.
         // Content still top-aligns inside the padded box — these properties
         // resize the background/border rect but do not shift text.
@@ -2753,12 +2769,20 @@ impl LayoutInner {
                     _ => {}
                 }
 
+                // Centre the stroked path on the mid-line of the
+                // border band so a stroke of width = `border_width`
+                // covers the full border thickness exactly: from the
+                // border-box edge inward to the padding-box edge.
+                // Without this inset the stroke would straddle the
+                // border-box edge and leak half its width outside the
+                // box.
+                let inset = style.border_width / 2.0;
                 emit_rect_path(
                     &mut page.operations,
-                    box_x,
-                    cursor_y - box_height,
-                    box_width,
-                    box_height,
+                    box_x + inset,
+                    cursor_y - box_height + inset,
+                    (box_width - style.border_width).max(0.0),
+                    (box_height - style.border_width).max(0.0),
                 );
                 page.operations.push(PdfOp::Stroke);
             }
@@ -2848,14 +2872,26 @@ impl LayoutInner {
             page.operations.push(PdfOp::ClipNonzero);
         }
 
-        if let Some(c) = style.color {
-            let ((r, g, b), a) = split_rgba(c);
-            push_alpha_if_translucent(&mut page.operations, a);
-            page.operations.push(PdfOp::SetFillColor { r, g, b });
-        }
+        // CSS 2.1 §4.3: text inherits `color: black` if the element
+        // does not specify one. The fill colour is left at whatever the
+        // background paint set it to, so we must reset it explicitly
+        // before drawing glyphs — otherwise text on a coloured block
+        // (e.g. yellow text on yellow background) effectively
+        // disappears. Per-segment colours still override below via
+        // `segment.color`.
+        let resolved_color = style.color.unwrap_or((0.0, 0.0, 0.0, 1.0));
+        let ((color_r, color_g, color_b), color_a) = split_rgba(resolved_color);
+        push_alpha_if_translucent(&mut page.operations, color_a);
+        page.operations.push(PdfOp::SetFillColor {
+            r: color_r,
+            g: color_g,
+            b: color_b,
+        });
 
-        let text_x_base = box_x + style.padding_left;
-        let mut line_y = cursor_y - style.padding_top;
+        // Text content lives inside the padding box, which is inset
+        // from the border-box by `border_width` on every side.
+        let text_x_base = box_x + style.border_width + style.padding_left;
+        let mut line_y = cursor_y - style.border_width - style.padding_top;
         let is_inside_marker =
             matches!(style.list_style_position, css::ListStylePosition::Inside) && marker.is_some();
 
@@ -3145,10 +3181,13 @@ impl LayoutInner {
             // in-flow content flows past it rather than below it.
             let top_y = state.cursor_y;
             let bottom_y = top_y - box_height - style.margin_bottom;
+            // `box_x` and `box_width` are the border-box edges (post
+            // S5). Use them directly as the float's exclusion zone so
+            // sibling text wraps around the border, not into it.
             state.active_floats.push(ActiveFloat {
                 side: style.float,
-                left: box_x - style.padding_left,
-                right: box_x + box_width + style.padding_right,
+                left: box_x,
+                right: box_x + box_width,
                 top_y,
                 bottom_y,
                 column: state.current_col,
