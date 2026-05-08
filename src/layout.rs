@@ -598,13 +598,26 @@ struct RenderState {
     /// capture's ops, NOT the real page stream. Pop on container exit
     /// to fold the captured ops into a `FormXObjectData`.
     transparency_captures: Vec<TransparencyCapture>,
-    /// Stack of `(start_cursor_y, start_page_count)` snapshots, one per
-    /// open container. Used by `exit_container_node` to enforce a
-    /// container's explicit `height`: if the container's children
-    /// consumed less vertical space than `height` and stayed on the
-    /// same page, the cursor advances by the difference so the
-    /// container reserves its full extent.
-    container_size_stack: Vec<(f32, usize)>,
+    /// Stack of one entry per open container, used by
+    /// `exit_container_node` to enforce a container's explicit `height`
+    /// and to back-fill its `background-color` over the area the wrapper
+    /// paragraph didn't cover. `paint_top` is the cursor_y of the
+    /// container's first painted child (post-margin-fold) — different
+    /// from `start_y` when a negative `margin-top` lifts the box.
+    container_size_stack: Vec<ContainerSnap>,
+}
+
+#[derive(Clone, Copy)]
+struct ContainerSnap {
+    start_y: f32,
+    start_pages: usize,
+    paint_top: Option<f32>,
+    /// Lowest `paint_top - box_height` recorded by any descendant leaf
+    /// — i.e. the y of the deepest painted edge. Distinct from
+    /// `state.cursor_y` at exit because the cursor also includes the
+    /// last child's `margin-bottom` and `spacing_after`, which sit
+    /// outside the container's own box.
+    paint_bottom: Option<f32>,
 }
 
 /// A float currently affecting the layout in a block formatting context.
@@ -704,6 +717,52 @@ pub(crate) fn relative_offset(style: &BlockStyle) -> (f32, f32) {
     };
     (dx, dy)
 }
+
+/// `position: absolute` / `fixed` boxes paint at a page-relative target;
+/// they shouldn't pin an enclosing container's `paint_top`.
+fn is_absolute_or_fixed_position(style: &BlockStyle) -> bool {
+    matches!(
+        style.position,
+        css::Position::Absolute | css::Position::Fixed
+    )
+}
+
+/// Compute the same `(box_x, box_width)` that `render_paragraph_block`
+/// would derive for a leaf with the given `style` at the current column.
+/// Used to back-fill a container's `background-color` strip in
+/// `exit_container_node` when an explicit `height` reserved more space
+/// than the wrapper paragraph painted naturally. Floats are ignored —
+/// the strip would land below any active floats anyway.
+pub(crate) fn container_box_geometry(
+    cx: f32,
+    col_width: f32,
+    style: &BlockStyle,
+) -> (f32, f32) {
+    let h_padding = style.padding_left + style.padding_right;
+    let h_border = style.border_width * 2.0;
+    let content_adjust = match style.box_sizing {
+        css::BoxSizing::ContentBox => 0.0,
+        css::BoxSizing::BorderBox => h_padding + h_border,
+    };
+    let available_text_width =
+        (col_width - style.margin_left - style.margin_right - h_padding).max(0.0);
+    let mut text_area_width = match style.width {
+        Some(w) => (w - content_adjust).max(0.0),
+        None => available_text_width,
+    };
+    if let Some(max_w) = style.max_width {
+        text_area_width = text_area_width.min((max_w - content_adjust).max(0.0));
+    }
+    if let Some(min_w) = style.min_width {
+        text_area_width = text_area_width.max((min_w - content_adjust).max(0.0));
+    }
+    text_area_width = text_area_width.min(available_text_width).max(0.0);
+    let box_width = text_area_width + h_padding;
+    let box_x = cx + style.margin_left;
+    (box_x, box_width)
+}
+
+
 
 /// Inputs to `absolute_anchor` describing where on the page an
 /// `Absolute`/`Fixed` box should land.
@@ -1909,15 +1968,53 @@ impl LayoutInner {
     /// cursor by the delta between the old `pending_bottom` and the new
     /// collapsed value — matching the "already-spent" invariant
     /// `pending_bottom` represents.
+    /// Record the cursor_y at which the first painted child lands inside
+    /// each enclosing container. Called by every leaf-render path right
+    /// before it actually emits paint ops (after `fold_container_top` and
+    /// any margin-top deltas). The recorded `paint_top` is what
+    /// `exit_container_node` uses as the container's visible top edge —
+    /// `start_y` is the *pre-fold* cursor_y, which can sit above the
+    /// real top when a negative `margin-top` lifts the container.
+    fn note_container_paint_top(state: &mut RenderState) {
+        for snap in state.container_size_stack.iter_mut().rev() {
+            if snap.paint_top.is_some() {
+                // Once an entry has been pinned, every entry below it
+                // was pinned by some earlier child, so we can stop.
+                break;
+            }
+            snap.paint_top = Some(state.cursor_y);
+        }
+    }
+
+    /// Record the bottom y of a leaf's painted box on every open
+    /// container. Distinct from `state.cursor_y` after the leaf's
+    /// margin/spacing advance — the container's own bg shouldn't extend
+    /// over the last child's `margin-bottom` or `spacing_after`. Called
+    /// from leaf renders right after their paint ops emit, before the
+    /// post-block cursor advance.
+    fn note_container_paint_bottom(state: &mut RenderState, box_bottom: f32) {
+        for snap in state.container_size_stack.iter_mut() {
+            // Each ancestor extends to the lowest descendant edge.
+            // PDF y is up-positive, so "lowest" is the smallest value.
+            snap.paint_bottom = Some(match snap.paint_bottom {
+                Some(prev) => prev.min(box_bottom),
+                None => box_bottom,
+            });
+        }
+    }
+
     fn fold_container_top(state: &mut RenderState) {
         if state.pending_container_top == 0.0 {
             return;
         }
         let combined = collapse_margins(state.pending_bottom, state.pending_container_top);
         let delta = combined - state.pending_bottom;
-        if delta > 0.0 {
-            state.cursor_y -= delta;
-        }
+        // Negative deltas lift the cursor (CSS 2.1 §8.3.1: a negative
+        // top margin overlaps the previous block's bottom). The earlier
+        // `delta > 0.0` guard silently dropped negative margins, which
+        // showed up as siblings refusing to overlap (`rgba_overlap`'s
+        // `margin-top: -50pt` panel rendered fully below the first).
+        state.cursor_y -= delta;
         state.pending_bottom = combined;
         state.pending_container_top = 0.0;
     }
@@ -2146,9 +2243,12 @@ impl LayoutInner {
         // can enforce an explicit `height` if the container's children
         // didn't fill it. Pushed unconditionally — the exit reads the
         // value only when `bb.style.height.is_some()`.
-        state
-            .container_size_stack
-            .push((state.cursor_y, doc.pages.len()));
+        state.container_size_stack.push(ContainerSnap {
+            start_y: state.cursor_y,
+            start_pages: doc.pages.len(),
+            paint_top: None,
+            paint_bottom: None,
+        });
 
         // WS-2: an `opacity < 1` container with drawn descendants
         // renders through a Form XObject Transparency Group (CSS
@@ -2187,11 +2287,16 @@ impl LayoutInner {
         // behavior. When a page break did happen mid-container, we
         // don't try to enforce: the natural-vs-explicit comparison
         // would need a per-page running total we don't keep.
-        if let Some((start_y, start_pages)) = state.container_size_stack.pop()
+        let popped_snap = state.container_size_stack.pop();
+        if let Some(snap) = popped_snap
             && let Some(height) = bb.style.height
-            && doc.pages.len() == start_pages
+            && doc.pages.len() == snap.start_pages
         {
-            let consumed = (start_y - state.cursor_y).max(0.0);
+            // Use `paint_top` when the first child painted (the container's
+            // visible top after margin folding); fall back to `start_y` if
+            // the container had no painted children.
+            let reference_y = snap.paint_top.unwrap_or(snap.start_y);
+            let consumed = (reference_y - state.cursor_y).max(0.0);
             let remaining = height - consumed;
             if remaining > 0.0 {
                 let available = state.cursor_y - self.margin_bottom;
@@ -2216,6 +2321,46 @@ impl LayoutInner {
                     state.pending_bottom = 0.0;
                     state.pending_container_top = 0.0;
                 }
+            }
+        }
+        // Paint a tail strip of the container's `background-color` over
+        // any vertical space its explicit `height` reserves *beyond*
+        // the wrapper paragraph's natural box. The wrapper already
+        // painted its own bg at the natural box; this fills the gap so
+        // an explicit `height: 100pt` reads as a full 100pt panel
+        // rather than a 30pt text bar with 70pt of empty space.
+        // Disjoint from the wrapper's paint (no overlap), so translucent
+        // colours don't double-blend. Skipped for floats (the wrapper
+        // already paints at the float position) and for containers that
+        // crossed a page break (we don't track per-page running tops).
+        if let Some(snap) = popped_snap
+            && let Some(bg) = bb.style.background_color
+            && let Some(height) = bb.style.height
+            && doc.pages.len() == snap.start_pages
+            && matches!(bb.style.float, css::FloatValue::None)
+        {
+            let paint_top = snap.paint_top.unwrap_or(snap.start_y);
+            let enforced_bottom = paint_top - height;
+            // The wrapper paragraph painted the bg from `paint_top`
+            // down to `paint_bottom` (the leaf's box bottom). Anything
+            // below `paint_bottom` is the missing strip.
+            let leaf_bottom = snap.paint_bottom.unwrap_or(paint_top);
+            let strip_top = leaf_bottom;
+            let strip_bottom = enforced_bottom;
+            if strip_top > strip_bottom {
+                let cx = self.col_x(state.current_col, state);
+                let (box_x, box_width) = container_box_geometry(cx, state.col_width, &bb.style);
+                let ((r, g, b), a) = split_rgba(bg);
+                let mut page = state.current_page.lock().unwrap();
+                push_alpha_if_translucent(&mut page.operations, a);
+                page.operations.push(PdfOp::SetFillColor { r, g, b });
+                page.operations.push(PdfOp::Rectangle {
+                    x: box_x,
+                    y: strip_bottom,
+                    width: box_width,
+                    height: strip_top - strip_bottom,
+                });
+                page.operations.push(PdfOp::Fill);
             }
         }
         // Pair with `enter_container_node`'s capture: fold the diverted
@@ -2513,6 +2658,16 @@ impl LayoutInner {
         };
         if !is_float {
             state.cursor_y -= collapsed_top_delta(state.pending_bottom, style.margin_top);
+        }
+
+        // After the wrapper's own margin-top has been consumed, the
+        // current `cursor_y` is the visible top edge of any enclosing
+        // container that hasn't yet had a child. Pin it so
+        // `exit_container_node` measures `consumed` against the post-fold
+        // top — required for negative `margin-top`s that lift the box
+        // (e.g. `rgba_overlap`'s overlapping panels).
+        if !is_float && !is_absolute_or_fixed_position(style) {
+            Self::note_container_paint_top(state);
         }
 
         let is_relative_positioned = style.position == css::Position::Relative
@@ -3188,6 +3343,12 @@ impl LayoutInner {
             state.pending_bottom = saved_pending_bottom;
             return Ok(());
         }
+        // Record the leaf's box bottom (paint_top - box_height) on every
+        // open container before the cursor advances past
+        // `margin_bottom` + `spacing_after`. Containers with a
+        // `background-color` paint up to this y at exit — the trailing
+        // margin/spacing belongs to the leaf, not the container's box.
+        Self::note_container_paint_bottom(state, state.cursor_y - box_height);
         state.cursor_y -= box_height + style.margin_bottom + anon.spacing_after;
         state.pending_bottom = style.margin_bottom;
 
