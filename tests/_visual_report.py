@@ -127,6 +127,22 @@ def _vendor_ref(row: dict[str, object]) -> None:
         rel = Path(src.name)
     dest = VENDORED_REF_DIR / rel
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # `write_report` runs once per category test (plus an atexit flush),
+    # so this gets called several times for the same (src, dest) pair.
+    # The committed reference PNGs don't change during a run, so skip
+    # re-copying when the dest already mirrors the source. That's both
+    # cheaper and sidesteps a Windows file-lock flake: a transient
+    # handle from a previous `copy2` can race with the next overwrite
+    # and surface as `PermissionError: [WinError 32]`.
+    src_stat = src_resolved.stat()
+    if dest.exists():
+        dest_stat = dest.stat()
+        if (
+            dest_stat.st_size == src_stat.st_size
+            and dest_stat.st_mtime >= src_stat.st_mtime
+        ):
+            row["ref_path"] = str(dest)
+            return
     shutil.copy2(src, dest)
     row["ref_path"] = str(dest)
 
