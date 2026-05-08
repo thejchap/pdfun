@@ -601,7 +601,7 @@ struct RenderState {
     /// Stack of one entry per open container, used by
     /// `exit_container_node` to enforce a container's explicit `height`
     /// and to back-fill its `background-color` over the area the wrapper
-    /// paragraph didn't cover. `paint_top` is the cursor_y of the
+    /// paragraph didn't cover. `paint_top` is the `cursor_y` of the
     /// container's first painted child (post-margin-fold) — different
     /// from `start_y` when a negative `margin-top` lifts the box.
     container_size_stack: Vec<ContainerSnap>,
@@ -733,11 +733,7 @@ fn is_absolute_or_fixed_position(style: &BlockStyle) -> bool {
 /// `exit_container_node` when an explicit `height` reserved more space
 /// than the wrapper paragraph painted naturally. Floats are ignored —
 /// the strip would land below any active floats anyway.
-pub(crate) fn container_box_geometry(
-    cx: f32,
-    col_width: f32,
-    style: &BlockStyle,
-) -> (f32, f32) {
+pub(crate) fn container_box_geometry(cx: f32, col_width: f32, style: &BlockStyle) -> (f32, f32) {
     let h_padding = style.padding_left + style.padding_right;
     let h_border = style.border_width * 2.0;
     let content_adjust = match style.box_sizing {
@@ -761,8 +757,6 @@ pub(crate) fn container_box_geometry(
     let box_x = cx + style.margin_left;
     (box_x, box_width)
 }
-
-
 
 /// Inputs to `absolute_anchor` describing where on the page an
 /// `Absolute`/`Fixed` box should land.
@@ -1963,17 +1957,12 @@ impl LayoutInner {
         self.margin_left + col as f32 * (state.col_width + state.col_gap)
     }
 
-    /// Fold any pending container top margin into `pending_bottom` so leaf
-    /// render paths see a single collapsed margin value. Advances the
-    /// cursor by the delta between the old `pending_bottom` and the new
-    /// collapsed value — matching the "already-spent" invariant
-    /// `pending_bottom` represents.
-    /// Record the cursor_y at which the first painted child lands inside
+    /// Record the `cursor_y` at which the first painted child lands inside
     /// each enclosing container. Called by every leaf-render path right
     /// before it actually emits paint ops (after `fold_container_top` and
     /// any margin-top deltas). The recorded `paint_top` is what
     /// `exit_container_node` uses as the container's visible top edge —
-    /// `start_y` is the *pre-fold* cursor_y, which can sit above the
+    /// `start_y` is the *pre-fold* `cursor_y`, which can sit above the
     /// real top when a negative `margin-top` lifts the container.
     fn note_container_paint_top(state: &mut RenderState) {
         for snap in state.container_size_stack.iter_mut().rev() {
@@ -1993,7 +1982,7 @@ impl LayoutInner {
     /// from leaf renders right after their paint ops emit, before the
     /// post-block cursor advance.
     fn note_container_paint_bottom(state: &mut RenderState, box_bottom: f32) {
-        for snap in state.container_size_stack.iter_mut() {
+        for snap in &mut state.container_size_stack {
             // Each ancestor extends to the lowest descendant edge.
             // PDF y is up-positive, so "lowest" is the smallest value.
             snap.paint_bottom = Some(match snap.paint_bottom {
@@ -2003,6 +1992,11 @@ impl LayoutInner {
         }
     }
 
+    /// Fold any pending container top margin into `pending_bottom` so leaf
+    /// render paths see a single collapsed margin value. Advances the
+    /// cursor by the delta between the old `pending_bottom` and the new
+    /// collapsed value — matching the "already-spent" invariant
+    /// `pending_bottom` represents.
     fn fold_container_top(state: &mut RenderState) {
         if state.pending_container_top == 0.0 {
             return;
