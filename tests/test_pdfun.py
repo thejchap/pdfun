@@ -230,16 +230,41 @@ with describe("Text - built-in fonts"):
 
     @test
     def text_special_chars():
-        """Parentheses and backslashes are escaped in PDF strings."""
+        """Parens / backslashes are escaped exactly once in PDF strings.
+
+        Regression: pdf_writer's ``Str`` already PDF-escapes parens and
+        backslashes on serialisation per ISO 32000-1 §7.3.4.2, so the
+        renderer must hand it raw bytes. Pre-escaping in the renderer
+        produced ``\\\\(`` (literal ``\\(`` on the wire), which viewers
+        render as a visible backslash before the paren — visible in
+        ``progressive/09_backgrounds`` as ``rgba\\(\\)`` instead of
+        ``rgba()``. pdf_writer leaves *balanced* parens unescaped (also
+        valid per the spec), so we exercise both balanced and unbalanced
+        parens plus a single backslash.
+        """
         doc = PdfDocument()
         page = doc.add_page()
         page.set_font("Helvetica", 12.0)
-        page.draw_text(72.0, 720.0, "test (parens) and \\backslash")
+        # Balanced parens — pass through verbatim.
+        page.draw_text(72.0, 720.0, "rgba(1, 2, 3)")
+        # Unbalanced paren — gets exactly one `\(` escape.
+        page.draw_text(72.0, 700.0, "open ( only")
+        # Single backslash — gets exactly one `\\` escape.
+        page.draw_text(72.0, 680.0, "back\\slash")
         data = doc.to_bytes()
         content = content_stream(data)
+        # Balanced parens passed through unescaped.
+        expect(content).to_contain(b"(rgba(1, 2, 3)) Tj")
+        # Unbalanced paren single-escaped on the wire (`\(` = b"\\(").
         expect(content).to_contain(b"\\(")
-        expect(content).to_contain(b"\\)")
+        # Backslash single-escaped on the wire (`\\` = b"\\\\").
         expect(content).to_contain(b"\\\\")
+        # Double-escape forms must NOT be present (the bug we're guarding).
+        # `\\(` on the wire is three bytes 0x5C 0x5C 0x28 → b"\\\\(" in Python.
+        expect(b"\\\\(" in content).to_be_falsy()
+        expect(b"\\\\)" in content).to_be_falsy()
+        # Four wire 0x5C bytes → b"\\\\\\\\" in Python (double-escaped backslash).
+        expect(b"\\\\\\\\" in content).to_be_falsy()
 
     @test
     def text_font_size():

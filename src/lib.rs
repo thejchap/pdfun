@@ -339,23 +339,6 @@ fn char_is_winansi(ch: char) -> bool {
     winansi::transcode_to_pdf_winansi(s).is_ok()
 }
 
-/// Escape a byte buffer for PDF literal string encoding (`(...)`).
-/// Parentheses and backslashes must be escaped per ISO 32000-1 §7.3.4.2.
-/// Accepts arbitrary bytes — used after `WinAnsi` transcoding so the input
-/// is already in the encoding the built-in font expects.
-fn pdf_escape(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    for &b in bytes {
-        match b {
-            b'(' => out.extend_from_slice(b"\\("),
-            b')' => out.extend_from_slice(b"\\)"),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            _ => out.push(b),
-        }
-    }
-    out
-}
-
 // ── Registered (embedded) fonts ────────────────────────────────
 
 pub(crate) struct RegisteredFont {
@@ -821,8 +804,13 @@ fn write_ops(
                 content.next_line(*x, *y);
             }
             PdfOp::ShowText(bytes) => {
-                let escaped = pdf_escape(bytes);
-                content.show(Str(&escaped));
+                // pdf_writer's `Str` performs PDF literal-string escaping
+                // (parens / backslashes) on serialisation, so pass raw
+                // WinAnsi bytes straight through — escaping here would
+                // double-escape (e.g. `(` → `\(` → `\\(`), surfacing as
+                // visible backslashes in viewers (see
+                // tests/visual/progressive/09_backgrounds.html).
+                content.show(Str(bytes));
             }
             PdfOp::ShowGlyphs(chars) => {
                 if let Some(ref fname) = current_font_name

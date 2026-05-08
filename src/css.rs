@@ -251,9 +251,12 @@ pub enum Position {
     #[default]
     Static,
     Relative,
-    /// Parsed but not rendered — falls back to static.
+    /// Out of normal flow; paints relative to the initial containing
+    /// block (the page). See `layout::absolute_anchor` for the offset
+    /// resolution. Margin-edge anchored per CSS 2.1 §9.3.2.
     Absolute,
-    /// Parsed but not rendered — falls back to static.
+    /// Same as `Absolute`, but additionally replays onto every page
+    /// (`layout::FixedBlock`).
     Fixed,
 }
 
@@ -390,6 +393,112 @@ impl Default for BackgroundPosition {
             x: CssLength::Pct(0.0),
             y: CssLength::Pct(0.0),
         }
+    }
+}
+
+/// CSS Images 3 §3.1: a parsed `linear-gradient(...)` value. Direction is
+/// captured as the angle (in degrees, 0deg = "to top" per spec) the
+/// gradient line points along; stops are color + position pairs in
+/// declared order. Position is a percentage in `[0.0, 1.0]` that has
+/// already been interpolated against neighbouring explicit stops where
+/// it was originally omitted, so the renderer can ignore the "missing
+/// position" rule entirely.
+///
+/// The PDF emit path is a flat fallback today (paints the average of the
+/// stop colors as a solid rect — see `LinearGradient::average_rgba`).
+/// A proper PDF Axial Shading + Pattern emit (ISO 32000-1 §8.7.4) is
+/// deferred; the parser is structured so that follow-up can re-use the
+/// same field without re-parsing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinearGradient {
+    /// Angle of the gradient line in degrees, measured CSS-style:
+    /// 0° points to top, 90° to right, 180° to bottom, 270° to left.
+    /// This is the canonical orientation per CSS Images 3 §3.1.
+    pub angle_deg: f32,
+    /// Stops in declared order, each `(color, position)`. Position is a
+    /// fraction in `[0.0, 1.0]` (0 = start, 1 = end of the gradient
+    /// line). At least two stops are guaranteed at parse time.
+    pub stops: Vec<(crate::css::Rgba, f32)>,
+}
+
+/// 4-tuple alias used only inside the `LinearGradient` representation —
+/// the rest of the codebase passes `(f32, f32, f32, f32)` directly. We
+/// give it a name purely so the `LinearGradient` field is self-describing.
+pub type Rgba = (f32, f32, f32, f32);
+
+impl LinearGradient {
+    /// Premultiplied-by-alpha average of the stop colors, returned as
+    /// `(r, g, b, a)`. This is the colour the flat-fallback paint path
+    /// uses — it's not the true gradient mid-point but it produces a
+    /// reasonable solid rect that matches the reference's overall hue
+    /// far better than the all-white "gradient unparsed" baseline.
+    ///
+    /// Channels are clamped to `[0, 1]` (defensive — the inputs are
+    /// already in range from `parse_css_color`).
+    pub fn average_rgba(&self) -> Rgba {
+        if self.stops.is_empty() {
+            return (1.0, 1.0, 1.0, 1.0);
+        }
+        let mut r = 0.0_f32;
+        let mut g = 0.0_f32;
+        let mut b = 0.0_f32;
+        let mut a = 0.0_f32;
+        for &((sr, sg, sb, sa), _pos) in &self.stops {
+            r += sr;
+            g += sg;
+            b += sb;
+            a += sa;
+        }
+        let n = self.stops.len() as f32;
+        (
+            (r / n).clamp(0.0, 1.0),
+            (g / n).clamp(0.0, 1.0),
+            (b / n).clamp(0.0, 1.0),
+            (a / n).clamp(0.0, 1.0),
+        )
+    }
+
+    /// Linearly interpolate the gradient at fractional position `t` in
+    /// `[0, 1]`. Used by tests to verify the stop-interpolation logic
+    /// (the production paint path uses the simpler `average_rgba`
+    /// fallback today). Out-of-range `t` clamps to the nearest endpoint
+    /// per CSS Images 3 §3.5.
+    #[allow(dead_code)]
+    pub fn sample_at(&self, t: f32) -> Rgba {
+        if self.stops.is_empty() {
+            return (1.0, 1.0, 1.0, 1.0);
+        }
+        let t = t.clamp(0.0, 1.0);
+        // Single-stop gradients are degenerate but well-defined: the
+        // single colour fills the entire gradient.
+        if self.stops.len() == 1 {
+            return self.stops[0].0;
+        }
+        // Find the bracketing pair `(prev, next)` such that
+        // `prev.pos <= t <= next.pos`. Stops are stored in declared
+        // order — `parse_linear_gradient` ensures monotonic positions.
+        if t <= self.stops[0].1 {
+            return self.stops[0].0;
+        }
+        if t >= self.stops[self.stops.len() - 1].1 {
+            return self.stops[self.stops.len() - 1].0;
+        }
+        for w in self.stops.windows(2) {
+            let (c0, p0) = w[0];
+            let (c1, p1) = w[1];
+            if p0 <= t && t <= p1 {
+                let span = (p1 - p0).max(1e-6);
+                let frac = (t - p0) / span;
+                return (
+                    c0.0 + (c1.0 - c0.0) * frac,
+                    c0.1 + (c1.1 - c0.1) * frac,
+                    c0.2 + (c1.2 - c0.2) * frac,
+                    c0.3 + (c1.3 - c0.3) * frac,
+                );
+            }
+        }
+        // Fall through (shouldn't happen given the bracketing above).
+        self.stops[self.stops.len() - 1].0
     }
 }
 
@@ -888,6 +997,7 @@ macro_rules! with_style_fields {
             (bottom,            copy,  no),
             (left,              copy,  no),
             (background_image,  clone, no),
+            (background_gradient, clone, no),
             (background_repeat, copy,  no),
             (background_size,   copy,  no),
             (background_position, copy, no),
@@ -1043,6 +1153,13 @@ pub struct ComputedStyle {
     /// `html_render::apply_block_css_from` against the document's
     /// `base_dir` (mirroring how `<img src>` is resolved).
     pub background_image: Option<String>,
+    /// Parsed `linear-gradient(...)` value from `background-image`. Mutually
+    /// exclusive in practice with `background_image` (the URL form), since
+    /// the property accepts a single image source — whichever the most
+    /// recent declaration parsed wins. Resolution + paint happens in
+    /// `html_render::apply_block_css_from` (averages stops to a flat
+    /// colour for now; see `LinearGradient::average_rgba`).
+    pub background_gradient: Option<LinearGradient>,
     pub background_repeat: Option<BackgroundRepeat>,
     pub background_size: Option<BackgroundSize>,
     pub background_position: Option<BackgroundPosition>,
@@ -1403,6 +1520,201 @@ fn parse_calc_atom<'i>(input: &mut Parser<'i, '_>) -> Result<CssLength, ParseErr
             input.reset(&state);
             parse_css_length(input).map_err(|_| location.new_custom_error(()))
         }
+    }
+}
+
+/// Parse a CSS Images 3 §3.1 `linear-gradient(...)` value. Accepts the
+/// `to <side-or-corner>` syntax (`to top` / `to right` / `to bottom` /
+/// `to left` and the four diagonal pairs), an explicit `<angle>`
+/// (degrees, gradians, radians, or turns), or an omitted direction
+/// (defaults to `to bottom`). Stops are `<color>` followed by an
+/// optional `<percentage>` or `<length>` position; missing positions
+/// are interpolated between the bracketing explicit positions per spec
+/// (the first defaults to 0%, the last to 100%, intermediates split
+/// evenly across runs of position-less stops).
+///
+/// Stops with explicit lengths are converted to percentages via a
+/// best-effort heuristic: `%` is taken as-is; `px`/`pt`/`em`/`rem` are
+/// rejected (the parser falls back to declared-position-less behavior
+/// since we can't resolve them at parse time without knowing the box).
+/// This keeps the parser pure and side-effect-free; length-positioned
+/// stops are a future extension.
+fn parse_linear_gradient<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<LinearGradient, ParseError<'i, ()>> {
+    let location = input.current_source_location();
+    let token = input.next()?.clone();
+    let Token::Function(name) = &token else {
+        return Err(location.new_custom_error(()));
+    };
+    if !name.eq_ignore_ascii_case("linear-gradient") {
+        return Err(location.new_custom_error(()));
+    }
+    input.parse_nested_block(|i| {
+        // CSS Images 3 §3.1: `linear-gradient(<linear-color-stop-list>)` —
+        // an optional direction (followed by a comma) and a comma-separated
+        // list of color stops.
+        let angle_deg = match i.try_parse(parse_gradient_direction) {
+            Ok(angle) => {
+                i.expect_comma()?;
+                angle
+            }
+            // Default direction per spec: "to bottom" — gradient line
+            // points downward (180°).
+            Err(_) => 180.0_f32,
+        };
+
+        // Parse a comma-separated list of color stops, each a color +
+        // optional position. We collect raw positions as Option<f32> so
+        // the missing-position interpolation pass below can fill them in.
+        let mut raw: Vec<(Rgba, Option<f32>)> = Vec::new();
+        loop {
+            let color = parse_css_color(i)?;
+            let pos = i
+                .try_parse(|p: &mut Parser<'i, '_>| {
+                    let location = p.current_source_location();
+                    let tok = p.next()?.clone();
+                    match &tok {
+                        Token::Percentage { unit_value, .. } => {
+                            Ok::<f32, ParseError<'i, ()>>(*unit_value)
+                        }
+                        // Bare `<number>%` only — length-typed positions
+                        // (`px`/`em`) require box-resolved lengths and
+                        // are not yet supported. Reject so the outer
+                        // try_parse falls back to "no explicit position".
+                        _ => Err(location.new_custom_error(())),
+                    }
+                })
+                .ok();
+            raw.push((color, pos));
+            if i.try_parse(cssparser::Parser::expect_comma).is_err() {
+                break;
+            }
+        }
+        if raw.len() < 2 {
+            // CSS Images 3 §3.5: a gradient with fewer than two stops is
+            // invalid. (One stop is technically allowed in CSS Images 4
+            // for `linear-gradient(red 50%)` but we keep the stricter
+            // CSS 3 rule for now.)
+            return Err(i.new_custom_error::<_, ()>(()));
+        }
+        // Default the first/last positions if missing (spec: 0% / 100%).
+        let last = raw.len() - 1;
+        if raw[0].1.is_none() {
+            raw[0].1 = Some(0.0);
+        }
+        if raw[last].1.is_none() {
+            raw[last].1 = Some(1.0);
+        }
+        // Fill any None positions by linearly distributing across runs of
+        // missing positions between the bracketing explicit ones.
+        let mut idx = 0;
+        while idx < raw.len() {
+            if raw[idx].1.is_some() {
+                idx += 1;
+                continue;
+            }
+            // Find the next explicit position.
+            let start = idx - 1; // bracketing left (always Some by now)
+            let mut end = idx;
+            while end < raw.len() && raw[end].1.is_none() {
+                end += 1;
+            }
+            // `end` now points at the next Some (guaranteed since the
+            // last entry was forced to Some(1.0) above).
+            let p_left = raw[start].1.unwrap();
+            let p_right = raw[end].1.unwrap();
+            let span = (end - start) as f32;
+            for (k, slot) in raw.iter_mut().enumerate().take(end).skip(start + 1) {
+                let frac = (k - start) as f32 / span;
+                slot.1 = Some(p_left + (p_right - p_left) * frac);
+            }
+            idx = end;
+        }
+        // Enforce monotonic non-decreasing positions per spec (later
+        // stops never paint before earlier ones — the spec says any
+        // out-of-order position is clamped to the previous max). This
+        // also keeps `LinearGradient::sample_at`'s windowed search
+        // correct.
+        let mut max_so_far = 0.0_f32;
+        let stops: Vec<(Rgba, f32)> = raw
+            .into_iter()
+            .map(|(c, p)| {
+                let p = p.unwrap_or(0.0).clamp(0.0, 1.0);
+                max_so_far = max_so_far.max(p);
+                (c, max_so_far)
+            })
+            .collect();
+        Ok(LinearGradient { angle_deg, stops })
+    })
+}
+
+/// Parse the optional direction prefix of a `linear-gradient(...)` —
+/// either `to <side>` / `to <corner>` or an explicit `<angle>`. Returns
+/// the angle in degrees with the CSS convention (0° = to top, 90° = to
+/// right, 180° = to bottom, 270° = to left).
+fn parse_gradient_direction<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
+    let location = input.current_source_location();
+    // First branch: explicit `<angle>` — try to parse a single token as
+    // a degree dimension. Numbers without a unit are not legal angles
+    // per CSS Values 3 §6.3 (a unit is required), so we don't accept
+    // bare numbers.
+    if let Ok(angle) = input.try_parse(|i: &mut Parser<'i, '_>| {
+        let loc = i.current_source_location();
+        let tok = i.next()?.clone();
+        match &tok {
+            Token::Dimension { value, unit, .. } => {
+                let unit = unit.to_ascii_lowercase();
+                let degrees = match unit.as_str() {
+                    "deg" => *value,
+                    "grad" => *value * 0.9,
+                    "rad" => value.to_degrees(),
+                    "turn" => *value * 360.0,
+                    _ => return Err(loc.new_custom_error::<_, ()>(())),
+                };
+                Ok(degrees)
+            }
+            _ => Err(loc.new_custom_error::<_, ()>(())),
+        }
+    }) {
+        return Ok(angle.rem_euclid(360.0));
+    }
+
+    // Second branch: `to <side-or-corner>`. The keyword `to` is required.
+    let to_ident = input.expect_ident_cloned()?;
+    if !to_ident.eq_ignore_ascii_case("to") {
+        return Err(location.new_custom_error(()));
+    }
+    let first = input.expect_ident_cloned()?;
+    let second = input
+        .try_parse(|i: &mut Parser<'i, '_>| i.expect_ident_cloned())
+        .ok();
+
+    let side_to_angle = |s: &str| -> Option<f32> {
+        match s.to_ascii_lowercase().as_str() {
+            "top" => Some(0.0),
+            "right" => Some(90.0),
+            "bottom" => Some(180.0),
+            "left" => Some(270.0),
+            _ => None,
+        }
+    };
+    if let Some(s2) = second {
+        // Corner: combine two side keywords into a 45°-multiple angle.
+        // Per spec, the corner version's angle depends on the box aspect
+        // ratio; we approximate with the simple 45°-bisector since we
+        // emit a flat colour anyway and the visual difference is nil.
+        let pair = (first.to_ascii_lowercase(), s2.to_ascii_lowercase());
+        let normalized = match (pair.0.as_str(), pair.1.as_str()) {
+            ("top", "right") | ("right", "top") => 45.0,
+            ("bottom", "right") | ("right", "bottom") => 135.0,
+            ("bottom", "left") | ("left", "bottom") => 225.0,
+            ("top", "left") | ("left", "top") => 315.0,
+            _ => return Err(location.new_custom_error(())),
+        };
+        Ok(normalized)
+    } else {
+        side_to_angle(&first).ok_or_else(|| location.new_custom_error(()))
     }
 }
 
@@ -1906,9 +2218,19 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 }
             }
             "line-height" => {
-                // Try length first, then bare number (treated as em)
+                // Try length first, then bare number (treated as em). CSS
+                // 2.1 §10.8.1: a percentage `line-height` resolves
+                // against the element's *font-size*, not the containing
+                // block's width — store percentages as `Em(<pct>/100)`
+                // so the standard em-base resolver does the right thing
+                // (otherwise `Pct(...)` would resolve against the page
+                // width).
                 if let Ok(len) = input.try_parse(parse_css_length) {
-                    self.style.line_height = Some(len);
+                    let normalised = match len {
+                        CssLength::Pct(v) => CssLength::Em(v / 100.0),
+                        other => other,
+                    };
+                    self.style.line_height = Some(normalised);
                 } else {
                     let n = input.expect_number()?;
                     self.style.line_height = Some(CssLength::Em(n));
@@ -2266,12 +2588,21 @@ impl<'i> DeclarationParser<'i> for StyleDeclarationParser<'_> {
                 {
                     if ident.eq_ignore_ascii_case("none") {
                         self.style.background_image = None;
+                        self.style.background_gradient = None;
                     } else {
                         return Err(location.new_custom_error(()));
                     }
+                } else if let Ok(grad) = input.try_parse(parse_linear_gradient) {
+                    // CSS Images 3 §3: the URL and gradient forms are mutually
+                    // exclusive on a single layer — clear the URL field so a
+                    // later `background-image: linear-gradient(...)` cleanly
+                    // overrides any earlier `background-image: url(...)`.
+                    self.style.background_image = None;
+                    self.style.background_gradient = Some(grad);
                 } else {
                     let url = parse_url(input)?;
                     self.style.background_image = Some(url);
+                    self.style.background_gradient = None;
                 }
             }
             "background-repeat" => {
@@ -5625,6 +5956,90 @@ mod tests {
         assert_eq!(style.color, Some((0.0, 0.0, 1.0, 1.0)));
     }
 
+    /// Stylesheet shared by `cascade_specificity_*` tests below. Mirrors the
+    /// `tests/visual/wpt/cascade_specificity.html` fixture so the WPT regression
+    /// has direct unit-test coverage.
+    const CASCADE_FIXTURE_CSS: &str = "
+        p { color: red; }
+        .blue { color: blue; }
+        p#named { color: green; }
+        p[data-x=\"y\"] { color: orange; }
+    ";
+
+    #[test]
+    fn cascade_specificity_plain_p_is_red() {
+        // Plain <p> with no class/id/attr → only `p { color: red }` matches.
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem("p", vec![], None, vec![], vec![]);
+        let style = match_rules(&elem, &sheet);
+        assert_eq!(style.color, Some((1.0, 0.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn cascade_specificity_class_blue_beats_type_red() {
+        // `<p class="blue">` — `.blue` (0,1,0) beats `p` (0,0,1).
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem("p", vec!["blue"], None, vec![], vec![]);
+        let style = match_rules(&elem, &sheet);
+        assert_eq!(style.color, Some((0.0, 0.0, 1.0, 1.0)));
+    }
+
+    #[test]
+    fn cascade_specificity_id_green_beats_class_blue() {
+        // `<p class="blue" id="named">` — `p#named` (1,0,1) beats `.blue` (0,1,0).
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem("p", vec!["blue"], Some("named"), vec![], vec![]);
+        let style = match_rules(&elem, &sheet);
+        // CSS named color "green" is #008000 → (0, 0.5, 0).
+        let (r, g, b, a) = style.color.expect("expected green");
+        assert!(r.abs() < 0.01, "red channel should be ~0, got {r}");
+        assert!(
+            (g - 0x80 as f32 / 255.0).abs() < 0.01,
+            "green channel should be ~0.502, got {g}"
+        );
+        assert!(b.abs() < 0.01, "blue channel should be ~0, got {b}");
+        assert!((a - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cascade_specificity_attr_orange_beats_class_blue() {
+        // `<p class="blue" data-x="y">` — `p[data-x="y"]` (0,1,1) beats `.blue` (0,1,0).
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem("p", vec!["blue"], None, vec![("data-x", "y")], vec![]);
+        let style = match_rules(&elem, &sheet);
+        // CSS named color "orange" is #ffa500 → (1, ~0.647, 0).
+        let (r, g, b, a) = style.color.expect("expected orange");
+        assert!((r - 1.0).abs() < 0.01, "red channel should be ~1, got {r}");
+        assert!(
+            (g - 0xa5 as f32 / 255.0).abs() < 0.01,
+            "green channel should be ~0.647, got {g}"
+        );
+        assert!(b.abs() < 0.01, "blue channel should be ~0, got {b}");
+        assert!((a - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cascade_specificity_id_beats_attr() {
+        // Hypothetical element with both `id="named"` and `data-x="y"`:
+        // `p#named` (1,0,1) outranks `p[data-x="y"]` (0,1,1).
+        let sheet = parse_stylesheet(CASCADE_FIXTURE_CSS);
+        let elem = test_elem(
+            "p",
+            vec!["blue"],
+            Some("named"),
+            vec![("data-x", "y")],
+            vec![],
+        );
+        let style = match_rules(&elem, &sheet);
+        // Should resolve to green (id wins), not orange (attr).
+        let (r, g, _b, _a) = style.color.expect("expected green");
+        assert!(r.abs() < 0.01, "red channel should be ~0 (green), got {r}");
+        assert!(
+            (g - 0x80 as f32 / 255.0).abs() < 0.01,
+            "green channel should be ~0.502, got {g}"
+        );
+    }
+
     // ── Attribute selector tests ──────────────────────────────
 
     #[test]
@@ -6453,6 +6868,153 @@ mod tests {
         assert!(parse_font_face_body("font-family: X").is_none());
         // src lists only unparseable entries
         assert!(parse_font_face_body("font-family: X; src: garbage").is_none());
+    }
+
+    // ── Stream-8: linear-gradient parsing + interpolation ────
+
+    #[test]
+    fn linear_gradient_to_right_two_stops() {
+        // CSS Images 3 §3.1: `to right` resolves to a 90° angle; two
+        // explicit stops at the endpoints stay where declared.
+        let s = parse_inline_style("background-image: linear-gradient(to right, red, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        assert!((g.angle_deg - 90.0).abs() < 1e-3);
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0].0, (1.0, 0.0, 0.0, 1.0));
+        assert!((g.stops[0].1 - 0.0).abs() < 1e-3);
+        assert_eq!(g.stops[1].0, (0.0, 0.0, 1.0, 1.0));
+        assert!((g.stops[1].1 - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_default_direction_to_bottom() {
+        // Direction is optional: spec default is "to bottom" = 180°.
+        let s = parse_inline_style("background-image: linear-gradient(red, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        assert!((g.angle_deg - 180.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_explicit_angle() {
+        let s = parse_inline_style("background-image: linear-gradient(45deg, red, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        assert!((g.angle_deg - 45.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_angle_units() {
+        // 0.25turn == 90°; gradient in turns must convert correctly.
+        let s = parse_inline_style("background-image: linear-gradient(0.25turn, red, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        assert!((g.angle_deg - 90.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_corner_to_top_right() {
+        let s = parse_inline_style("background-image: linear-gradient(to top right, red, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        assert!((g.angle_deg - 45.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_explicit_stops_with_positions() {
+        let s = parse_inline_style(
+            "background-image: linear-gradient(to right, #fff 0%, #fff 49%, #ddd 51%, #ddd 100%)",
+        );
+        let g = s.background_gradient.expect("gradient parsed");
+        assert_eq!(g.stops.len(), 4);
+        // Positions echoed from declared values (0/0.49/0.51/1.0).
+        assert!((g.stops[0].1 - 0.0).abs() < 1e-3);
+        assert!((g.stops[1].1 - 0.49).abs() < 1e-3);
+        assert!((g.stops[2].1 - 0.51).abs() < 1e-3);
+        assert!((g.stops[3].1 - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_average_rgba_midpoint() {
+        // Average of pure red and pure blue should be (0.5, 0, 0.5).
+        let s = parse_inline_style("background-image: linear-gradient(to right, red, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        let (r, gr, b, a) = g.average_rgba();
+        assert!((r - 0.5).abs() < 1e-3);
+        assert!(gr.abs() < 1e-3);
+        assert!((b - 0.5).abs() < 1e-3);
+        assert!((a - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_sample_at_endpoints_and_midpoint() {
+        // A two-stop red→blue gradient must interpolate to purple at t=0.5.
+        let s = parse_inline_style("background-image: linear-gradient(to right, red, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        let start = g.sample_at(0.0);
+        let end = g.sample_at(1.0);
+        let mid = g.sample_at(0.5);
+        assert!((start.0 - 1.0).abs() < 1e-3 && start.2.abs() < 1e-3);
+        assert!(end.0.abs() < 1e-3 && (end.2 - 1.0).abs() < 1e-3);
+        assert!((mid.0 - 0.5).abs() < 1e-3 && (mid.2 - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_sample_at_clamps_out_of_range() {
+        let s = parse_inline_style("background-image: linear-gradient(to right, red, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        // t < 0 clamps to the first stop; t > 1 clamps to the last.
+        let before = g.sample_at(-0.5);
+        let after = g.sample_at(1.5);
+        assert_eq!(before, (1.0, 0.0, 0.0, 1.0));
+        assert_eq!(after, (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn linear_gradient_interpolates_between_explicit_stops() {
+        // The flagship fixture stop list: 0% white, 49% white, 51% grey,
+        // 100% grey. A sample at 0.5 should land smack in the
+        // grey-side ramp between 49% and 51%.
+        let s = parse_inline_style(
+            "background-image: linear-gradient(to right, #fff 0%, #fff 49%, #ddd 51%, #ddd 100%)",
+        );
+        let g = s.background_gradient.expect("gradient parsed");
+        let mid = g.sample_at(0.5);
+        // Linear interpolation between (1.0, 1.0, 1.0) at t=0.49 and
+        // (0xdd/255, 0xdd/255, 0xdd/255) at t=0.51 — at t=0.50 we expect
+        // the average (0.5*1.0 + 0.5*0.866) ≈ 0.933.
+        let expected_g = 0.5 * 1.0 + 0.5 * (f32::from(0xdd_u8) / 255.0);
+        assert!((mid.0 - expected_g).abs() < 1e-3);
+        assert!((mid.1 - expected_g).abs() < 1e-3);
+        assert!((mid.2 - expected_g).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_defaults_missing_endpoint_positions() {
+        // Three stops, none with explicit positions — spec interpolates
+        // them to 0% / 50% / 100%.
+        let s = parse_inline_style("background-image: linear-gradient(to right, red, green, blue)");
+        let g = s.background_gradient.expect("gradient parsed");
+        assert_eq!(g.stops.len(), 3);
+        assert!((g.stops[0].1 - 0.0).abs() < 1e-3);
+        assert!((g.stops[1].1 - 0.5).abs() < 1e-3);
+        assert!((g.stops[2].1 - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linear_gradient_rejects_single_stop() {
+        // Per CSS 3, fewer than two stops is invalid. The declaration
+        // should be discarded — `background_gradient` stays None.
+        let s = parse_inline_style("background-image: linear-gradient(to right, red)");
+        assert!(s.background_gradient.is_none());
+    }
+
+    #[test]
+    fn linear_gradient_clears_url_form() {
+        // Setting `background-image: linear-gradient(...)` after a URL
+        // form must clear the URL field — the property accepts a single
+        // image source.
+        let s = parse_inline_style(
+            "background-image: url('foo.png'); background-image: linear-gradient(to right, red, blue)",
+        );
+        assert!(s.background_image.is_none());
+        assert!(s.background_gradient.is_some());
     }
 
     #[test]

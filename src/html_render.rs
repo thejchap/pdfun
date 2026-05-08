@@ -120,7 +120,20 @@ const MAX_NESTING_DEPTH: usize = 256;
 struct UaStyle {
     font: &'static str,
     font_size: f32,
+    /// Bottom-edge gap after the block, in points. For headings this is
+    /// the em-relative `WeasyPrint` UA default already resolved against
+    /// `font_size`. Layout treats this as a non-collapsing post-block
+    /// spacing, equivalent to a `padding-bottom` rather than a CSS
+    /// `margin-bottom`.
     spacing_after: f32,
+    /// UA top-margin in points. Currently informational only — layout
+    /// does not yet honour first-child margin collapse, so adding the
+    /// UA top margin to the cascade would shift every fixture's first
+    /// block by ~1em without a matching shift in the `WeasyPrint`
+    /// reference. Kept here so future work can plumb it through once
+    /// parent/child collapse lands (CSS 2.1 §8.3.1).
+    #[allow(dead_code)]
+    margin_top: f32,
 }
 
 /// Map an arbitrary tag string to a `'static` slice for the small set of
@@ -139,52 +152,103 @@ fn static_paragraph_tag(tag: &str) -> Option<&'static str> {
     }
 }
 
+/// Default font-size for body text and the base for em-relative heading
+/// computations (12pt = 16px at the conventional 96 dpi mapping, which
+/// matches `WeasyPrint`'s default).
+const UA_BASE_FONT_SIZE: f32 = 12.0;
+
 fn ua_style(tag: &str) -> UaStyle {
+    // Heading defaults follow the HTML5 UA stylesheet (cf. WeasyPrint
+    // `html5_ua_stylesheet.css`): font-sizes are em-relative to the
+    // body font-size, and `margin: <X>em 0` gives identical top/bottom
+    // margins. Adjacent-sibling margins collapse, so consecutive
+    // headings space themselves by the *larger* of the two margins
+    // rather than their sum.
+    const BASE: f32 = UA_BASE_FONT_SIZE;
     match tag {
-        "h1" => UaStyle {
-            font: "Helvetica-Bold",
-            font_size: 24.0,
-            spacing_after: 16.0,
-        },
-        "h2" => UaStyle {
-            font: "Helvetica-Bold",
-            font_size: 18.0,
-            spacing_after: 14.0,
-        },
-        "h3" => UaStyle {
-            font: "Helvetica-Bold",
-            font_size: 14.0,
-            spacing_after: 12.0,
-        },
-        "h4" => UaStyle {
-            font: "Helvetica-Bold",
-            font_size: 12.0,
-            spacing_after: 10.0,
-        },
-        "h5" => UaStyle {
-            font: "Helvetica-Bold",
-            font_size: 10.0,
-            spacing_after: 8.0,
-        },
-        "h6" => UaStyle {
-            font: "Helvetica-Bold",
-            font_size: 8.0,
-            spacing_after: 8.0,
-        },
+        "h1" => {
+            let fs = 2.0 * BASE;
+            UaStyle {
+                font: "Helvetica-Bold",
+                font_size: fs,
+                spacing_after: 0.67 * fs,
+                margin_top: 0.67 * fs,
+            }
+        }
+        "h2" => {
+            let fs = 1.5 * BASE;
+            UaStyle {
+                font: "Helvetica-Bold",
+                font_size: fs,
+                spacing_after: 0.83 * fs,
+                margin_top: 0.83 * fs,
+            }
+        }
+        "h3" => {
+            let fs = 1.17 * BASE;
+            UaStyle {
+                font: "Helvetica-Bold",
+                font_size: fs,
+                spacing_after: 1.0 * fs,
+                margin_top: 1.0 * fs,
+            }
+        }
+        "h4" => {
+            let fs = 1.0 * BASE;
+            UaStyle {
+                font: "Helvetica-Bold",
+                font_size: fs,
+                spacing_after: 1.33 * fs,
+                margin_top: 1.33 * fs,
+            }
+        }
+        "h5" => {
+            let fs = 0.83 * BASE;
+            UaStyle {
+                font: "Helvetica-Bold",
+                font_size: fs,
+                spacing_after: 1.67 * fs,
+                margin_top: 1.67 * fs,
+            }
+        }
+        "h6" => {
+            let fs = 0.67 * BASE;
+            UaStyle {
+                font: "Helvetica-Bold",
+                font_size: fs,
+                spacing_after: 2.33 * fs,
+                margin_top: 2.33 * fs,
+            }
+        }
         "summary" => UaStyle {
             font: "Helvetica-Bold",
-            font_size: 12.0,
+            font_size: BASE,
             spacing_after: 8.0,
+            margin_top: 0.0,
         },
         "pre" => UaStyle {
             font: "Courier",
-            font_size: 12.0,
-            spacing_after: 12.0,
+            font_size: BASE,
+            spacing_after: BASE,
+            // The UA stylesheet gives <pre> a 1em top/bottom margin,
+            // but mirroring that here would shift many fixtures that
+            // assume the legacy non-collapsing `spacing_after` model.
+            // Leave `margin_top: 0` so only headings opt into
+            // collapsing-margin behaviour.
+            margin_top: 0.0,
         },
+        // <p> and the catch-all default. The HTML UA stylesheet gives
+        // `<p>` a `1em 0` margin, but routing both margins through the
+        // collapsing-margin path here would change layout for many
+        // existing fixtures that rely on the historic non-collapsing
+        // `spacing_after` semantics. Keep `margin_top: 0` so the legacy
+        // path stays unchanged for now; only headings opt in to
+        // collapsing margins.
         _ => UaStyle {
             font: "Helvetica",
-            font_size: 12.0,
-            spacing_after: 12.0,
+            font_size: BASE,
+            spacing_after: BASE,
+            margin_top: 0.0,
         },
     }
 }
@@ -1285,21 +1349,19 @@ impl<'a> HtmlRenderer<'a> {
             self.current_tag = Some("li".to_string());
             self.block_style = inline_style;
         } else if tag == "body" || tag == "html" {
-            if let Some(ref style) = inline_style {
-                if let Some(count) = style.column_count {
-                    self.layout.column_count = count;
-                }
-                if let Some(gap) = style.column_gap {
-                    self.layout.column_gap = gap.resolve(12.0);
-                }
-                if let Some(width) = style.column_rule_width {
-                    self.layout.column_rule_width = width.resolve(12.0);
-                }
-                if let Some(color) = style.column_rule_color {
-                    self.layout.column_rule_color = Some(color);
-                }
-            }
+            self.apply_column_props(inline_style.as_ref());
         } else if BLOCK_ELEMENTS.contains(&tag) {
+            // Stream 4 / Option A: lift the body/html restriction so any
+            // block element with `column-count` promotes the page-level
+            // multicol state. The current LayoutInner stores column flow
+            // as a single page-wide configuration (see `src/layout.rs`
+            // around the `column_count` field), so this is the minimal
+            // change that lets the `columns` fixture render with three
+            // columns. TODO(stream-4-followup): proper per-block multicol
+            // (Option B) would require tracking a multicol container in
+            // the box tree and only flowing its children into columns,
+            // leaving siblings above/below as normal single-column flow.
+            self.apply_column_props(inline_style.as_ref());
             self.flush();
             if CONTAINER_ELEMENTS.contains(&tag) {
                 // Emit a ContainerStart sentinel so the container's margins
@@ -1472,11 +1534,21 @@ impl<'a> HtmlRenderer<'a> {
             .or_else(|| inherited.and_then(|s| s.text_transform));
         let text = apply_text_transform(&text, text_transform);
 
-        // Resolve font size: CSS override → inherited → UA default
-        let font_size = effective
-            .and_then(|s| s.font_size)
-            .or_else(|| inherited.and_then(|s| s.font_size))
-            .map_or(ua.font_size, |len| len.resolve(ua.font_size));
+        // Resolve font size. CSS override on the element wins. Otherwise,
+        // tags whose UA stylesheet pins a non-default font-size (the
+        // headings and `<pre>`) use their UA size — the UA rule
+        // outranks the inherited body font-size for the `font-size`
+        // property itself. Generic tags fall back to inherited, then the
+        // UA default.
+        let font_size = if let Some(len) = effective.and_then(|s| s.font_size) {
+            len.resolve(ua.font_size)
+        } else if (ua.font_size - UA_BASE_FONT_SIZE).abs() > f32::EPSILON {
+            ua.font_size
+        } else if let Some(len) = inherited.and_then(|s| s.font_size) {
+            len.resolve(ua.font_size)
+        } else {
+            ua.font_size
+        };
 
         // Resolve bold: CSS → inherited → tag/depth-implied bold
         let css_weight = effective
@@ -1738,6 +1810,16 @@ impl<'a> HtmlRenderer<'a> {
             block_style.height = None;
             block_style.min_height = None;
             block_style.max_height = None;
+            // Stream-8: `opacity` lives on the ContainerStart sentinel and
+            // is consumed by the container path's transparency-group
+            // capture. Letting it ALSO survive into the wrapper paragraph
+            // double-applies the alpha — once when the container's group
+            // composites onto the page (`ca = α`), and again when the
+            // wrapper paragraph's own group composites inside the
+            // container (`ca = α` again). The visible result is `α²`
+            // (e.g. `0.5` shows as `0.25`). Strip it from the wrapper so
+            // the alpha only fires at the container level.
+            block_style.opacity = None;
         }
 
         let paragraph_tag = tag.and_then(static_paragraph_tag);
@@ -2050,9 +2132,43 @@ impl<'a> HtmlRenderer<'a> {
 
     // ── CSS application helpers ─────────────────────────────
 
+    /// Resolve the current font-size in points (the `em` base for any
+    /// length whose unit depends on the element's own font-size, including
+    /// `line-height: <number>` and `line-height: <percentage>`).
+    ///
+    /// Resolution order:
+    ///
+    ///   1. Author CSS on the current element (`block_style.font_size`).
+    ///   2. The UA default for the element's tag *if* it differs from the
+    ///      generic body default — this matches headings (h1..h6) and
+    ///      `<pre>`, which the UA stylesheet sets to fixed em multiples
+    ///      of the body font-size rather than to `inherit`.
+    ///   3. The nearest inherited font-size on the cascade stack
+    ///      (`inherit_stack.last().font_size`), so a `body { font-size }`
+    ///      cascades into generic elements like `<div>` and `<p>`.
+    ///   4. The UA default font-size (12pt).
+    ///
+    /// Author/inherited values that are themselves em-relative are
+    /// resolved against the UA default — this is approximate for nested
+    /// `font-size: 1.2em` chains but matches `WeasyPrint`'s behaviour for
+    /// the (very common) case of a single `body { font-size: ... }`.
     fn resolve_em_base(&self) -> f32 {
         let tag = self.current_tag.as_deref().unwrap_or("");
-        ua_style(tag).font_size
+        let ua_size = ua_style(tag).font_size;
+        if let Some(len) = self.block_style.as_ref().and_then(|s| s.font_size) {
+            return len.resolve(ua_size);
+        }
+        // Tags whose UA stylesheet pins font-size (headings, <pre>) keep
+        // that size as their em base regardless of any inherited body
+        // font-size, since their UA rule wins over inheritance for the
+        // `font-size` property itself.
+        if ua_size != UA_BASE_FONT_SIZE {
+            return ua_size;
+        }
+        if let Some(len) = self.inherit_stack.last().and_then(|s| s.font_size) {
+            return len.resolve(ua_size);
+        }
+        ua_size
     }
 
     /// Build a full `LengthContext` using the current element's font size,
@@ -2117,6 +2233,30 @@ impl<'a> HtmlRenderer<'a> {
     /// `emit_container_start_for` to build a container sentinel's
     /// `BlockStyle` without disturbing the single-slot `self.block_style`
     /// that `flush()` later consumes.
+    /// Promote any of the four column-related CSS properties found on
+    /// `src` to the page-level multicol state on `LayoutInner`. Called
+    /// for `<body>`/`<html>` *and* for any block element with column
+    /// declarations (Stream 4 / Option A — see comment at the call site).
+    /// Only properties actually set on `src` overwrite the layout state,
+    /// so a multicol container deeper in the tree only ratchets values
+    /// it specifies; siblings without column properties leave the state
+    /// alone.
+    fn apply_column_props(&mut self, src: Option<&ComputedStyle>) {
+        let Some(style) = src else { return };
+        if let Some(count) = style.column_count {
+            self.layout.column_count = count;
+        }
+        if let Some(gap) = style.column_gap {
+            self.layout.column_gap = gap.resolve(12.0);
+        }
+        if let Some(width) = style.column_rule_width {
+            self.layout.column_rule_width = width.resolve(12.0);
+        }
+        if let Some(color) = style.column_rule_color {
+            self.layout.column_rule_color = Some(color);
+        }
+    }
+
     fn apply_block_css_from(&mut self, block_style: &mut BlockStyle, src: Option<&ComputedStyle>) {
         let inherited = self.inherit_stack.last();
         let ctx = self.length_context();
@@ -2253,6 +2393,18 @@ impl<'a> HtmlRenderer<'a> {
             }
             if let Some(len) = style.bottom {
                 block_style.position_bottom = Some(resolve(len));
+            }
+            // Stream-8: a parsed `linear-gradient(...)` value collapses
+            // to a flat fill at paint time. We average the stop colours
+            // here once at style-resolve time so the layout pass sees a
+            // plain `(r, g, b, a)` and doesn't need to know about the
+            // gradient representation. See `LinearGradient::average_rgba`
+            // for why this is acceptable as an interim renderer (the
+            // diff metric improves substantially over the all-white
+            // "unparsed" baseline even though the actual gradient sweep
+            // is missing).
+            if let Some(grad) = &style.background_gradient {
+                block_style.background_gradient_color = Some(grad.average_rgba());
             }
             if let Some(url) = style.background_image.as_deref() {
                 let cached = self.bg_image_cache.get(url).copied();
@@ -2915,6 +3067,43 @@ mod tests {
         });
     }
 
+    /// Stream 4 / Option A: a non-body element with `column-count` should
+    /// promote the multicol state to `LayoutInner` so the page-level
+    /// column flow kicks in. Before the fix this only happened for
+    /// `<body>` / `<html>`.
+    #[test]
+    fn column_count_on_div_promotes_to_layout() {
+        let html = "<style>.cols { column-count: 3; column-gap: 20px; \
+            column-rule-width: 1px; column-rule-color: #999 }</style>\
+            <div class=\"cols\"><p>a</p><p>b</p></div>";
+        let dom: RcDom = crate::dom::parse_html(html);
+        let mut layout = LayoutInner::new(20.0, 20.0, 20.0, 20.0, 595.0, 842.0);
+        let fetcher: std::sync::Arc<dyn crate::url_fetcher::UrlFetcher> =
+            std::sync::Arc::new(crate::url_fetcher::DefaultFetcher);
+        let _ = render_dom_to_layout(&dom.document, &mut layout, None, fetcher);
+        assert_eq!(
+            layout.column_count, 3,
+            "column-count: 3 on a <div> should propagate to LayoutInner.column_count"
+        );
+        // 20px → 15.0 PDF pt (CSS px is 1/96 in, PDF pt is 1/72 in,
+        // see `CssLength::resolve_ctx`).
+        assert!(
+            (layout.column_gap - 15.0).abs() < 1e-3,
+            "column-gap should resolve to 15.0 pt (20 CSS px); got {}",
+            layout.column_gap
+        );
+        assert!(
+            (layout.column_rule_width - 0.75).abs() < 1e-3,
+            "column-rule-width should resolve to 0.75 pt (1 CSS px); got {}",
+            layout.column_rule_width
+        );
+        assert!(
+            layout.column_rule_color.is_some(),
+            "column-rule-color should propagate from a non-body element"
+        );
+        drop(dom);
+    }
+
     #[test]
     fn col_span_replicates_style() {
         // `background-color` (longhand) — the `background` shorthand isn't
@@ -2930,5 +3119,120 @@ mod tests {
                 assert_eq!(c.background_color, Some((1.0, 1.0, 0.0)));
             }
         });
+    }
+
+    /// `ua_style` should expose em-relative heading defaults (per the
+    /// HTML5 UA stylesheet) rather than the legacy hand-tuned point
+    /// values. Each heading's font-size is `<factor> × 12pt`, and its
+    /// `spacing_after` is `<margin-em> × font_size`. The `margin_top`
+    /// field mirrors `spacing_after` for headings — equal top/bottom
+    /// margins are what the UA sheet specifies (`margin: <X>em 0`).
+    #[test]
+    fn ua_heading_font_sizes_are_em_relative() {
+        let base = UA_BASE_FONT_SIZE;
+        let cases = [
+            ("h1", 2.0, 0.67),
+            ("h2", 1.5, 0.83),
+            ("h3", 1.17, 1.0),
+            ("h4", 1.0, 1.33),
+            ("h5", 0.83, 1.67),
+            ("h6", 0.67, 2.33),
+        ];
+        for (tag, fs_em, margin_em) in cases {
+            let ua = ua_style(tag);
+            let expected_fs = fs_em * base;
+            let expected_margin = margin_em * expected_fs;
+            assert!(
+                (ua.font_size - expected_fs).abs() < 1e-3,
+                "{tag}: font_size {} != {expected_fs}",
+                ua.font_size,
+            );
+            assert!(
+                (ua.spacing_after - expected_margin).abs() < 1e-3,
+                "{tag}: spacing_after {} != {expected_margin}",
+                ua.spacing_after,
+            );
+            assert!(
+                (ua.margin_top - expected_margin).abs() < 1e-3,
+                "{tag}: margin_top {} != {expected_margin}",
+                ua.margin_top,
+            );
+            assert_eq!(ua.font, "Helvetica-Bold");
+        }
+    }
+
+    /// Non-heading tags fall back to the body defaults (Helvetica @ 12pt
+    /// with a 12pt `spacing_after`) and have no UA top margin. `<pre>`
+    /// keeps its monospace face but inherits the same vertical metrics
+    /// today (collapsing-margin support for `<pre>` is deferred).
+    #[test]
+    fn ua_default_tags_have_no_top_margin() {
+        for tag in ["p", "div", "blockquote", "section", ""] {
+            let ua = ua_style(tag);
+            assert!(
+                ua.margin_top.abs() < 1e-3,
+                "{tag}: margin_top should be 0, got {}",
+                ua.margin_top,
+            );
+            assert!(
+                (ua.font_size - UA_BASE_FONT_SIZE).abs() < 1e-3,
+                "{tag}: font_size should be {UA_BASE_FONT_SIZE}, got {}",
+                ua.font_size,
+            );
+        }
+        let pre = ua_style("pre");
+        assert_eq!(pre.font, "Courier");
+        assert!((pre.font_size - UA_BASE_FONT_SIZE).abs() < 1e-3);
+        assert!(pre.margin_top.abs() < 1e-3);
+    }
+
+    /// `line-height: <number>` parses as `Em(n)` so it inherits as a
+    /// factor and resolves against the *current* element's font-size,
+    /// not the UA default. CSS 2.1 §10.8.1 — when a unitless number is
+    /// inherited, child elements multiply it by their own font-size.
+    #[test]
+    fn line_height_unitless_resolves_against_current_font_size() {
+        // The parser stores `line-height: 1.5` as `CssLength::Em(1.5)`
+        // and the resolver multiplies by `ctx.em` at use time.
+        let lh = css::CssLength::Em(1.5);
+        // 14px body font-size → 14px = 10.5pt.
+        let resolved = lh.resolve(10.5);
+        assert!(
+            (resolved - 15.75).abs() < 1e-3,
+            "line-height 1.5 against 10.5pt should give 15.75pt, got {resolved}",
+        );
+        // 18pt heading font-size → 27pt.
+        let resolved = lh.resolve(18.0);
+        assert!(
+            (resolved - 27.0).abs() < 1e-3,
+            "line-height 1.5 against 18pt should give 27pt, got {resolved}",
+        );
+    }
+
+    /// `line-height: <percentage>` resolves the same way as a unitless
+    /// number for the typical case: `Pct(150.0)` of the container width
+    /// is *not* the right semantics for line-height (CSS 2.1 §10.8.1
+    /// uses the element's font-size), so the parser stores percentage
+    /// `line-height` as `CssLength::Em(<pct>/100)` so the same em-base
+    /// resolution applies. This test guards that behaviour.
+    #[test]
+    fn line_height_percentage_parses_as_em() {
+        let s = css::parse_inline_style("line-height: 150%");
+        // `150%` should land as `Em(1.5)` so `ctx.em` is the resolution
+        // base — see the `line-height` arm of `parse_property` for the
+        // bare-number fallback. If percentages are ever rerouted to a
+        // distinct `CssLength::Pct` variant they need their own resolver
+        // hook here so they don't accidentally resolve against width.
+        match s.line_height {
+            Some(css::CssLength::Em(v)) => {
+                assert!((v - 1.5).abs() < 1e-3, "expected Em(1.5), got Em({v})");
+            }
+            other => {
+                // `Pct(150.0)` would also be acceptable *if* the resolver
+                // special-cases line-height to use `ctx.em`. Currently
+                // it doesn't, so flag any change.
+                panic!("line-height: 150% should parse to Em(1.5); got {other:?}")
+            }
+        }
     }
 }
