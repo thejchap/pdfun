@@ -6,8 +6,8 @@
 # fraction of the page's content disagrees".
 #
 # Whitespace doesn't dilute the denominator, so values land in the
-# 10-80 % range. Each ceiling is the observed diff + ~2 % headroom
-# (rounded up to 0.02). When you fix a regression, ratchet the
+# 10-70 % range. Each ceiling is the observed diff + ~1 % headroom
+# (rounded up to 0.01). When you fix a regression, ratchet the
 # corresponding ceiling down in the same commit so the metric keeps
 # guarding against future drift.
 #
@@ -19,51 +19,51 @@ pixel_diff_pct = 0.05
 
 [fixtures]
 # legacy/
-border_radius = 0.44
-columns = 0.56
-float_left = 0.16
-float_right = 0.16
-heading_sizes = 0.46
-inline_styles = 0.32
-list_styles = 0.52
-margin_collapse_parent_child = 0.42
-margin_collapse_siblings = 0.34
-nested_containers = 0.24
-opacity = 0.46
-padding_border = 0.62
-page_break = 0.54
+border_radius = 0.43
+columns = 0.54
+float_left = 0.15
+float_right = 0.15
+heading_sizes = 0.44
+inline_styles = 0.31
+list_styles = 0.50
+margin_collapse_parent_child = 0.40
+margin_collapse_siblings = 0.32
+nested_containers = 0.23
+opacity = 0.45
+padding_border = 0.61
+page_break = 0.53
 rgba_overlap = 1.00
-table_layout = 0.24
-text_align = 0.48
+table_layout = 0.22
+text_align = 0.47
 
 # progressive/
-"progressive/00_text" = 0.52
-"progressive/01_inline_styles" = 0.32
-"progressive/02_block_model" = 0.50
-"progressive/03_margins_padding" = 0.48
-"progressive/04_borders_radius" = 0.60
-"progressive/05_floats_clear" = 0.54
-"progressive/06_lists" = 0.58
-"progressive/07_tables" = 0.14
-"progressive/08_multi_page" = 0.66
-"progressive/09_backgrounds" = 0.66
-"progressive/10_positioning" = 0.44
-"progressive/11_at_page" = 0.40
-"progressive/12_combined" = 0.28
+"progressive/00_text" = 0.51
+"progressive/01_inline_styles" = 0.31
+"progressive/02_block_model" = 0.49
+"progressive/03_margins_padding" = 0.46
+"progressive/04_borders_radius" = 0.59
+"progressive/05_floats_clear" = 0.53
+"progressive/06_lists" = 0.56
+"progressive/07_tables" = 0.13
+"progressive/08_multi_page" = 0.65
+"progressive/09_backgrounds" = 0.64
+"progressive/10_positioning" = 0.42
+"progressive/11_at_page" = 0.38
+"progressive/12_combined" = 0.26
 
 # wpt/
-"wpt/box_collapse_empty" = 0.34
-"wpt/box_sizing_border_box" = 0.36
-"wpt/cascade_inheritance" = 0.32
-"wpt/cascade_specificity" = 0.56
-"wpt/orphans_widows" = 0.50
-"wpt/sel_first_child" = 0.56
-"wpt/sel_nth_child" = 0.26
-"wpt/sel_pseudo_before" = 0.44
-"wpt/text_indent" = 0.22
-"wpt/vfmd_line_height" = 0.56
+"wpt/box_collapse_empty" = 0.33
+"wpt/box_sizing_border_box" = 0.35
+"wpt/cascade_inheritance" = 0.31
+"wpt/cascade_specificity" = 0.55
+"wpt/orphans_widows" = 0.48
+"wpt/sel_first_child" = 0.54
+"wpt/sel_nth_child" = 0.24
+"wpt/sel_pseudo_before" = 0.43
+"wpt/text_indent" = 0.21
+"wpt/vfmd_line_height" = 0.54
 
 # realworld/
-"realworld/arxiv_paper" = 0.54
-"realworld/github_readme" = 0.44
-"realworld/mdn_article" = 0.44
+"realworld/arxiv_paper" = 0.53
+"realworld/github_readme" = 0.43
+"realworld/mdn_article" = 0.42
