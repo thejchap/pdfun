@@ -15,6 +15,7 @@ from __future__ import annotations
 import html as html_lib
 import json
 import shutil
+import sys
 from pathlib import Path
 
 from tests._visual_diff import (
@@ -33,24 +34,38 @@ STATUS_ORDER = {"FAIL": 0, "MISSING-REF": 1, "PASS": 2}
 
 def append_result(record: dict[str, object]) -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    with RESULTS_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+    # Binary append + explicit b"\n" avoids Windows newline translation
+    # (which can interleave \r\n in surprising ways on 3.12) and any
+    # text-mode encoding quirks that have historically corrupted the
+    # leading byte of a JSONL line in CI.
+    payload = json.dumps(record).encode("utf-8") + b"\n"
+    with RESULTS_PATH.open("ab") as fh:
+        fh.write(payload)
 
 
 def reset_results() -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    RESULTS_PATH.write_text("", encoding="utf-8")
+    RESULTS_PATH.write_bytes(b"")
 
 
 def write_report() -> None:
     if not RESULTS_PATH.exists():
         return
     rows: list[dict[str, object]] = []
-    for raw in RESULTS_PATH.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
+    for raw in RESULTS_PATH.read_bytes().splitlines():
+        # Strip whitespace AND a possible UTF-8 BOM, then skip blanks.
+        line = raw.strip().lstrip(b"\xef\xbb\xbf").strip()
         if not line:
             continue
-        rows.append(json.loads(line))
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            # The report is a best-effort artifact; one malformed line
+            # must not fail the test. Log the offending bytes so the
+            # next CI run shows what slipped through.
+            sys.stderr.write(
+                f"[visual-report] skipping malformed JSONL line: {exc} :: {line!r}\n"
+            )
     if not rows:
         return
 
