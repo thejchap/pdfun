@@ -15,6 +15,7 @@ from __future__ import annotations
 import html as html_lib
 import json
 import shutil
+import sys
 from pathlib import Path
 
 from tests._visual_diff import (
@@ -33,24 +34,38 @@ STATUS_ORDER = {"FAIL": 0, "MISSING-REF": 1, "PASS": 2}
 
 def append_result(record: dict[str, object]) -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    with RESULTS_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+    # Binary append + explicit b"\n" avoids Windows newline translation
+    # (which can interleave \r\n in surprising ways on 3.12) and any
+    # text-mode encoding quirks that have historically corrupted the
+    # leading byte of a JSONL line in CI.
+    payload = json.dumps(record).encode("utf-8") + b"\n"
+    with RESULTS_PATH.open("ab") as fh:
+        fh.write(payload)
 
 
 def reset_results() -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    RESULTS_PATH.write_text("", encoding="utf-8")
+    RESULTS_PATH.write_bytes(b"")
 
 
 def write_report() -> None:
     if not RESULTS_PATH.exists():
         return
     rows: list[dict[str, object]] = []
-    for raw in RESULTS_PATH.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
+    for raw in RESULTS_PATH.read_bytes().splitlines():
+        # Strip whitespace AND a possible UTF-8 BOM, then skip blanks.
+        line = raw.strip().lstrip(b"\xef\xbb\xbf").strip()
         if not line:
             continue
-        rows.append(json.loads(line))
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            # The report is a best-effort artifact; one malformed line
+            # must not fail the test. Log the offending bytes so the
+            # next CI run shows what slipped through.
+            sys.stderr.write(
+                f"[visual-report] skipping malformed JSONL line: {exc} :: {line!r}\n"
+            )
     if not rows:
         return
 
@@ -127,6 +142,22 @@ def _vendor_ref(row: dict[str, object]) -> None:
         rel = Path(src.name)
     dest = VENDORED_REF_DIR / rel
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # `write_report` runs once per category test (plus an atexit flush),
+    # so this gets called several times for the same (src, dest) pair.
+    # The committed reference PNGs don't change during a run, so skip
+    # re-copying when the dest already mirrors the source. That's both
+    # cheaper and sidesteps a Windows file-lock flake: a transient
+    # handle from a previous `copy2` can race with the next overwrite
+    # and surface as `PermissionError: [WinError 32]`.
+    src_stat = src_resolved.stat()
+    if dest.exists():
+        dest_stat = dest.stat()
+        if (
+            dest_stat.st_size == src_stat.st_size
+            and dest_stat.st_mtime >= src_stat.st_mtime
+        ):
+            row["ref_path"] = str(dest)
+            return
     shutil.copy2(src, dest)
     row["ref_path"] = str(dest)
 

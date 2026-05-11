@@ -47,13 +47,13 @@ text_align = 0.48
 "progressive/07_tables" = 0.14
 "progressive/08_multi_page" = 0.66
 "progressive/09_backgrounds" = 0.66
-"progressive/10_positioning" = 0.48
+"progressive/10_positioning" = 0.44
 "progressive/11_at_page" = 0.40
 "progressive/12_combined" = 0.28
 
 # wpt/
 "wpt/box_collapse_empty" = 0.34
-"wpt/box_sizing_border_box" = 0.42
+"wpt/box_sizing_border_box" = 0.36
 "wpt/cascade_inheritance" = 0.32
 "wpt/cascade_specificity" = 0.56
 "wpt/orphans_widows" = 0.50
