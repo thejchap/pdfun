@@ -11,8 +11,8 @@
 # corresponding ceiling down in the same commit so the metric keeps
 # guarding against future drift.
 #
-# To recompute: run `uv run tryke test` then the snippet at the bottom
-# of AGENTS.md "what to do next".
+# To recompute: run `uv run tryke test` then the snippet in AGENTS.md
+# "ratcheting tolerances down".
 
 [defaults]
 pixel_diff_pct = 0.05
