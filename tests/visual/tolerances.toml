@@ -28,9 +28,9 @@ inline_styles = 0.31
 list_styles = 0.50
 margin_collapse_parent_child = 0.43
 margin_collapse_siblings = 0.28
-nested_containers = 0.21
+nested_containers = 0.26
 opacity = 0.09
-padding_border = 0.31
+padding_border = 0.28
 page_break = 0.53
 rgba_overlap = 1.00
 table_layout = 0.22
@@ -49,12 +49,12 @@ text_align = 0.15
 "progressive/09_backgrounds" = 0.14
 "progressive/10_positioning" = 0.42
 "progressive/11_at_page" = 0.38
-"progressive/12_combined" = 0.26
+"progressive/12_combined" = 0.32
 
 # wpt/
 "wpt/box_collapse_empty" = 0.06
 "wpt/box_sizing_border_box" = 0.41
-"wpt/cascade_inheritance" = 0.31
+"wpt/cascade_inheritance" = 0.06
 "wpt/cascade_specificity" = 0.55
 "wpt/orphans_widows" = 0.48
 "wpt/sel_first_child" = 0.54
