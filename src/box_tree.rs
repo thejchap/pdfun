@@ -41,6 +41,14 @@ pub struct BlockBox {
     pub page_break_before: Option<css::PageBreak>,
     pub page_break_after: Option<css::PageBreak>,
     pub is_hr: bool,
+    /// Set by `mark_self_paint_containers` for decorated containers that
+    /// hold mixed inline + block children. The layout render path paints
+    /// this box's bg/border/padding around the union of its rendered
+    /// children, instead of leaning on a single wrapper paragraph leaf to
+    /// paint the container's decoration (which would otherwise wrap only
+    /// the inline text and leave the nested block children visually
+    /// outside the container's border).
+    pub self_paint: bool,
 }
 
 /// A purely-inline flow of text runs, used for mixed-content containers.
@@ -86,6 +94,7 @@ impl Node {
             page_break_before: None,
             page_break_after: None,
             is_hr: para.is_hr,
+            self_paint: false,
         })
     }
 }
@@ -125,6 +134,7 @@ pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
                         page_break_before: None,
                         page_break_after: None,
                         is_hr: true,
+                        self_paint: false,
                     })
                 } else {
                     Node::paragraph_leaf(p)
@@ -168,6 +178,7 @@ pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
                     page_break_before,
                     page_break_after,
                     is_hr: false,
+                    self_paint: false,
                 };
                 frames.last_mut().unwrap().1.push(Node::Block(bb));
             }
@@ -190,11 +201,101 @@ pub fn unflatten_blocks(blocks: Vec<Block>) -> Vec<Node> {
             page_break_before: None,
             page_break_after: None,
             is_hr: false,
+            self_paint: false,
         };
         frames.last_mut().unwrap().1.push(Node::Block(bb));
     }
 
-    frames.pop().unwrap().1
+    let mut roots = frames.pop().unwrap().1;
+    mark_self_paint_containers(&mut roots);
+    roots
+}
+
+/// Returns true if `style` carries any decoration that should be painted
+/// around the container's outer box — background, border, or rounded
+/// corners that would clip the box edge.
+fn style_has_decoration(style: &BlockStyle) -> bool {
+    style.background_color.is_some()
+        || style.background_image.is_some()
+        || style.background_gradient_color.is_some()
+        || (style.border_width > 0.0 && !matches!(style.border_style, Some(css::BorderStyle::None)))
+}
+
+/// Walk the tree and flag decorated containers that hold mixed inline +
+/// block children. For each such container, set `self_paint = true` and
+/// strip the bg/border/padding from any wrapper-paragraph child whose
+/// style was copied from the container's own — those wrappers exist only
+/// so flushed inline text picks up the container's font/color, and they'd
+/// otherwise re-paint the container's decoration around the narrow text
+/// rectangle instead of the full container box.
+fn mark_self_paint_containers(nodes: &mut [Node]) {
+    for n in nodes.iter_mut() {
+        if let Node::Block(bb) = n {
+            let real_container = paragraph_shape(bb).is_none();
+            // Skip the "single inline wrapper" idiom: a decorated block
+            // with one paragraph-shape child whose style is a copy of
+            // its own. That wrapper already paints the parent's
+            // bg/border via `render_paragraph_node` — promoting the
+            // outer to self-paint would double-paint (or, after we
+            // strip the wrapper, shift sizing) for no benefit.
+            let one_matching_wrapper = bb.children.len() == 1
+                && matches!(&bb.children[0], Node::Block(child) if paragraph_shape(child).is_some()
+                    && wrapper_matches_parent(&child.style, &bb.style));
+            if real_container
+                && !one_matching_wrapper
+                && style_has_decoration(&bb.style)
+                && !bb.children.is_empty()
+            {
+                bb.self_paint = true;
+                let container_decoration = bb.style.clone();
+                for child in &mut bb.children {
+                    if let Node::Block(child_bb) = child
+                        && paragraph_shape(child_bb).is_some()
+                        && wrapper_matches_parent(&child_bb.style, &container_decoration)
+                    {
+                        strip_decoration(&mut child_bb.style);
+                    }
+                }
+            }
+            mark_self_paint_containers(&mut bb.children);
+        }
+    }
+}
+
+/// Did this wrapper paragraph inherit its decoration from the parent
+/// container? `html_render` copies the container's CSS onto both the
+/// `ContainerStart` sentinel and any flushed-text wrapper paragraph, so
+/// the decoration bytes are identical when the wrapper came from that
+/// copy. We compare the decoration fields the parent self-paint will
+/// take responsibility for; siblings with their own author CSS (e.g. a
+/// nested `<div>` that happens to share a background colour) are left
+/// alone — they keep painting themselves.
+fn wrapper_matches_parent(wrapper: &BlockStyle, parent: &BlockStyle) -> bool {
+    wrapper.background_color == parent.background_color
+        && wrapper.background_image.is_some() == parent.background_image.is_some()
+        && wrapper.background_gradient_color == parent.background_gradient_color
+        && (wrapper.border_width - parent.border_width).abs() < 1e-3
+        && wrapper.border_style == parent.border_style
+        && wrapper.border_color == parent.border_color
+        && wrapper.border_radius == parent.border_radius
+        && (wrapper.padding_top - parent.padding_top).abs() < 1e-3
+        && (wrapper.padding_right - parent.padding_right).abs() < 1e-3
+        && (wrapper.padding_bottom - parent.padding_bottom).abs() < 1e-3
+        && (wrapper.padding_left - parent.padding_left).abs() < 1e-3
+}
+
+fn strip_decoration(style: &mut BlockStyle) {
+    style.background_color = None;
+    style.background_image = None;
+    style.background_gradient_color = None;
+    style.border_width = 0.0;
+    style.border_style = None;
+    style.border_color = None;
+    style.border_radius = None;
+    style.padding_top = 0.0;
+    style.padding_right = 0.0;
+    style.padding_bottom = 0.0;
+    style.padding_left = 0.0;
 }
 
 pub fn paragraph_shape(bb: &BlockBox) -> Option<&AnonymousBox> {

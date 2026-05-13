@@ -605,6 +605,11 @@ struct RenderState {
     /// container's first painted child (post-margin-fold) — different
     /// from `start_y` when a negative `margin-top` lifts the box.
     container_size_stack: Vec<ContainerSnap>,
+    /// Horizontal indent (in points) added to `col_x` for everything
+    /// rendered below a `self_paint` container. Stacks via save/restore
+    /// in the self-paint render path so nested decorated containers
+    /// indent their children cumulatively.
+    padding_offset_x: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -756,6 +761,74 @@ pub(crate) fn container_box_geometry(cx: f32, col_width: f32, style: &BlockStyle
     let box_width = text_area_width + h_padding;
     let box_x = cx + style.margin_left;
     (box_x, box_width)
+}
+
+/// Emit the standard bg + simple-border ops for a self-painting
+/// container's outer box. Mirrors the painting prologue
+/// `render_paragraph_node` runs for a leaf paragraph, minus the heavy
+/// cases (gradient layer, double border, outset/inset shadows, bg-image
+/// tiles); those still go through the paragraph path when an inline
+/// wrapper handles them. The rect is described in PDF coordinates
+/// (`y` is the box's bottom edge).
+fn emit_self_paint_box_decoration(
+    ops: &mut Vec<PdfOp>,
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let emit_rect_path = |ops: &mut Vec<PdfOp>| match style.border_radius {
+        Some(radii) => ops.push(PdfOp::RoundedRectangle {
+            x,
+            y,
+            width,
+            height,
+            radii,
+        }),
+        None => ops.push(PdfOp::Rectangle {
+            x,
+            y,
+            width,
+            height,
+        }),
+    };
+    if let Some(bg) = style.background_color {
+        let ((r, g, b), a) = split_rgba(bg);
+        push_alpha_if_translucent(ops, a);
+        ops.push(PdfOp::SetFillColor { r, g, b });
+        emit_rect_path(ops);
+        ops.push(PdfOp::Fill);
+    }
+    if style.border_width > 0.0 && !matches!(style.border_style, Some(css::BorderStyle::None)) {
+        let ((r, g, b), a) = split_rgba(style.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
+        push_alpha_if_translucent(ops, a);
+        ops.push(PdfOp::SetStrokeColor { r, g, b });
+        ops.push(PdfOp::SetLineWidth(style.border_width));
+        match style.border_style {
+            Some(css::BorderStyle::Dashed) => {
+                let dash = style.border_width * 3.0;
+                let gap = style.border_width * 2.0;
+                ops.push(PdfOp::SetDashPattern {
+                    array: vec![dash, gap],
+                    phase: 0.0,
+                });
+            }
+            Some(css::BorderStyle::Dotted) => {
+                let dot = style.border_width;
+                ops.push(PdfOp::SetDashPattern {
+                    array: vec![dot, dot * 2.0],
+                    phase: 0.0,
+                });
+            }
+            _ => {}
+        }
+        emit_rect_path(ops);
+        ops.push(PdfOp::Stroke);
+    }
 }
 
 /// Inputs to `absolute_anchor` describing where on the page an
@@ -1911,6 +1984,7 @@ impl LayoutInner {
             active_floats: Vec::new(),
             transparency_captures: Vec::new(),
             container_size_stack: Vec::new(),
+            padding_offset_x: 0.0,
         };
 
         let tree = crate::box_tree::unflatten_blocks(blocks);
@@ -1954,7 +2028,7 @@ impl LayoutInner {
     }
 
     fn col_x(&self, col: u32, state: &RenderState) -> f32 {
-        self.margin_left + col as f32 * (state.col_width + state.col_gap)
+        self.margin_left + col as f32 * (state.col_width + state.col_gap) + state.padding_offset_x
     }
 
     /// Record the `cursor_y` at which the first painted child lands inside
@@ -2095,6 +2169,13 @@ impl LayoutInner {
                         any_content = true;
                         continue;
                     }
+                    if bb.self_paint {
+                        let child_rendered = self.render_self_paint_node(doc, bb, state)?;
+                        if child_rendered {
+                            any_content = true;
+                        }
+                        continue;
+                    }
                     // Real container — recurse into children.
                     self.enter_container_node(doc, bb, state);
                     let child_rendered = self.render_nodes(doc, &bb.children, state)?;
@@ -2121,6 +2202,144 @@ impl LayoutInner {
             }
         }
         Ok(any_content)
+    }
+
+    /// Render a decorated container that paints its own bg/border around
+    /// the union of its children. Used by `render_nodes` when the box
+    /// tree post-pass flagged the `BlockBox` as `self_paint` — i.e. the
+    /// container holds mixed inline + block children and a single
+    /// wrapper paragraph can't paint the decoration around everything.
+    ///
+    /// Mechanics:
+    /// 1. Run `enter_container_node` so margin-top folds the same way as
+    ///    the non-decorated path.
+    /// 2. Consume the pending parent/child margin fold: padding-top or a
+    ///    non-zero border-top prevents margin-top from collapsing with
+    ///    the first child (CSS 2.1 § 8.3.1), so we drop `pending_*` to
+    ///    zero before the children land.
+    /// 3. Reserve `border_top + padding_top` worth of vertical space, then
+    ///    indent children horizontally by `padding_left` via the
+    ///    state-level `padding_offset_x` (read by `col_x`).
+    /// 4. Divert page ops into a fresh `Vec` so children render into an
+    ///    isolated buffer.
+    /// 5. After children render, reserve `padding_bottom + border_bottom`
+    ///    and rebuild `page.operations` as
+    ///    `saved_parent_ops + bg_border_ops + captured_children_ops`.
+    /// 6. `exit_container_node` handles the trailing margin-bottom.
+    fn render_self_paint_node(
+        &mut self,
+        doc: &mut PdfDocument,
+        bb: &crate::box_tree::BlockBox,
+        state: &mut RenderState,
+    ) -> Result<bool, String> {
+        let pad_top = bb.style.padding_top + bb.style.border_width;
+        let pad_bottom = bb.style.padding_bottom + bb.style.border_width;
+        let inner_indent_x = bb.style.padding_left + bb.style.border_width;
+        let inner_indent_right = bb.style.padding_right + bb.style.border_width;
+        // CSS 2.1 §8.3.1: padding-top / border-top (or padding-bottom /
+        // border-bottom) prevent the container's top (or bottom) margin
+        // from collapsing with its first (or last) child's. Without
+        // them, margins collapse and the container's bg/border still
+        // wraps the child — just from the post-fold top, not from a
+        // synthetic position above it.
+        let prevents_top_collapse = pad_top > 0.0;
+        let prevents_bottom_collapse = pad_bottom > 0.0;
+
+        self.enter_container_node(doc, bb, state);
+
+        let saved_pending_bottom_before = state.pending_bottom;
+        let mut fixed_outer_top: Option<f32> = None;
+        if prevents_top_collapse {
+            let combined = collapse_margins(state.pending_container_top, state.pending_bottom);
+            if combined != 0.0 {
+                state.cursor_y -= combined;
+            }
+            state.pending_container_top = 0.0;
+            state.pending_bottom = 0.0;
+            fixed_outer_top = Some(state.cursor_y);
+            state.cursor_y -= pad_top;
+        }
+        // When collapse is allowed, leave `pending_*` intact — the first
+        // child's margin-top fold absorbs them, and we'll read the
+        // resulting top edge from the snap below.
+
+        let saved_col_x = self.col_x(state.current_col, state);
+        let cx = saved_col_x;
+        let (box_x, box_width) = container_box_geometry(cx, state.col_width, &bb.style);
+
+        let saved_col_width = state.col_width;
+        let saved_padding_offset_x = state.padding_offset_x;
+        // The container occupies `margin + border + padding` on each
+        // side. Children render in the content box: shift `cx` right
+        // by `box_x - saved_col_x` (= margin_left) plus the inset and
+        // shrink the available column by both insets and both margins.
+        let left_inset = inner_indent_x + (box_x - saved_col_x);
+        let right_inset = inner_indent_right + bb.style.margin_right;
+        state.col_width = (state.col_width - left_inset - right_inset).max(0.0);
+        state.padding_offset_x = saved_padding_offset_x + left_inset;
+
+        let mut page = state.current_page.lock().unwrap();
+        let saved_ops = std::mem::take(&mut page.operations);
+        drop(page);
+
+        let child_rendered = self.render_nodes(doc, &bb.children, state)?;
+
+        state.col_width = saved_col_width;
+        state.padding_offset_x = saved_padding_offset_x;
+
+        // Resolve the container's outer top. Either we already fixed it
+        // (padding-top blocked collapse) or we read the value the first
+        // descendant leaf pinned via `note_container_paint_top`.
+        let snap_paint_top = state
+            .container_size_stack
+            .last()
+            .and_then(|s| s.paint_top)
+            .unwrap_or(state.cursor_y);
+        let outer_top = fixed_outer_top.unwrap_or(snap_paint_top);
+
+        let outer_bottom = if prevents_bottom_collapse {
+            // Children have advanced `cursor_y` past their last bottom
+            // margin already; that margin sits *inside* the container's
+            // box because padding-bottom blocks the collapse.
+            state.pending_bottom = 0.0;
+            state.cursor_y -= pad_bottom;
+            state.cursor_y
+        } else {
+            // No padding-bottom: child margin-bottom collapses with the
+            // container's, so the container's box ends at the child's
+            // last painted edge (`paint_bottom`), not at the post-margin
+            // `cursor_y`. Leave `pending_bottom` for `exit_container_node`
+            // to keep the chain rolling outward.
+            state
+                .container_size_stack
+                .last()
+                .and_then(|s| s.paint_bottom)
+                .unwrap_or(state.cursor_y)
+        };
+        let outer_height = (outer_top - outer_bottom).max(0.0);
+        let _ = saved_pending_bottom_before;
+
+        let mut decoration_ops: Vec<PdfOp> = Vec::new();
+        emit_self_paint_box_decoration(
+            &mut decoration_ops,
+            &bb.style,
+            box_x,
+            outer_bottom,
+            box_width,
+            outer_height,
+        );
+
+        let mut page = state.current_page.lock().unwrap();
+        let captured_ops = std::mem::take(&mut page.operations);
+        let mut combined = saved_ops;
+        combined.reserve(decoration_ops.len() + captured_ops.len());
+        combined.extend(decoration_ops);
+        combined.extend(captured_ops);
+        page.operations = combined;
+        drop(page);
+
+        self.exit_container_node(doc, bb, child_rendered, state);
+        Ok(child_rendered)
     }
 
     /// Thin adapter from `RenderState` to the legacy `render_table` args.

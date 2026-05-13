@@ -237,17 +237,26 @@ fn ua_style(tag: &str) -> UaStyle {
             // collapsing-margin behaviour.
             margin_top: 0.0,
         },
-        // <p> and the catch-all default. The HTML UA stylesheet gives
-        // `<p>` a `1em 0` margin, but routing both margins through the
-        // collapsing-margin path here would change layout for many
-        // existing fixtures that rely on the historic non-collapsing
-        // `spacing_after` semantics. Keep `margin_top: 0` so the legacy
-        // path stays unchanged for now; only headings opt in to
-        // collapsing margins.
-        _ => UaStyle {
+        // HTML5 UA stylesheet: `<p>` has `margin: 1em 0`. `<blockquote>`
+        // also gets a 1em top/bottom margin (plus 40px horizontal
+        // padding applied separately at flush time). Routing the top
+        // margin through here would require collapsing-margin support
+        // beyond what the legacy `spacing_after` model handles, so we
+        // only carry the bottom edge.
+        "p" | "blockquote" => UaStyle {
             font: "Helvetica",
             font_size: BASE,
             spacing_after: BASE,
+            margin_top: 0.0,
+        },
+        // Everything else — `<div>`, `<section>`, `<article>`, `<span>`,
+        // and the empty-string anonymous-wrapper key. HTML5 UA gives
+        // these zero margins; the historic 12pt `spacing_after` was a
+        // bug that inserted an extra paragraph-gap below every block.
+        _ => UaStyle {
+            font: "Helvetica",
+            font_size: BASE,
+            spacing_after: 0.0,
             margin_top: 0.0,
         },
     }
@@ -3161,10 +3170,12 @@ mod tests {
         }
     }
 
-    /// Non-heading tags fall back to the body defaults (Helvetica @ 12pt
-    /// with a 12pt `spacing_after`) and have no UA top margin. `<pre>`
-    /// keeps its monospace face but inherits the same vertical metrics
-    /// today (collapsing-margin support for `<pre>` is deferred).
+    /// Non-heading tags fall back to the body font (Helvetica @ 12pt)
+    /// and have no UA top margin. `<p>` / `<pre>` / `<blockquote>` keep
+    /// a 1em `spacing_after` (HTML5 UA `margin: 1em 0`); plain `<div>`-
+    /// like tags get `spacing_after: 0`. `<pre>` keeps its monospace
+    /// face but inherits the same vertical metrics today
+    /// (collapsing-margin support for `<pre>` is deferred).
     #[test]
     fn ua_default_tags_have_no_top_margin() {
         for tag in ["p", "div", "blockquote", "section", ""] {
