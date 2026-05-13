@@ -803,9 +803,7 @@ fn emit_self_paint_box_decoration(
         emit_rect_path(ops);
         ops.push(PdfOp::Fill);
     }
-    if style.border_width > 0.0
-        && !matches!(style.border_style, Some(css::BorderStyle::None))
-    {
+    if style.border_width > 0.0 && !matches!(style.border_style, Some(css::BorderStyle::None)) {
         let ((r, g, b), a) = split_rgba(style.border_color.unwrap_or((0.0, 0.0, 0.0, 1.0)));
         push_alpha_if_translucent(ops, a);
         ops.push(PdfOp::SetStrokeColor { r, g, b });
@@ -2030,9 +2028,7 @@ impl LayoutInner {
     }
 
     fn col_x(&self, col: u32, state: &RenderState) -> f32 {
-        self.margin_left
-            + col as f32 * (state.col_width + state.col_gap)
-            + state.padding_offset_x
+        self.margin_left + col as f32 * (state.col_width + state.col_gap) + state.padding_offset_x
     }
 
     /// Record the `cursor_y` at which the first painted child lands inside
@@ -2210,7 +2206,7 @@ impl LayoutInner {
 
     /// Render a decorated container that paints its own bg/border around
     /// the union of its children. Used by `render_nodes` when the box
-    /// tree post-pass flagged the BlockBox as `self_paint` — i.e. the
+    /// tree post-pass flagged the `BlockBox` as `self_paint` — i.e. the
     /// container holds mixed inline + block children and a single
     /// wrapper paragraph can't paint the decoration around everything.
     ///
@@ -2254,8 +2250,7 @@ impl LayoutInner {
         let saved_pending_bottom_before = state.pending_bottom;
         let mut fixed_outer_top: Option<f32> = None;
         if prevents_top_collapse {
-            let combined =
-                collapse_margins(state.pending_container_top, state.pending_bottom);
+            let combined = collapse_margins(state.pending_container_top, state.pending_bottom);
             if combined != 0.0 {
                 state.cursor_y -= combined;
             }

@@ -218,8 +218,7 @@ fn style_has_decoration(style: &BlockStyle) -> bool {
     style.background_color.is_some()
         || style.background_image.is_some()
         || style.background_gradient_color.is_some()
-        || (style.border_width > 0.0
-            && !matches!(style.border_style, Some(css::BorderStyle::None)))
+        || (style.border_width > 0.0 && !matches!(style.border_style, Some(css::BorderStyle::None)))
 }
 
 /// Walk the tree and flag decorated containers that hold mixed inline +
@@ -249,7 +248,7 @@ fn mark_self_paint_containers(nodes: &mut [Node]) {
             {
                 bb.self_paint = true;
                 let container_decoration = bb.style.clone();
-                for child in bb.children.iter_mut() {
+                for child in &mut bb.children {
                     if let Node::Block(child_bb) = child
                         && paragraph_shape(child_bb).is_some()
                         && wrapper_matches_parent(&child_bb.style, &container_decoration)
